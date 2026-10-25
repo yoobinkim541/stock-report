@@ -175,17 +175,49 @@ def validate_condition(condition: Mapping[str, Any]) -> list[str]:
     return errors
 
 
-def condition_requirements(condition: Mapping[str, Any], *, default_symbol: str,
-                           default_timeframe: str) -> set[tuple[str, str]]:
+def bind_condition_defaults(condition: Mapping[str, Any], *, default_symbol: str,
+                            default_timeframe: str) -> dict[str, Any]:
+    """Return the canonical tree with every leaf/field operand bound to a symbol and timeframe.
+
+    Requirements, evaluation and explanation must share this one tree so an omitted
+    symbol/timeframe means the same thing everywhere. Explicit values are preserved;
+    a field operand without its own symbol/timeframe inherits the bound leaf's values.
+    """
     root = normalize_condition(condition)
-    requirements: set[tuple[str, str]] = set()
     default_symbol = str(default_symbol or "").upper().strip()
     default_timeframe = str(default_timeframe or "1d").lower().strip() or "1d"
 
+    def bind(node: dict[str, Any]) -> dict[str, Any]:
+        if "op" in node:
+            node["children"] = [bind(child) for child in node.get("children") or []]
+            return node
+        symbol = str(node.get("symbol") or default_symbol).upper().strip()
+        timeframe = str(node.get("timeframe") or default_timeframe).lower().strip()
+        if symbol:
+            node["symbol"] = symbol
+        node["timeframe"] = timeframe
+        operand = node.get("value")
+        if isinstance(operand, dict):
+            operand_symbol = str(operand.get("symbol") or symbol).upper().strip()
+            if operand_symbol:
+                operand["symbol"] = operand_symbol
+            operand["timeframe"] = str(operand.get("timeframe") or timeframe).lower().strip()
+        return node
+
+    return bind(root)
+
+
+def condition_requirements(condition: Mapping[str, Any], *, default_symbol: str,
+                           default_timeframe: str) -> set[tuple[str, str]]:
+    root = bind_condition_defaults(
+        condition, default_symbol=default_symbol, default_timeframe=default_timeframe,
+    )
+    requirements: set[tuple[str, str]] = set()
+
     def add_operand(operand: Mapping[str, Any]) -> None:
         requirements.add((
-            str(operand.get("symbol") or default_symbol).upper().strip(),
-            str(operand.get("timeframe") or default_timeframe).lower().strip(),
+            str(operand.get("symbol") or "").upper().strip(),
+            str(operand.get("timeframe") or "").lower().strip(),
         ))
 
     def walk(node: Mapping[str, Any]) -> None:
@@ -218,8 +250,14 @@ def _leaf_explanation(leaf: Mapping[str, Any]) -> str:
     return f"{symbol} {timeframe} {field} {operator} {target}"
 
 
-def explain_condition(condition: Mapping[str, Any]) -> str:
-    root = normalize_condition(condition)
+def explain_condition(condition: Mapping[str, Any], *, default_symbol: str | None = None,
+                      default_timeframe: str | None = None) -> str:
+    if default_symbol or default_timeframe:
+        root = bind_condition_defaults(
+            condition, default_symbol=default_symbol or "", default_timeframe=default_timeframe or "",
+        )
+    else:
+        root = normalize_condition(condition)
 
     def explain(node: Mapping[str, Any]) -> str:
         if "op" not in node:
@@ -260,16 +298,26 @@ def _context_for(leaf: Mapping[str, Any], contexts: Mapping[tuple[str, str], Map
     return (symbol, timeframe), None
 
 
-def _threshold_values(value: Any, contexts, current_context) -> tuple[Any, Any, str | None]:
+def _settled_context(context: Mapping[str, Any], confirmation: Any) -> Mapping[str, Any]:
+    """A bar_close leaf reads the last closed bar pair when the newest bar is still forming."""
+    if confirmation == "bar_close" and context.get("confirmed") is False and isinstance(context.get("closed"), Mapping):
+        return context["closed"]
+    return context
+
+
+def _threshold_values(value: Any, contexts, confirmation: Any) -> tuple[Any, Any, str | None, Any]:
     if not isinstance(value, Mapping):
-        return value, value, None
+        return value, value, None, None
     key, context = _context_for(value, contexts)
     if context is None:
-        return None, None, f"missing context: {key[0]} {key[1]}"
+        return None, None, f"missing context: {key[0]} {key[1]}", None
+    context = _settled_context(context, confirmation)
+    if confirmation == "bar_close" and context.get("confirmed") is False:
+        return None, None, f"bar not confirmed: {key[0]} {key[1]}", None
     field = str(value.get("field") or "")
     previous = context.get("previous") if isinstance(context.get("previous"), Mapping) else {}
     current = context.get("current") if isinstance(context.get("current"), Mapping) else {}
-    return previous.get(field), current.get(field), None
+    return previous.get(field), current.get(field), None, context.get("as_of")
 
 
 def _drawing_threshold(leaf: Mapping[str, Any], current_time: Any) -> float | None:
@@ -399,10 +447,13 @@ def evaluate_condition(condition, contexts, *, now: str | None = None) -> dict[s
         if expires is not None and reference > expires:
             trace.append({**base, "status": "false", "matched": False, "reason": "condition expired"})
             return "false", "condition expired"
+        context = _settled_context(context, leaf.get("confirmation"))
         if leaf.get("confirmation") == "bar_close" and context.get("confirmed") is False:
             trace.append({**base, "status": "unknown", "matched": False, "reason": "bar not confirmed"})
             return "unknown", "bar not confirmed"
-        if context.get("session") and leaf.get("session") != "all" and context.get("session") != leaf.get("session"):
+        # regular 만 정규장 봉으로 제한한다. extended/all 은 정규장+시간외 봉을 모두 포함한다
+        # (chart_data_policy 의 extended 정책은 공급자 봉을 모두 유지).
+        if context.get("session") and leaf.get("session") == "regular" and context.get("session") != "regular":
             trace.append({**base, "status": "unknown", "matched": False, "reason": "session mismatch"})
             return "unknown", "session mismatch"
         if leaf.get("operator") == "happened_within":
@@ -414,13 +465,15 @@ def evaluate_condition(condition, contexts, *, now: str | None = None) -> dict[s
         current_values = context.get("current") if isinstance(context.get("current"), Mapping) else {}
         field = str(leaf.get("field") or "close")
         previous, current = previous_values.get(field), current_values.get(field)
+        operand_as_of = None
         if leaf.get("type") == "drawing_line":
-            threshold = _drawing_threshold(leaf, current_values.get("time") or context.get("as_of") or now)
-            threshold_previous = threshold
-            threshold_current = threshold
+            # Interpolate the line at each bar's own time; a crossing without the
+            # previous bar time cannot be judged.
+            threshold_previous = _drawing_threshold(leaf, previous_values.get("time"))
+            threshold_current = _drawing_threshold(leaf, current_values.get("time") or context.get("as_of") or now)
         else:
-            threshold_previous, threshold_current, error = _threshold_values(
-                leaf.get("value"), normalized_contexts, context,
+            threshold_previous, threshold_current, error, operand_as_of = _threshold_values(
+                leaf.get("value"), normalized_contexts, leaf.get("confirmation"),
             )
             if error:
                 trace.append({**base, "status": "unknown", "matched": False, "reason": error})
@@ -429,12 +482,15 @@ def evaluate_condition(condition, contexts, *, now: str | None = None) -> dict[s
             str(leaf.get("operator")), previous, current,
             threshold_previous, threshold_current, str(leaf.get("unit") or "absolute"),
         )
-        trace.append({
+        row = {
             **base, "status": status, "matched": status == "true", "reason": reason,
             "previous_value": _number(previous), "current_value": _number(current),
             "threshold": threshold, "as_of": context.get("as_of"),
             "source": leaf.get("source") or leaf.get("id") or "",
-        })
+        }
+        if operand_as_of is not None:
+            row["operand_as_of"] = operand_as_of
+        trace.append(row)
         return status, reason
 
     def walk(node: Mapping[str, Any], path: str) -> tuple[str, str]:

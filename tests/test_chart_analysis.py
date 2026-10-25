@@ -79,3 +79,44 @@ def test_multi_timeframe_summary_pullback_within_uptrend_is_mixed_not_down():
 
     row = out["rows"][0]
     assert row["trend"] == "mixed", f"눌림목(ma20>=ma60 유지)인데 {row['trend']} 로 분류됨"
+
+
+# --- C-09 / C-12 회귀 ---------------------------------------------------------
+
+def test_multi_timeframe_rsi_uses_shared_definition_for_rising_series():
+    """C-09: 연속 상승(loss=0)은 RSI 100 과매수 — NaN→neutral 로 숨기지 않는다."""
+    from dashboard import chart_studies
+
+    hist = _hist(100, step=1.0)
+    out = ca.multi_timeframe_summary(lambda ticker, tf: hist, "AAPL")
+
+    expected = float(chart_studies.run_study("rsi", hist).series["RSI 14"].iloc[-1])
+    for row in out["rows"]:
+        assert row["rsi_14"] == round(expected, 2) == 100.0
+        assert row["rsi_zone"] == "overbought"
+
+
+def test_multi_timeframe_rsi_falling_and_flat_series():
+    falling = ca.multi_timeframe_summary(lambda ticker, tf: _hist(60, start=200.0, step=-1.0), "AAPL")
+    flat = ca.multi_timeframe_summary(lambda ticker, tf: _hist(60, step=0.0), "AAPL")
+
+    assert {row["rsi_zone"] for row in falling["rows"]} == {"oversold"}
+    assert {row["rsi_14"] for row in falling["rows"]} == {0.0}
+    assert {row["rsi_zone"] for row in flat["rows"]} == {"neutral"}
+    assert {row["rsi_14"] for row in flat["rows"]} == {50.0}
+
+
+def test_relative_strength_aligns_intraday_asset_with_daily_benchmark():
+    """C-12: 같은 거래일의 14:00 UTC 자산 봉과 00:00 UTC 벤치마크 일봉을 정렬한다."""
+    days = pd.bdate_range("2026-01-01", periods=100)
+    asset = _hist(100, step=0.4)
+    asset.index = (days + pd.Timedelta(hours=14)).tz_localize("UTC")
+    bench = _hist(100, step=0.1)
+    bench.index = days.tz_localize("UTC")
+
+    out = ca.relative_strength_summary(asset, bench)
+
+    assert out["ok"] is True, out
+    assert out["trading_days"] == 100
+    assert out["as_of"] == days[-1].date().isoformat()
+    assert out["relative_strength_60d"] > 0

@@ -50,8 +50,8 @@ def test_batch_api_persists_nonmatching_evaluation_trace(monkeypatch, tmp_path):
     response = client.post("/api/chart-alerts/evaluate-batch", json={
         "workspace_id": "w1",
         "bars": {"AAPL": [
-            {"time": "2026-08-08T11:55:00Z", "close": 100},
-            {"time": "2026-08-08T12:00:00Z", "close": 101},
+            {"time": "2026-08-07T15:55:00Z", "close": 100},
+            {"time": "2026-08-07T16:00:00Z", "close": 101},
         ]},
     })
 
@@ -61,3 +61,66 @@ def test_batch_api_persists_nonmatching_evaluation_trace(monkeypatch, tmp_path):
     state = storage.get_chart_alert_rule(rule["id"])["last_state"]
     assert state["matched"] is False
     assert state["trace"][0]["status"] == "false"
+
+
+def _server_rule(monkeypatch, tmp_path, **extra):
+    from agent_console import chart_alert_worker
+
+    monkeypatch.setenv("AGENT_CONSOLE_DB", str(tmp_path / "console.sqlite3"))
+    monkeypatch.setattr(chart_alert_worker, "_LOCK_TARGET", str(tmp_path / "chart_alert_worker"))
+    return storage.save_chart_alert_rule({
+        "workspace_id": "w1",
+        "store_key": "cw:w1:AAPL:5m:lin",
+        "symbol": "AAPL",
+        "timeframe": "5m",
+        "frequency": "once",
+        "message": "AAPL crossed 100",
+        "condition": {"type": "price", "operator": "crossing_up", "value": 100},
+        **extra,
+    })
+
+
+_CROSS_BARS = {"AAPL": [
+    {"time": "2026-08-07T15:55:00Z", "close": 99},
+    {"time": "2026-08-07T16:00:00Z", "close": 101},
+]}
+
+
+def test_C_fix_alerts_batch_api_retries_failed_send_and_never_resends_delivered(monkeypatch, tmp_path):
+    from agent_console import chart_alert_dispatcher
+    from agent_console.server import create_app
+
+    rule = _server_rule(monkeypatch, tmp_path)
+    outcomes = [False, True, True]
+    sent: list[str] = []
+    monkeypatch.setattr(chart_alert_dispatcher, "send_alert_message", lambda text: sent.append(text) or outcomes[len(sent) - 1])
+    client = create_app().test_client()
+    body = {"workspace_id": "w1", "bars": _CROSS_BARS, "notify": True, "as_of": "2026-08-07T17:00:00Z"}
+
+    failed = client.post("/api/chart-alerts/evaluate-batch", json=body).json
+    assert failed["notification"]["failed"] == 1
+    assert storage.get_chart_alert_rule(rule["id"])["last_state"]["triggered"] is False
+
+    retried = client.post("/api/chart-alerts/evaluate-batch", json=body).json
+    assert retried["notification"]["delivered"] == 1
+    assert storage.get_chart_alert_rule(rule["id"])["last_state"]["triggered"] is True
+
+    again = client.post("/api/chart-alerts/evaluate-batch", json=body).json
+    assert again["notification"]["attempted"] == 0
+    assert len(sent) == 2
+
+
+def test_C_fix_alerts_single_rule_evaluate_api_does_not_consume_once(monkeypatch, tmp_path):
+    from agent_console.server import create_app
+
+    rule = _server_rule(monkeypatch, tmp_path)
+    client = create_app().test_client()
+
+    response = client.post(f"/api/chart-alerts/rules/{rule['id']}/evaluate", json={
+        "previous_price": 99, "current_price": 101, "as_of": "2026-08-07T16:00:00Z",
+    })
+
+    assert response.json["triggered"] is True
+    state = storage.get_chart_alert_rule(rule["id"])["last_state"]
+    assert not state.get("triggered")
+    assert state["manual_evaluation"]["triggered"] is True

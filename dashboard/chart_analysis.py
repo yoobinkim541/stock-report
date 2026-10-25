@@ -1,11 +1,15 @@
 """Deterministic chart analysis helpers for the workspace rail."""
 from __future__ import annotations
 
+import math
 from typing import Callable
 
 import pandas as pd
 
+from dashboard import chart_studies
 from ohlc_utils import normalize_ohlc_frame
+
+_RELATIVE_STRENGTH_MIN_DAYS = 80
 
 
 def _close(hist) -> pd.Series | None:
@@ -14,14 +18,6 @@ def _close(hist) -> pd.Series | None:
         return None
     s = df["Close"].astype(float).dropna()
     return s if len(s) else None
-
-
-def _rsi(close: pd.Series, n: int = 14) -> pd.Series:
-    delta = close.diff()
-    gain = delta.clip(lower=0).rolling(n).mean()
-    loss = (-delta.clip(upper=0)).rolling(n).mean()
-    rs = gain / loss.replace(0, float("nan"))
-    return 100 - 100 / (1 + rs)
 
 
 def seasonality_summary(hist) -> dict:
@@ -47,16 +43,24 @@ def seasonality_summary(hist) -> dict:
 
 
 def relative_strength_summary(hist, benchmark) -> dict:
+    """60/20 trading-day relative strength on the common trading days.
+
+    Both sides are collapsed to one close per trading day by
+    ``chart_studies.relative_performance`` so intraday asset bars and daily
+    benchmark bars compare the same days and the UI's "일" units hold.
+    """
     close = _close(hist)
     bench = _close(benchmark)
     if close is None or bench is None:
         return {"ok": False, "reason": "missing_close"}
-    df = pd.concat([close.rename("asset"), bench.rename("benchmark")], axis=1).dropna()
-    if len(df) < 80:
-        return {"ok": False, "reason": "not_enough_history"}
-    rel = (df["asset"] / df["asset"].iloc[0]) / (df["benchmark"] / df["benchmark"].iloc[0])
-    rs_60 = float(rel.pct_change(60).iloc[-1]) if len(rel) > 60 else 0.0
-    mom_20 = float(rel.pct_change(20).iloc[-1] - rel.pct_change(60).iloc[-1]) if len(rel) > 60 else 0.0
+    table = chart_studies.relative_performance(close, bench)
+    if len(table) < _RELATIVE_STRENGTH_MIN_DAYS:
+        return {"ok": False, "reason": "not_enough_history", "trading_days": int(len(table))}
+    last = table.iloc[-1]
+    rs_60 = float(last["relative_return_60d"])
+    mom_20 = float(last["relative_momentum_20d"])
+    if not (math.isfinite(rs_60) and math.isfinite(mom_20)):
+        return {"ok": False, "reason": "invalid_benchmark", "trading_days": int(len(table))}
     if rs_60 >= 0 and mom_20 >= 0:
         quadrant = "leading"
     elif rs_60 >= 0 and mom_20 < 0:
@@ -70,6 +74,8 @@ def relative_strength_summary(hist, benchmark) -> dict:
         "relative_strength_60d": round(rs_60, 6),
         "relative_momentum_20d": round(mom_20, 6),
         "quadrant": quadrant,
+        "trading_days": int(len(table)),
+        "as_of": table.index[-1].date().isoformat(),
     }
 
 
@@ -156,10 +162,10 @@ def multi_timeframe_summary(load_ohlc: Callable[[str, str], object], ticker: str
             trend = "down"
         else:
             trend = "mixed"
-        rsi = _rsi(close).dropna()
-        rsi_zone = "neutral"
-        if len(rsi):
-            rv = float(rsi.iloc[-1])
-            rsi_zone = "overbought" if rv >= 70 else "oversold" if rv <= 30 else "neutral"
-        rows.append({"timeframe": tf, "ok": True, "trend": trend, "rsi_zone": rsi_zone, "last": round(last, 4)})
+        rsi_value = chart_studies.rsi(close).iloc[-1]
+        rsi_14 = round(float(rsi_value), 2) if pd.notna(rsi_value) else None
+        rows.append({
+            "timeframe": tf, "ok": True, "trend": trend,
+            "rsi_14": rsi_14, "rsi_zone": chart_studies.rsi_zone(rsi_14), "last": round(last, 4),
+        })
     return {"ok": any(row.get("ok") for row in rows), "ticker": ticker, "rows": rows}

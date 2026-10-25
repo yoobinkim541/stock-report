@@ -360,3 +360,145 @@ def test_orderflow_empty_state_message_is_reason_specific():
         "capture_empty"
     )
     assert "리플레이" in chart_workbench_ui._orderflow_empty_message("replay_isolated")
+
+
+# --- C-03 / C-14 / C-01 / C-02 / C-12 회귀 -------------------------------------
+
+def test_analysis_snapshot_relative_strength_uses_daily_bars_for_intraday_chart():
+    """C-12: 1h 차트에서도 상대강도는 거래일 단위 일봉끼리 비교한다."""
+    document = chart_document.default_chart_document("MSFT")
+    document["timeframe"] = "1h"
+    days = pd.bdate_range("2026-01-01", periods=100)
+    intraday = _hist(100, step=0.4)
+    intraday.index = pd.date_range("2026-05-01 13:30", periods=100, freq="h", tz="UTC")
+    asset_daily = _hist(100, step=0.4)
+    asset_daily.index = (days + pd.Timedelta(hours=14)).tz_localize("UTC")
+    bench_daily = _hist(100, step=0.1)
+    bench_daily.index = days.tz_localize("UTC")
+    seen = []
+
+    def load_ohlc(symbol, timeframe):
+        seen.append((symbol, timeframe))
+        if timeframe != "1d":
+            return intraday
+        return bench_daily if symbol == "QQQ" else asset_daily
+
+    out = chart_workbench.build_analysis_snapshot(
+        document, intraday, ohlc_loader=load_ohlc,
+        fundamental_loader=lambda _symbol: {}, alert_loader=lambda _symbol: [],
+    )
+
+    assert ("MSFT", "1d") in seen
+    assert out["relative_strength"]["ok"] is True, out["relative_strength"]
+    assert out["relative_strength"]["trading_days"] == 100
+    assert out["context"] == {
+        "timeframe": "1h", "session": "regular", "timezone": "America/New_York", "replay_cursor": None,
+    }
+
+
+_IDENTITY_SCRIPT = """
+import sys
+sys.path.insert(0, {root!r})
+import pandas as pd
+import streamlit as st
+from dashboard import chart_workbench_ui
+variant = st.session_state.get("variant", 0)
+values = list(range(100, 200)) + ([200] if variant == 2 else [])
+hist = pd.DataFrame({{
+    "Open": values, "High": [v + 1 for v in values], "Low": [v - 1 for v in values],
+    "Close": values, "Volume": [1000] * len(values),
+}}, index=pd.date_range("2026-08-03 13:30", periods=len(values), freq="h", tz="UTC"))
+snapshot = {{
+    "symbol": "AAPL", "benchmark": "QQQ", "trend": {{}}, "patterns": [], "multi_timeframe": {{}},
+    "seasonality": {{}}, "relative_strength": {{}}, "fundamentals": {{}}, "alerts": [], "errors": {{}},
+    "data_quality": {{}}, "orderflow": {{"ok": False, "reason": "capture_not_configured"}},
+    "context": {{"timeframe": "1d" if variant == 1 else "1h", "session": "regular", "replay_cursor": None}},
+}}
+chart_workbench_ui.render_analysis_rail(snapshot, hist=hist)
+"""
+
+
+def _rendered_text(at):
+    parts = [str(item.value) for item in at.markdown]
+    parts += [str(item.value) for item in at.caption]
+    parts += [str(item.value) for item in at.warning]
+    return " ".join(parts)
+
+
+def test_vision_cache_is_keyed_by_analysis_identity_and_reanalysis_is_explicit(monkeypatch):
+    pytest.importorskip("streamlit")
+    from streamlit.testing.v1 import AppTest
+    from dashboard import chart_vision
+
+    calls = []
+
+    def _analyze(hist, ticker, **kwargs):
+        calls.append(kwargs.get("identity"))
+        return {
+            "ok": True, "summary": f"분석 {len(calls)}회차", "identity": kwargs.get("identity"),
+            "patterns": [{"kind": "triangle_convergence", "confidence": 0.8, "description": "", "implication": ""}],
+        }
+
+    monkeypatch.setattr(chart_vision, "analyze_chart_patterns", _analyze)
+    at = AppTest.from_string(_IDENTITY_SCRIPT.format(root=ROOT), default_timeout=60).run()
+    assert [b.label for b in at.button] == ["AI로 패턴 분석하기"]
+
+    at.button[0].click().run()
+    assert len(calls) == 1
+    assert calls[0]["timeframe"] == "1h"
+    assert "분석 1회차" in _rendered_text(at)
+
+    at.run()  # 같은 identity 재실행/재방문 — 캐시만 사용
+    assert len(calls) == 1
+    assert [b.label for b in at.button] == ["다시 분석"]
+    assert "분석 1회차" in _rendered_text(at)
+
+    at.button[0].click().run()  # 명시적 다시 분석만 새 호출
+    assert len(calls) == 2
+    assert "분석 2회차" in _rendered_text(at)
+
+    for variant in (1, 2):  # 다른 봉 단위, 같은 날 새 봉
+        at.session_state["variant"] = variant
+        at.run()
+        assert not at.exception, str(at.exception)
+        assert "분석 2회차" not in _rendered_text(at)
+        assert [b.label for b in at.button] == ["AI로 패턴 분석하기"]
+    assert len(calls) == 2
+
+    at.session_state["variant"] = 0
+    at.run()
+    assert "분석 2회차" in _rendered_text(at)
+    assert len(calls) == 2
+
+
+def test_vision_section_warns_on_schema_violation_and_hides_ungrounded_numbers(monkeypatch):
+    pytest.importorskip("streamlit")
+    from streamlit.testing.v1 import AppTest
+    from dashboard import chart_vision
+
+    responses = {
+        "bad": '{"patterns": [{"kind": "wedge", "confidence": "certain"}], "summary": ""}',
+        "ungrounded": (
+            '{"patterns": [{"kind": "wedge", "confidence": 0.6, '
+            '"description": "현재가 999999, RSI 999, 지지선 -100", "implication": ""}], '
+            '"summary": "목표가 888888"}'
+        ),
+    }
+    mode = {"value": "bad"}
+    monkeypatch.setattr(chart_vision, "_try_vision_prompt", lambda prompt, image_path, **_: responses[mode["value"]])
+
+    at = AppTest.from_string(_IDENTITY_SCRIPT.format(root=ROOT), default_timeout=60).run()
+    at.button[0].click().run()
+    assert not at.exception, str(at.exception)
+    assert any("invalid_llm_schema" in str(w.value) for w in at.warning)
+    assert "뚜렷한 고전 패턴이 식별되지 않았습니다" not in _rendered_text(at)
+
+    mode["value"] = "ungrounded"
+    at.button[0].click().run()
+    assert not at.exception, str(at.exception)
+    body = _rendered_text(at)
+    assert "wedge" in body
+    assert "999999" not in body and "888888" not in body and "-100" not in body
+    assert "미검증 수치 주장 2건" in body
+    assert "관측값(봉 데이터 계산): 현재가 199" in body
+    assert "RSI(14) 100.0" in body

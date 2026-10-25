@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 
 from flask import Flask, jsonify, request, send_from_directory
 
+import safe_io
 from dashboard import chart_replay
 
-from . import agent, chart_alert_dispatcher, chart_alert_runner, chart_alert_worker, chart_alerts, context, shared_memory, storage, strategy_studio, wiki
+from . import agent, chart_alert_worker, chart_alerts, context, shared_memory, storage, strategy_studio, wiki
 
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -542,12 +544,16 @@ def create_app() -> Flask:
             as_of=payload.get("as_of"),
         )
         if result.get("triggered"):
-            storage.update_chart_alert_state(rule_id, {
+            # 클라이언트 가격으로 한 수동 평가다 — 발송하지 않으므로 once 완료·무장·pending 같은
+            # worker 발송 상태를 건드리지 않고 별도 키에만 기록한다.
+            last_state = dict(rule.get("last_state") or {})
+            last_state["manual_evaluation"] = {
                 "triggered": True,
                 "event": result.get("event"),
                 "last_price": payload.get("current_price"),
-                "last_checked_at": payload.get("as_of"),
-            })
+                "checked_at": payload.get("as_of"),
+            }
+            storage.update_chart_alert_state(rule_id, last_state)
         return jsonify({"ok": True, **result})
 
     @app.post("/api/chart-alerts/evaluate-batch")
@@ -556,30 +562,23 @@ def create_app() -> Flask:
         workspace_id = str(payload.get("workspace_id") or "").strip() or None
         symbol = str(payload.get("symbol") or "").strip().upper() or None
         bars = payload.get("bars") if isinstance(payload.get("bars"), dict) else {}
-        rules = storage.list_chart_alert_rules(
-            workspace_id=workspace_id,
-            symbol=symbol,
-            enabled=True,
-            limit=int(payload.get("limit") or 200),
-        )
-        evaluations: list[dict] = []
-        events = chart_alert_runner.evaluate_alert_rules(
-            rules, bars, as_of=payload.get("as_of"), state_sink=evaluations,
-        )
-        for state in evaluations:
-            alert_id = str(state.get("rule_id") or "").strip()
-            if alert_id:
-                storage.update_chart_alert_state(alert_id, state)
-        notification = {"attempted": 0, "delivered": 0, "failed": 0, "failures": []}
-        if bool(payload.get("notify")) and events:
-            notification = chart_alert_dispatcher.dispatch_alert_events(events)
-        return jsonify({
-            "ok": True,
-            "event_count": len(events),
-            "events": events,
-            "evaluations": evaluations,
-            "notification": notification,
-        })
+        as_of = str(payload.get("as_of") or "").strip() or datetime.now(timezone.utc).isoformat(timespec="seconds")
+        try:
+            with chart_alert_worker.alert_cycle_lock():
+                rules = storage.list_chart_alert_rules(
+                    workspace_id=workspace_id,
+                    symbol=symbol,
+                    enabled=True,
+                    limit=int(payload.get("limit") or 200),
+                )
+                fundamentals, missing_fundamentals = chart_alert_worker.load_rule_fundamentals(rules)
+                outcome = chart_alert_worker.evaluate_and_deliver(
+                    rules, bars, as_of=as_of, notify=bool(payload.get("notify")),
+                    fundamentals_by_symbol=fundamentals,
+                )
+        except safe_io.LockTimeout:
+            return jsonify({"ok": False, "error": "chart alert evaluation already running"}), 409
+        return jsonify({"ok": True, "as_of": as_of, "missing_fundamentals": missing_fundamentals, **outcome})
 
     @app.get("/api/chart-replay/sessions")
     def chart_replay_session_list():

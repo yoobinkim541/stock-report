@@ -1000,8 +1000,17 @@ def _render_analysis_rail(
         "freshness": "provider-dependent",
         "quality": "indicative",
     })
+    # 리플레이 커서는 분석 identity(AI 시각 분석 캐시 키)에만 쓰는 사본에 싣는다 —
+    # panel["document"] 로 저장되는 문서에는 리플레이 상태를 남기지 않는다.
+    analysis_document = {
+        **document,
+        "replay": {
+            "active": replay_until is not None,
+            "cursor": pd.Timestamp(replay_until).isoformat() if replay_until is not None else None,
+        },
+    }
     snapshot = chart_workbench.build_analysis_snapshot(
-        document,
+        analysis_document,
         hist,
         ohlc_loader=_replay_loader,
         fundamental_loader=lambda symbol: cached.valuation(symbol) or {},

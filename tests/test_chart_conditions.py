@@ -9,8 +9,8 @@ from dashboard import chart_conditions
 def contexts():
     return {
         ("AAPL", "1d"): {
-            "previous": {"close": 198.0, "rsi_14": 54.0, "forward_pe": 24.0, "relative_return": 2.0},
-            "current": {"close": 202.0, "rsi_14": 58.0, "forward_pe": 24.5, "relative_return": 3.5},
+            "previous": {"time": "2026-08-08T11:00:00Z", "close": 198.0, "rsi_14": 54.0, "forward_pe": 24.0, "relative_return": 2.0},
+            "current": {"time": "2026-08-08T12:00:00Z", "close": 202.0, "rsi_14": 58.0, "forward_pe": 24.5, "relative_return": 3.5},
             "events": [{"date": "2026-08-08T11:30:00Z", "kind": "earnings", "label": "beat"}],
             "as_of": "2026-08-08T12:00:00Z",
         },
@@ -145,7 +145,7 @@ def test_cross_symbol_operand_confirmation_expiration_and_session(contexts):
     }
     waiting = {**cross_symbol, "confirmation": "bar_close"}
     expired = {**cross_symbol, "expires_at": "2026-08-07T12:00:00Z"}
-    wrong_session = {**cross_symbol, "session": "extended"}
+    extended_leaf = {**cross_symbol, "session": "extended"}
 
     assert chart_conditions.condition_requirements(
         cross_symbol, default_symbol="MSFT", default_timeframe="5m",
@@ -155,7 +155,10 @@ def test_cross_symbol_operand_confirmation_expiration_and_session(contexts):
     assert chart_conditions.evaluate_condition(
         expired, contexts, now="2026-08-08T12:00:00Z",
     )["status"] == "false"
-    assert chart_conditions.evaluate_condition(wrong_session, contexts)["status"] == "unknown"
+    # extended 조건은 정규장 봉도 포함하고, regular 조건은 시간외 봉에서 판정하지 않는다.
+    assert chart_conditions.evaluate_condition(extended_leaf, contexts)["matched"] is True
+    contexts[("AAPL", "1d")] = {**contexts[("AAPL", "1d")], "session": "extended"}
+    assert chart_conditions.evaluate_condition(cross_symbol, contexts)["status"] == "unknown"
 
 
 def test_malformed_evaluation_returns_unknown_trace_instead_of_raising():
@@ -164,3 +167,74 @@ def test_malformed_evaluation_returns_unknown_trace_instead_of_raising():
     assert result["matched"] is False
     assert result["status"] == "unknown"
     assert "children" in result["reason"]
+
+
+# ── C-fix-alerts: 경사선 교차는 각 봉 시각의 선값으로, 기본 symbol 결합 ──
+
+def _line_context(previous_close, current_close, *, previous_time="2026-08-03T14:00:00Z"):
+    previous = {"close": previous_close}
+    if previous_time:
+        previous["time"] = previous_time
+    return {("AAPL", "1h"): {
+        "previous": previous,
+        "current": {"close": current_close, "time": "2026-08-03T15:00:00Z"},
+        "as_of": "2026-08-03T15:00:00Z",
+    }}
+
+
+def _line(operator, y0=100.0, y1=110.0):
+    return {
+        "type": "drawing_line", "symbol": "AAPL", "timeframe": "1h", "operator": operator,
+        "x0": "2026-08-03T14:00:00Z", "y0": y0, "x1": "2026-08-03T15:00:00Z", "y1": y1,
+    }
+
+
+@pytest.mark.parametrize("operator, line, closes, status", [
+    ("crossing_up", (100, 110), (105, 115), "false"),     # 위→위 (선 100→110)
+    ("crossing_up", (100, 110), (95, 105), "false"),      # 아래→아래
+    ("crossing_up", (100, 110), (99, 111), "true"),       # 아래→위
+    ("crossing_up", (100, 110), (99, 110), "true"),       # 정확 접촉
+    ("crossing_down", (110, 100), (111, 99), "true"),     # 하락선 위→아래
+    ("crossing_down", (110, 100), (105, 95), "false"),    # 하락선 아래→아래
+    ("crossing", (100, 100), (99, 101), "true"),          # 수평선
+])
+def test_C_fix_alerts_sloped_line_crossing_uses_line_value_at_each_bar(operator, line, closes, status):
+    result = chart_conditions.evaluate_condition(_line(operator, *line), _line_context(*closes))
+
+    assert result["status"] == status
+
+
+def test_C_fix_alerts_sloped_line_crossing_without_previous_time_is_unknown():
+    result = chart_conditions.evaluate_condition(
+        _line("crossing_up"), _line_context(99, 111, previous_time=None),
+    )
+
+    assert result["status"] == "unknown"
+    assert result["reason"] == "missing previous value"
+
+
+def test_C_fix_alerts_bound_defaults_resolve_omitted_leaf_among_multiple_contexts():
+    condition = {"op": "all", "children": [
+        {"type": "price", "operator": "greater_than", "value": 100},
+        {"type": "price", "timeframe": "1d", "operator": "greater_than", "value": 100},
+        {"type": "price", "symbol": "QQQ", "timeframe": "1h", "operator": "greater_than",
+         "value": {"field": "vwap"}},
+    ]}
+    bound = chart_conditions.bind_condition_defaults(condition, default_symbol="aapl", default_timeframe="1h")
+    contexts = {
+        ("AAPL", "1h"): {"previous": {"close": 100.0}, "current": {"close": 101.0}},
+        ("AAPL", "1d"): {"previous": {"close": 100.0}, "current": {"close": 102.0}},
+        ("QQQ", "1h"): {"previous": {"close": 500.0, "vwap": 499.0}, "current": {"close": 501.0, "vwap": 500.0}},
+    }
+
+    assert [(leaf["symbol"], leaf["timeframe"]) for leaf in bound["children"]] == [
+        ("AAPL", "1h"), ("AAPL", "1d"), ("QQQ", "1h"),
+    ]
+    assert bound["children"][2]["value"] == {"field": "vwap", "symbol": "QQQ", "timeframe": "1h"}
+    assert chart_conditions.evaluate_condition(bound, contexts)["status"] == "true"
+    assert chart_conditions.condition_requirements(
+        condition, default_symbol="AAPL", default_timeframe="1h",
+    ) == set(contexts)
+    assert chart_conditions.explain_condition(
+        condition, default_symbol="AAPL", default_timeframe="1h",
+    ).startswith("ALL(AAPL 1h close greater_than 100; AAPL 1d close")

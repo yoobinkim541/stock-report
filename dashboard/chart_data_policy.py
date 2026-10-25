@@ -149,7 +149,8 @@ def apply_session_policy(hist, *, market: str, timeframe: str, policy: str,
     ))
 
 
-def _bar_seconds(timeframe: str) -> int | None:
+def bar_seconds(timeframe: str) -> int | None:
+    """Length of one intraday bar in seconds; None for daily/weekly/monthly or unknown timeframes."""
     value = _normalized_timeframe(timeframe)
     if value in _DAILY_TIMEFRAMES:
         return None
@@ -257,11 +258,11 @@ def chart_data_status(hist, *, requested_timeframe: str, actual_timeframe: str,
         status["freshness"] = explicit_freshness
         return status
 
-    bar_seconds = _bar_seconds(requested)
-    if bar_seconds is None:
+    seconds = bar_seconds(requested)
+    if seconds is None:
         return status
-    realtime_limit = max(90, 2 * bar_seconds)
-    delayed_limit = max(1_200, 2 * bar_seconds)
+    realtime_limit = max(90, 2 * seconds)
+    delayed_limit = max(1_200, 2 * seconds)
     if explicit_freshness == "realtime" and age_seconds <= realtime_limit:
         status["freshness"] = "realtime"
     elif age_seconds <= delayed_limit:

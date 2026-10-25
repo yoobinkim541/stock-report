@@ -1,4 +1,18 @@
-"""Safe, module-registered chart studies and strategy preview conversion."""
+"""Safe, module-registered chart studies and strategy preview conversion.
+
+This module is the single source of truth for indicator definitions shared by
+the chart studies, the deterministic analysis rail (``chart_analysis``) and the
+chart alert runner. Callers must use the public functions below instead of
+re-implementing formulas:
+
+- ``rsi``: Wilder RSI. NaN means "not computable" (fewer than ``length`` price
+  changes). avg_loss == 0 with avg_gain > 0 -> 100, avg_gain == 0 with
+  avg_loss > 0 -> 0, and a flat window (both 0) -> 50 (no momentum either way).
+- ``rsi_zone``: >= 70 overbought, <= 30 oversold, otherwise neutral; a missing
+  value is ``"unavailable"`` and never silently reported as neutral.
+- ``session_vwap``: VWAP reset at every exchange-local calendar day.
+- ``relative_performance``: asset/benchmark ratio returns on common trading days.
+"""
 from __future__ import annotations
 
 import copy
@@ -11,7 +25,7 @@ from typing import Any
 
 import pandas as pd
 
-from ohlc_utils import normalize_ohlc_frame
+from ohlc_utils import normalize_ohlc_frame, to_naive_days
 
 
 @dataclass(frozen=True)
@@ -88,26 +102,134 @@ def _bollinger(frame: pd.DataFrame, params: Mapping[str, Any]) -> StudyOutput:
     )
 
 
+def _column(frame: pd.DataFrame, name: str) -> pd.Series:
+    """Return ``name`` matched case-insensitively (``High`` or ``high``) as numbers."""
+    for column in frame.columns:
+        if str(column).strip().lower() == name:
+            return pd.to_numeric(frame[column], errors="coerce")
+    raise ValueError(f"study requires columns: {name}")
+
+
+RSI_OVERBOUGHT = 70.0
+RSI_OVERSOLD = 30.0
+RSI_FLAT = 50.0
+
+
+def rsi(close: pd.Series, length: int = 14) -> pd.Series:
+    """Wilder RSI with explicit edge policies (see module docstring)."""
+    close = pd.to_numeric(close, errors="coerce")
+    delta = close.diff()
+    gains = delta.clip(lower=0).ewm(alpha=1 / length, adjust=False, min_periods=length).mean()
+    losses = (-delta.clip(upper=0)).ewm(alpha=1 / length, adjust=False, min_periods=length).mean()
+    values = 100 - 100 / (1 + gains / losses.where(losses != 0))
+    values = values.mask((losses == 0) & (gains > 0), 100.0)
+    values = values.mask((gains == 0) & (losses > 0), 0.0)
+    values = values.mask((gains == 0) & (losses == 0), RSI_FLAT)
+    return values
+
+
+def rsi_zone(value: Any) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "unavailable"
+    if not math.isfinite(number):
+        return "unavailable"
+    if number >= RSI_OVERBOUGHT:
+        return "overbought"
+    if number <= RSI_OVERSOLD:
+        return "oversold"
+    return "neutral"
+
+
+def macd(close: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9) -> tuple[pd.Series, pd.Series, pd.Series]:
+    """MACD line, signal and histogram; warm-up bars are NaN."""
+    close = pd.to_numeric(close, errors="coerce")
+    line = (
+        close.ewm(span=fast, adjust=False, min_periods=fast).mean()
+        - close.ewm(span=slow, adjust=False, min_periods=slow).mean()
+    )
+    signal_line = line.ewm(span=signal, adjust=False, min_periods=signal).mean()
+    return line, signal_line, line - signal_line
+
+
+def atr(frame: pd.DataFrame, length: int = 14) -> pd.Series:
+    """Wilder ATR over the true range; warm-up bars are NaN."""
+    high, low, close = _column(frame, "high"), _column(frame, "low"), _column(frame, "close")
+    previous = close.shift(1)
+    true_range = pd.concat([high - low, (high - previous).abs(), (low - previous).abs()], axis=1).max(axis=1)
+    return true_range.ewm(alpha=1 / length, adjust=False, min_periods=length).mean()
+
+
+def volume_zscore(volume: pd.Series, length: int = 20) -> pd.Series:
+    volume = pd.to_numeric(volume, errors="coerce")
+    mean = volume.rolling(length, min_periods=length).mean()
+    deviation = volume.rolling(length, min_periods=length).std()
+    return (volume - mean) / deviation.where(deviation != 0)
+
+
+def session_vwap(frame: pd.DataFrame, timezone: str | None) -> pd.Series:
+    """VWAP that resets at each exchange-local calendar day (trading session).
+
+    tz-aware timestamps are converted to ``timezone``; naive timestamps are read
+    as that exchange's wall clock. ``timezone=None`` keeps the index's own tz
+    (or wall clock). Bars are used as given: the caller decides whether
+    extended-hours bars belong in the session. A session whose cumulative
+    volume is still zero has no VWAP (NaN).
+    """
+    if not isinstance(frame.index, pd.DatetimeIndex):
+        raise ValueError("session_vwap requires a DatetimeIndex")
+    high, low, close = _column(frame, "high"), _column(frame, "low"), _column(frame, "close")
+    volume = _column(frame, "volume")
+    local = frame.index
+    if timezone:
+        local = local.tz_convert(timezone) if local.tz is not None else local.tz_localize(None)
+    session = local.normalize()
+    typical = (high + low + close) / 3.0
+    cumulative_value = (typical * volume).groupby(session).cumsum()
+    cumulative_volume = volume.groupby(session).cumsum()
+    out = cumulative_value / cumulative_volume.where(cumulative_volume > 0)
+    out.name = "VWAP"
+    return out
+
+
+def _daily_close(close: pd.Series) -> pd.Series:
+    """Last close per wall-clock trading day (intraday bars collapse to one row)."""
+    days = to_naive_days(pd.to_numeric(close, errors="coerce").dropna())
+    if days is None or days.empty:
+        return pd.Series(dtype="float64")
+    return days.groupby(level=0).last()
+
+
+def relative_performance(asset_close: pd.Series, benchmark_close: pd.Series) -> pd.DataFrame:
+    """Relative returns of asset/benchmark on their common trading days.
+
+    Both inputs are collapsed to one close per wall-clock day before alignment,
+    so a 14:00 UTC asset close and a 00:00 UTC benchmark bar for the same day
+    are compared, and ``20d``/``60d`` always mean trading days, never bars.
+    """
+    asset, benchmark = _daily_close(asset_close), _daily_close(benchmark_close)
+    common = asset.index.intersection(benchmark.index)
+    ratio = asset.reindex(common) / benchmark.reindex(common).where(lambda value: value != 0)
+    out = pd.DataFrame(index=common)
+    out["relative_return_20d"] = ratio.pct_change(20, fill_method=None)
+    out["relative_return_60d"] = ratio.pct_change(60, fill_method=None)
+    out["relative_momentum_20d"] = out["relative_return_20d"] - out["relative_return_60d"]
+    return out
+
+
 def _rsi(frame: pd.DataFrame, params: Mapping[str, Any]) -> StudyOutput:
     _require(frame, "Close")
     period = params["period"]
-    delta = frame["Close"].diff()
-    gains = delta.clip(lower=0).ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
-    losses = (-delta.clip(upper=0)).ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
-    relative = gains / losses.replace(0, float("nan"))
-    values = (100 - 100 / (1 + relative)).where(losses != 0, 100.0)
-    values = values.where(gains != 0, 0.0)
-    return _output("rsi", "bottom", params, **{f"RSI {period}": values})
+    return _output("rsi", "bottom", params, **{f"RSI {period}": rsi(frame["Close"], period)})
 
 
 def _macd(frame: pd.DataFrame, params: Mapping[str, Any]) -> StudyOutput:
     _require(frame, "Close")
-    fast, slow, signal_period = params["fast"], params["slow"], params["signal"]
-    line = frame["Close"].ewm(span=fast, adjust=False).mean() - frame["Close"].ewm(span=slow, adjust=False).mean()
-    signal = line.ewm(span=signal_period, adjust=False).mean()
+    line, signal, histogram = macd(frame["Close"], params["fast"], params["slow"], params["signal"])
     return _output(
         "macd", "bottom", params,
-        **{"MACD": line, "MACD signal": signal, "MACD histogram": line - signal},
+        **{"MACD": line, "MACD signal": signal, "MACD histogram": histogram},
     )
 
 
@@ -118,22 +240,13 @@ def _volume(frame: pd.DataFrame, params: Mapping[str, Any]) -> StudyOutput:
 
 def _vwap(frame: pd.DataFrame, params: Mapping[str, Any]) -> StudyOutput:
     _require(frame, "High", "Low", "Close", "Volume")
-    typical = (frame["High"] + frame["Low"] + frame["Close"]) / 3.0
-    volume = pd.to_numeric(frame["Volume"], errors="coerce")
-    values = (typical * volume).cumsum() / volume.cumsum().replace(0, float("nan"))
-    return _output("vwap", "overlay", params, VWAP=values)
+    return _output("vwap", "overlay", params, VWAP=session_vwap(frame, None))
 
 
 def _atr(frame: pd.DataFrame, params: Mapping[str, Any]) -> StudyOutput:
     _require(frame, "High", "Low", "Close")
     period = params["period"]
-    previous = frame["Close"].shift(1)
-    true_range = pd.concat(
-        [frame["High"] - frame["Low"], (frame["High"] - previous).abs(), (frame["Low"] - previous).abs()],
-        axis=1,
-    ).max(axis=1)
-    values = true_range.ewm(alpha=1 / period, adjust=False).mean()
-    return _output("atr", "bottom", params, **{f"ATR {period}": values})
+    return _output("atr", "bottom", params, **{f"ATR {period}": atr(frame, period)})
 
 
 def _stochastic(frame: pd.DataFrame, params: Mapping[str, Any]) -> StudyOutput:

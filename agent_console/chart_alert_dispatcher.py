@@ -9,22 +9,48 @@ SendFn = Callable[[str], bool]
 
 
 def dispatch_alert_events(events: list[dict[str, Any]], *, send_fn: SendFn | None = None) -> dict[str, Any]:
-    """Send triggered chart alert events through the configured notification channel."""
+    """Send each chart alert event independently.
+
+    A raising or falsy sender is recorded as that event's failure and the next
+    event is still attempted; ``results`` carries one ack per event for the
+    caller's delivery bookkeeping.
+    """
     sender = send_fn or send_alert_message
     attempted = 0
     delivered = 0
     failures: list[dict[str, Any]] = []
+    results: list[dict[str, Any]] = []
     for event in events or []:
         if not isinstance(event, dict):
             continue
         attempted += 1
-        text = format_alert_message(event)
-        ok = bool(sender(text))
+        error = ""
+        try:
+            ok = bool(sender(format_alert_message(event)))
+            if not ok:
+                error = "sender returned false"
+        except Exception as exc:
+            ok = False
+            error = f"{type(exc).__name__}: {exc}"
+        outcome = {
+            "event_id": str(event.get("event_id") or ""),
+            "alert_id": str(event.get("alert_id") or ""),
+            "symbol": str(event.get("symbol") or ""),
+            "delivered": ok,
+            "error": error,
+        }
+        results.append(outcome)
         if ok:
             delivered += 1
         else:
-            failures.append({"alert_id": str(event.get("alert_id") or ""), "symbol": str(event.get("symbol") or "")})
-    return {"attempted": attempted, "delivered": delivered, "failed": len(failures), "failures": failures}
+            failures.append({key: outcome[key] for key in ("event_id", "alert_id", "symbol", "error")})
+    return {
+        "attempted": attempted,
+        "delivered": delivered,
+        "failed": len(failures),
+        "failures": failures,
+        "results": results,
+    }
 
 
 def send_alert_message(text: str) -> bool:

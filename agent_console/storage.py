@@ -205,6 +205,20 @@ def ensure_schema(conn: sqlite3.Connection | None = None) -> None:
             CREATE INDEX IF NOT EXISTS idx_chart_alert_runs_workspace
                 ON chart_alert_runs(workspace_id, created_at DESC);
 
+            CREATE TABLE IF NOT EXISTS chart_alert_events (
+                event_id      TEXT PRIMARY KEY,
+                rule_id       TEXT NOT NULL,
+                status        TEXT NOT NULL,
+                attempts      INTEGER NOT NULL DEFAULT 0,
+                last_error    TEXT NOT NULL DEFAULT '',
+                event_json    TEXT NOT NULL,
+                created_at    TEXT NOT NULL,
+                updated_at    TEXT NOT NULL,
+                delivered_at  TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_chart_alert_events_rule
+                ON chart_alert_events(rule_id, status, created_at);
+
             CREATE TABLE IF NOT EXISTS chart_replay_sessions (
                 id            TEXT PRIMARY KEY,
                 workspace_id  TEXT NOT NULL,
@@ -1233,6 +1247,12 @@ def _validate_chart_alert_condition(condition: dict[str, Any]) -> None:
     if not isinstance(condition, dict) or not condition:
         raise ValueError("condition object is required")
     errors = chart_conditions.validate_condition(condition)
+    if not errors:
+        # 경보 worker 가 실제로 계산·로드할 수 있는 필드만 저장한다 — 저장은 되는데
+        # 영원히 missing value 로 미동작하는 규칙을 만들지 않는다.
+        from . import chart_alert_runner
+
+        errors = chart_alert_runner.unsupported_condition_errors(condition)
     if errors:
         raise ValueError(errors[0])
 
@@ -1378,6 +1398,129 @@ def list_chart_alert_runs(*, workspace_id: str | None = None, limit: int = 20) -
             (*params, limit),
         ).fetchall()
     return [_chart_alert_run_row(row) for row in rows]
+
+
+def _chart_alert_event_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "event_id": row["event_id"],
+        "rule_id": row["rule_id"],
+        "status": row["status"],
+        "attempts": int(row["attempts"]),
+        "last_error": row["last_error"],
+        "event": json.loads(row["event_json"] or "{}"),
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+        "delivered_at": row["delivered_at"],
+    }
+
+
+_CHART_ALERT_EVENT_COLUMNS = (
+    "event_id, rule_id, status, attempts, last_error, event_json, created_at, updated_at, delivered_at"
+)
+
+
+def get_chart_alert_event(event_id: str) -> dict[str, Any] | None:
+    event_id = str(event_id or "").strip()
+    if not event_id:
+        return None
+    with connect() as conn:
+        row = conn.execute(
+            f"SELECT {_CHART_ALERT_EVENT_COLUMNS} FROM chart_alert_events WHERE event_id = ?",
+            (event_id,),
+        ).fetchone()
+    return _chart_alert_event_row(row) if row else None
+
+
+def record_chart_alert_event(event: dict[str, Any]) -> dict[str, Any]:
+    """Persist a triggered event as pending before any send; an existing event ID is kept as is."""
+    payload = dict(event or {})
+    event_id = str(payload.get("event_id") or "").strip()
+    rule_id = str(payload.get("alert_id") or "").strip()
+    if not event_id:
+        raise ValueError("event_id is required")
+    if not rule_id:
+        raise ValueError("alert_id is required")
+    now = _now()
+    with connect() as conn:
+        with conn:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO chart_alert_events
+                    (event_id, rule_id, status, attempts, last_error, event_json, created_at, updated_at)
+                VALUES (?, ?, 'pending', 0, '', ?, ?, ?)
+                """,
+                (event_id, rule_id, _json(payload), now, now),
+            )
+    saved = get_chart_alert_event(event_id)
+    if saved is None:
+        raise RuntimeError("chart alert event was not saved")
+    return saved
+
+
+def mark_chart_alert_event(event_id: str, *, delivered: bool, error: str = "") -> dict[str, Any]:
+    """Record one send attempt; only a successful ack moves the event to delivered."""
+    event_id = str(event_id or "").strip()
+    if not event_id:
+        raise ValueError("event_id is required")
+    now = _now()
+    with connect() as conn:
+        with conn:
+            conn.execute(
+                """
+                UPDATE chart_alert_events
+                SET status = ?, attempts = attempts + 1, last_error = ?, updated_at = ?,
+                    delivered_at = CASE WHEN ? THEN ? ELSE delivered_at END
+                WHERE event_id = ? AND status != 'delivered'
+                """,
+                (
+                    "delivered" if delivered else "failed",
+                    "" if delivered else str(error or "send failed"),
+                    now,
+                    1 if delivered else 0,
+                    now,
+                    event_id,
+                ),
+            )
+    saved = get_chart_alert_event(event_id)
+    if saved is None:
+        raise ValueError(f"chart alert event not found: {event_id}")
+    return saved
+
+
+def list_chart_alert_events(
+    *,
+    rule_ids: Iterable[str] | None = None,
+    statuses: Iterable[str] | None = None,
+    limit: int = 200,
+) -> list[dict[str, Any]]:
+    clauses = []
+    params: list[Any] = []
+    if rule_ids is not None:
+        ids = sorted({str(rule_id).strip() for rule_id in rule_ids if str(rule_id).strip()})
+        if not ids:
+            return []
+        clauses.append(f"rule_id IN ({', '.join('?' for _ in ids)})")
+        params.extend(ids)
+    if statuses is not None:
+        wanted = sorted({str(status).strip().lower() for status in statuses if str(status).strip()})
+        if not wanted:
+            return []
+        clauses.append(f"status IN ({', '.join('?' for _ in wanted)})")
+        params.extend(wanted)
+    where = " WHERE " + " AND ".join(clauses) if clauses else ""
+    limit = max(1, min(int(limit or 200), 1000))
+    with connect() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT {_CHART_ALERT_EVENT_COLUMNS}
+            FROM chart_alert_events
+            {where}
+            ORDER BY created_at ASC, event_id ASC
+            LIMIT ?
+            """,
+            (*params, limit),
+        ).fetchall()
+    return [_chart_alert_event_row(row) for row in rows]
 
 
 def save_chart_template(template: dict[str, Any]) -> dict[str, Any]:

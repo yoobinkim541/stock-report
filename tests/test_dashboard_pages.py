@@ -3,6 +3,7 @@
 비루트 cwd 에서 실행해도 통과해야 함(streamlit `sys.path[0]=스크립트dir` 함정 재발 방지·U1 교훈).
 스크립트가 루트를 직접 insert + 모든 네트워크/무거운 호출을 monkeypatch → 무예외만 검증.
 """
+import json
 import os
 import sys
 
@@ -272,6 +273,21 @@ cached.learning_evolution = lambda s: {"surface":s,
 
 def _script(mod, call):
     return _STUBS + f"\n{mod}\n{call}\n"
+
+
+def _embedded_trace_names(frames):
+    """iframe srcdoc 에 `const fig = <fig.to_json()>;` 로 삽입된 figure 를 decode 해
+    trace name 을 모은다 — JSON 은 한글을 \\uXXXX 로 escape 하므로 raw 부분 문자열
+    ('"매출"') 검사는 실제 trace 가 있어도 실패한다."""
+    decoder = json.JSONDecoder()
+    names = []
+    for src in frames:
+        start = 0
+        while (start := src.find("const fig = ", start)) >= 0:
+            start += len("const fig = ")
+            fig, _end = decoder.raw_decode(src, start)
+            names.extend(trace.get("name") for trace in fig.get("data") or [])
+    return names
 
 
 @pytest.mark.parametrize("mod,call", [
@@ -1115,7 +1131,7 @@ def test_ticker_page_per_band_and_peer_sections_are_visible():
     comparison = next(item.value for item in at.dataframe if "ROE(%)" in item.value.columns)
     assert comparison.shape[0] >= 2
     frames = [item.proto.srcdoc for item in at.get("iframe")]
-    assert frames and any('"매출"' in src for src in frames)
+    assert frames and "매출" in _embedded_trace_names(frames)
 
 
 def test_paper_kpis_and_decisions():
@@ -1681,7 +1697,7 @@ ticker.render()
     caps = " ".join(str(c.value) for c in at.caption)
     assert "펀더멘털 패널" in caps and "분기" in caps
     frames = [i.proto.srcdoc for i in at.get("iframe")]
-    assert any('"매출"' in s for s in frames), "차트 iframe 에 매출 트레이스 없음"
+    assert "매출" in _embedded_trace_names(frames), "차트 iframe 에 매출 트레이스 없음"
     # ETF 등 데이터 없음 → 정직 안내
     script2 = script.replace('"quarterly": [', '"quarterly_x": [')
     at2 = AppTest.from_string(script2, default_timeout=30)

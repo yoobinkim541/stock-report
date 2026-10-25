@@ -215,9 +215,12 @@ def _strategy_evaluations(packet: Mapping[str, Any], frame: pd.DataFrame) -> lis
 def _condition_evaluations(packet: Mapping[str, Any], frame: pd.DataFrame) -> list[dict[str, Any]]:
     symbol, timeframe = str(packet["symbol"]), str(packet["timeframe"])
     rule = {"symbol": symbol, "timeframe": timeframe, "condition": packet["condition"]}
-    contexts = chart_alert_runner.build_condition_contexts(rule, {(symbol, timeframe): frame})
+    # 리플레이의 "현재"는 커서 봉이 마감된 시각이다 — 벽시계가 아니라 커서 기준으로
+    # 이후 봉을 제외하고 커서 봉을 확정 봉으로 판정한다.
+    as_of = chart_alert_runner.bar_close_time(symbol, timeframe, frame.index[-1]).isoformat()
+    contexts = chart_alert_runner.build_condition_contexts(rule, {(symbol, timeframe): frame}, as_of=as_of)
     result = chart_conditions.evaluate_condition(
-        packet["condition"], contexts, now=pd.Timestamp(frame.index[-1]).isoformat(),
+        chart_alert_runner.canonical_condition(rule), contexts, now=as_of,
     )
     bucket = {"enter_long": "entry", "exit_all": "exit", "trim_half": "trim"}[packet["action"]]
     return [{

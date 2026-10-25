@@ -3173,8 +3173,9 @@ def test_chart_alert_batch_api_evaluates_saved_rules_from_bars(monkeypatch, tmp_
         98, 97, 96, 95, 94,
         95, 96, 97, 99, 101,
     ]
+    # 2026-08-03(월) 13:30Z = 미국 정규장 09:30 ET 부터의 5분봉.
     bars = [
-        {"time": f"2026-08-01T{9 + (30 + i * 5) // 60:02d}:{(30 + i * 5) % 60:02d}:00Z", "close": close}
+        {"time": f"2026-08-03T{13 + (30 + i * 5) // 60:02d}:{(30 + i * 5) % 60:02d}:00Z", "close": close}
         for i, close in enumerate(closes)
     ]
 
@@ -3190,7 +3191,9 @@ def test_chart_alert_batch_api_evaluates_saved_rules_from_bars(monkeypatch, tmp_
     assert payload["events"][0]["alert_id"] == rule["id"]
     assert payload["events"][0]["matched_conditions"] == ["price:crossing_up", "indicator:rsi_14:less_than"]
     saved = storage.get_chart_alert_rule(rule["id"])
-    assert saved["last_state"]["triggered"] is True
+    # notify 없는 평가는 발송이 아니므로 once 를 소진하지 않는다(C-04).
+    assert saved["last_state"]["matched"] is True
+    assert saved["last_state"]["triggered"] is False
     assert saved["last_state"]["event"]["alert_id"] == rule["id"]
 
 
@@ -3199,7 +3202,7 @@ def test_chart_alert_runner_computes_extended_indicator_values():
 
     from agent_console import chart_alert_runner
 
-    idx = pd.date_range("2026-08-01T09:30:00Z", periods=40, freq="5min")
+    idx = pd.date_range("2026-08-03T13:30:00Z", periods=40, freq="5min")
     bars = pd.DataFrame({
         "open": [100 + i * 0.3 for i in range(40)],
         "high": [101 + i * 0.3 for i in range(40)],
@@ -3207,16 +3210,19 @@ def test_chart_alert_runner_computes_extended_indicator_values():
         "close": [100 + i * 0.3 + (0.4 if i % 5 == 0 else 0.0) for i in range(40)],
         "volume": [1000 + i * 25 for i in range(40)],
     }, index=idx)
+    rule = {
+        "id": "r", "symbol": "AAPL", "timeframe": "5m",
+        "condition": {"type": "price", "operator": "greater_than", "value": 0},
+    }
 
-    values = chart_alert_runner._indicator_values(bars, idx[-1])
+    contexts = chart_alert_runner.build_condition_contexts(
+        rule, {("AAPL", "5m"): bars}, as_of="2026-08-03T17:00:00Z",
+    )
+    values = contexts[("AAPL", "5m")]["current"]
 
     assert values["time"] == idx[-1].isoformat()
-    assert isinstance(values["rsi_14"], float)
-    assert isinstance(values["macd"], float)
-    assert isinstance(values["macd_signal"], float)
-    assert isinstance(values["macd_hist"], float)
-    assert isinstance(values["vwap"], float)
-    assert isinstance(values["volume_zscore_20"], float)
+    for field in ("rsi_14", "macd", "macd_signal", "macd_hist", "vwap", "atr_14", "volume_zscore_20"):
+        assert isinstance(values[field], float), field
 
 
 def test_chart_alert_batch_api_evaluates_macd_hist_condition(monkeypatch, tmp_path):
@@ -3243,7 +3249,7 @@ def test_chart_alert_batch_api_evaluates_macd_hist_condition(monkeypatch, tmp_pa
     }).json["rule"]
     bars = [
         {
-            "time": f"2026-08-01T{9 + (30 + i * 5) // 60:02d}:{(30 + i * 5) % 60:02d}:00Z",
+            "time": f"2026-08-03T{13 + (30 + i * 5) // 60:02d}:{(30 + i * 5) % 60:02d}:00Z",
             "open": 100 + i * 0.3,
             "high": 101 + i * 0.3,
             "low": 99 + i * 0.3,
@@ -3289,8 +3295,8 @@ def test_chart_alert_batch_api_can_dispatch_notifications(monkeypatch, tmp_path)
         "enabled": True,
     }).json["rule"]
     bars = [
-        {"time": "2026-08-01T09:30:00Z", "close": 99.0},
-        {"time": "2026-08-01T09:35:00Z", "close": 101.0},
+        {"time": "2026-08-03T13:30:00Z", "close": 99.0},
+        {"time": "2026-08-03T13:35:00Z", "close": 101.0},
     ]
 
     result = client.post("/api/chart-alerts/evaluate-batch", json={
@@ -3326,7 +3332,7 @@ def test_chart_alert_worker_loads_bars_updates_state_and_notifies(monkeypatch, t
         "frequency": "once",
         "enabled": True,
     })
-    idx = pd.date_range("2026-08-01 09:30", periods=2, freq="5min", tz="UTC")
+    idx = pd.date_range("2026-08-03 13:30", periods=2, freq="5min", tz="UTC")
     bars = pd.DataFrame({"Close": [99.0, 101.0]}, index=idx)
     calls: list[tuple[str, str]] = []
     sent: list[str] = []
@@ -3397,7 +3403,7 @@ def test_chart_alert_worker_persists_run_history(monkeypatch, tmp_path):
     })
     bars = pd.DataFrame(
         {"Close": [99.0, 101.0]},
-        index=pd.date_range("2026-08-01 09:30", periods=2, freq="5min", tz="UTC"),
+        index=pd.date_range("2026-08-03 13:30", periods=2, freq="5min", tz="UTC"),
     )
 
     result = run_chart_alert_cycle(

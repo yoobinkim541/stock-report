@@ -100,9 +100,10 @@ def test_drawing_line_alert_interpolates_threshold_at_current_time():
         },
     }
 
+    # 10:30 의 선값은 102.5 — 이전 가격 102 는 선 아래, 11:00 가격 106 은 선(105) 위.
     result = evaluate_chart_alert(
         rule,
-        previous_price=103.0,
+        previous_price=102.0,
         current_price=106.0,
         previous_values={"time": "2026-08-01T10:30:00Z"},
         current_values={"time": "2026-08-01T11:00:00Z"},
@@ -231,6 +232,28 @@ def test_alert_dispatcher_formats_and_sends_triggered_events():
         "AAPL crossed 100 with RSI filter\n"
         "2026-08-01T12:00:00Z"
     ]
+
+
+def test_C_fix_alerts_dispatcher_isolates_raising_sender_per_event():
+    from agent_console.chart_alert_dispatcher import dispatch_alert_events
+
+    sent: list[str] = []
+
+    def sender(text):
+        sent.append(text)
+        if "A · first" in text:
+            raise RuntimeError("network down")
+        return True
+
+    result = dispatch_alert_events([
+        {"event_id": "ea", "alert_id": "a", "symbol": "A", "name": "first"},
+        {"event_id": "eb", "alert_id": "b", "symbol": "B", "name": "second"},
+    ], send_fn=sender)
+
+    assert len(sent) == 2
+    assert (result["attempted"], result["delivered"], result["failed"]) == (2, 1, 1)
+    assert [(row["event_id"], row["delivered"]) for row in result["results"]] == [("ea", False), ("eb", True)]
+    assert "network down" in result["failures"][0]["error"]
 
 
 def test_chart_alert_worker_main_exposes_cron_friendly_cli(monkeypatch, capsys):

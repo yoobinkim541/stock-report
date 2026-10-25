@@ -4,7 +4,6 @@ from __future__ import annotations
 import copy
 import json
 from collections.abc import Mapping
-from datetime import date
 from typing import Any
 
 import pandas as pd
@@ -233,7 +232,7 @@ def render_condition_builder(document, *, key_prefix: str = "chart") -> dict[str
     fields = {
         "price": ["close", "high", "low", "volume"],
         "indicator": ["rsi_14", "macd", "macd_signal", "vwap", "atr_14", "volume_zscore_20"],
-        "fundamental": ["per", "forward_pe", "pbr", "psr", "ev_ebitda", "roe", "net_margin", "target_upside_pct"],
+        "fundamental": ["per", "forward_pe", "pbr", "psr", "roe", "net_margin", "target_upside_pct"],
         "relative_performance": ["relative_return_20d", "relative_return_60d", "relative_momentum_20d"],
     }
     c0, c1, c2, c3, c4 = st.columns([1.0, 1.15, 0.8, 1.1, 0.9], vertical_alignment="bottom")
@@ -272,13 +271,47 @@ def render_condition_builder(document, *, key_prefix: str = "chart") -> dict[str
     return condition
 
 
+_VISION_CACHE_KEY = "_chart_vision_results"
+_VISION_CACHE_LIMIT = 16
+_UNVERIFIED_REASON_LABELS = {
+    "rsi_out_of_bounds": "RSI 0~100 범위 밖",
+    "rsi_mismatch": "RSI 계산값과 불일치",
+    "rsi_unavailable": "RSI 계산 불가 구간",
+    "current_price_mismatch": "현재가 불일치",
+    "non_positive_price": "0 이하 가격",
+    "out_of_range_level": "분석 구간 가격대에서 크게 벗어난 레벨",
+}
+
+
+def _vision_identity(snapshot: Mapping[str, Any], hist, ticker: str) -> dict[str, Any]:
+    context = snapshot.get("context") or {}
+    return chart_vision.analysis_identity(
+        hist, ticker,
+        timeframe=str(context.get("timeframe") or ""),
+        session=str(context.get("session") or ""),
+        replay_cursor=context.get("replay_cursor"),
+    )
+
+
+def _store_vision_result(key: str, result: Mapping[str, Any]) -> None:
+    cache = dict(st.session_state.get(_VISION_CACHE_KEY) or {})
+    cache.pop(key, None)
+    cache[key] = result
+    while len(cache) > _VISION_CACHE_LIMIT:
+        cache.pop(next(iter(cache)))
+    st.session_state[_VISION_CACHE_KEY] = cache
+
+
 def _render_vision_pattern_section(snapshot: Mapping[str, Any], hist) -> None:
     """LLM 비전 기반 고전 차트 패턴(삼각수렴·엘리엇 파동 등) 분석.
 
     dashboard/chart_analysis.py::pattern_candidates() 는 규칙 2개(채널 돌파·볼린저
     스퀴즈)만 감지해 대부분 종목·대부분 날엔 "패턴 후보 없음"만 뜬다 — 이 섹션은
     캔들 이미지를 LLM에게 보여줘 삼각수렴·엘리엇 파동 등 기하학적 패턴을 식별한다.
-    호출당 수십 초 걸려 자동 호출하지 않고, 버튼 클릭 + (ticker, 날짜) 세션 캐시로 제한한다.
+    호출당 수십 초 걸려 자동 호출하지 않는다. 결과는 chart_vision.analysis_identity()
+    key(종목·봉 단위·세션·리플레이 위치·분석 봉 내용·프롬프트 버전)로 세션에 캐시되며,
+    같은 identity 에서는 캐시만 보여 주고 명시적 '다시 분석' 클릭만 새로 호출한다.
+    identity 가 다르면(새 봉·다른 봉 단위 등) 이전 결과를 보여 주지 않는다.
     """
     ticker = str(snapshot.get("symbol") or "")
     st.markdown("###### 🤖 AI 시각 분석 (삼각수렴·엘리엇 파동 등)")
@@ -286,21 +319,47 @@ def _render_vision_pattern_section(snapshot: Mapping[str, Any], hist) -> None:
         st.caption("차트 데이터가 없어 시각 분석을 사용할 수 없습니다.")
         return
 
-    cache_key = f"_chart_vision_{ticker}_{date.today().isoformat()}"
-    cached_result = st.session_state.get(cache_key)
-
-    if st.button("AI로 패턴 분석하기", key=f"chart_vision_btn_{ticker}"):
+    identity = _vision_identity(snapshot, hist, ticker)
+    key = identity["key"]
+    cached_result = (st.session_state.get(_VISION_CACHE_KEY) or {}).get(key)
+    label = "다시 분석" if cached_result is not None else "AI로 패턴 분석하기"
+    if st.button(label, key=f"chart_vision_btn_{ticker}_{key}"):
         with st.spinner("차트 이미지를 분석하는 중입니다 (최대 90초)..."):
-            cached_result = chart_vision.analyze_chart_patterns(hist, ticker)
-        st.session_state[cache_key] = cached_result
+            cached_result = chart_vision.analyze_chart_patterns(hist, ticker, identity=identity)
+        _store_vision_result(key, cached_result)
 
     if cached_result is None:
-        st.caption("버튼을 누르면 삼각수렴·엘리엇 파동 등 고전 차트 패턴을 AI가 분석합니다(오늘 1회 결과 캐시).")
+        st.caption(
+            "버튼을 누르면 삼각수렴·엘리엇 파동 등 고전 차트 패턴을 AI가 분석합니다"
+            "(같은 차트 데이터의 결과는 이 세션에 저장되어 재사용되고, '다시 분석'만 새로 호출합니다)."
+        )
         return
 
+    st.caption(
+        f"분석 기준: {identity.get('timeframe') or '봉 단위 미상'} · {identity.get('bars')}봉 · "
+        f"마지막 봉 {identity.get('last_bar') or '미상'}"
+    )
     if not cached_result.get("ok"):
         st.warning(f"분석 실패: {cached_result.get('reason', 'unknown')}")
         return
+
+    facts = cached_result.get("facts") or {}
+    if facts:
+        rsi_value = facts.get("rsi_14")
+        st.caption(
+            f"관측값(봉 데이터 계산): 현재가 {chart_vision.format_price(facts['last_close'])} · "
+            f"RSI(14) {f'{float(rsi_value):.1f}' if rsi_value is not None else '계산 불가'} · "
+            f"구간 {chart_vision.format_price(facts['range_low'])}~{chart_vision.format_price(facts['range_high'])}"
+        )
+    unverified = cached_result.get("unverified_claims") or []
+    if unverified:
+        reasons = sorted({
+            _UNVERIFIED_REASON_LABELS.get(reason, reason)
+            for claim in unverified for reason in claim.get("reasons") or []
+        })
+        st.warning(
+            f"미검증 수치 주장 {len(unverified)}건을 숨겼습니다 — 계산값과 대조되지 않음: {', '.join(reasons)}"
+        )
 
     patterns = cached_result.get("patterns") or []
     if cached_result.get("summary"):

@@ -146,6 +146,71 @@ def test_replay_analysis_disables_live_orderflow_loader():
     assert replay_loader("AAPL") == {"ok": False, "reason": "replay_isolated"}
 
 
+_REPLAY_RAIL_SCRIPT = """
+import sys
+sys.path.insert(0, {root!r})
+import pandas as pd
+import streamlit as st
+from dashboard import chart_workspace, chart_workbench_ui, chart_workspace_ui
+
+values = list(range(100, 160))
+hist = pd.DataFrame({{
+    "Open": values, "High": [v + 1 for v in values], "Low": [v - 1 for v in values],
+    "Close": values, "Volume": [1000] * len(values),
+}}, index=pd.date_range("2026-08-01 13:30", periods=len(values), freq="h", tz="UTC"))
+ws = chart_workspace.normalize_workspace({{
+    "id": "w1", "layout": "1", "active_panel": "p1",
+    "panels": [{{"id": "p1", "ticker": "MSFT", "timeframe": "1h", "period": "6mo", "chart_kind": "candle",
+                 "top_indicators": [], "bottom_indicators": [], "compare": [], "log_scale": False}}],
+}})
+captured = {{}}
+originals = (chart_workspace_ui._load_panel_hist, chart_workspace_ui._analysis_ohlc_loader,
+             chart_workspace_ui.cached.valuation, chart_workbench_ui.render_analysis_rail)
+try:
+    chart_workspace_ui._load_panel_hist = lambda panel: hist
+    chart_workspace_ui._analysis_ohlc_loader = lambda ticker, tf: hist
+    chart_workspace_ui.cached.valuation = lambda symbol: {{}}
+    chart_workbench_ui.render_analysis_rail = lambda snapshot, hist=None: captured.update(snapshot=snapshot, hist=hist)
+    cutoff = {cutoff!r}
+    chart_workspace_ui._render_analysis_rail(
+        ws, render_charts=True, replay_until=pd.Timestamp(cutoff) if cutoff else None,
+    )
+finally:
+    (chart_workspace_ui._load_panel_hist, chart_workspace_ui._analysis_ohlc_loader,
+     chart_workspace_ui.cached.valuation, chart_workbench_ui.render_analysis_rail) = originals
+st.session_state["captured"] = captured
+st.session_state["saved_replay"] = ws["panels"][0]["document"]["replay"]
+"""
+
+
+def _replay_rail_capture(cutoff):
+    at = AppTest.from_string(_REPLAY_RAIL_SCRIPT.format(root=ROOT, cutoff=cutoff), default_timeout=60).run()
+    assert not at.exception, str(at.exception)
+    return at.session_state["captured"], at.session_state["saved_replay"]
+
+
+def test_replay_cursor_is_part_of_vision_identity_even_with_identical_bars():
+    """C-03: 같은 봉을 보는 두 리플레이 커서도 별도 analysis identity — 커서는 분석
+    사본에만 실리고 저장되는 패널 문서에는 리플레이 상태가 남지 않는다."""
+    from dashboard import chart_workbench_ui
+
+    first, saved_first = _replay_rail_capture("2026-08-01T15:35:00+00:00")
+    second, _ = _replay_rail_capture("2026-08-01T16:20:00+00:00")
+    live, _ = _replay_rail_capture(None)
+
+    assert list(first["hist"].index) == list(second["hist"].index)  # 같은 봉 3개
+    assert first["snapshot"]["context"]["replay_cursor"] == "2026-08-01T15:35:00+00:00"
+    assert second["snapshot"]["context"]["replay_cursor"] == "2026-08-01T16:20:00+00:00"
+    assert live["snapshot"]["context"]["replay_cursor"] is None
+
+    keys = {
+        chart_workbench_ui._vision_identity(capture["snapshot"], capture["hist"], "MSFT")["key"]
+        for capture in (first, second, live)
+    }
+    assert len(keys) == 3
+    assert saved_first == {"active": False, "cursor": None}
+
+
 def test_workspace_drawing_sync_url_targets_agent_console(monkeypatch):
     from dashboard import chart_workspace_ui
 

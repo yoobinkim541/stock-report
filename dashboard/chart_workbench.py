@@ -72,7 +72,10 @@ def build_analysis_snapshot(
 
     try:
         benchmark_hist = ohlc_loader(benchmark, "1d")
-        relative_strength = chart_analysis.relative_strength_summary(hist, benchmark_hist)
+        # Relative strength is a trading-day metric: use daily bars on both sides
+        # even when the chart shows intraday or weekly bars.
+        asset_daily = hist if normalized.get("timeframe") == "1d" else ohlc_loader(symbol, "1d")
+        relative_strength = chart_analysis.relative_strength_summary(asset_daily, benchmark_hist)
     except Exception as exc:
         errors["relative_strength"] = str(exc)
         relative_strength = {"ok": False, "reason": "provider_unavailable"}
@@ -121,9 +124,16 @@ def build_analysis_snapshot(
         "quality": str(source.get("quality") or "unknown"),
         "partial": bool(errors) or not bool(multi_timeframe.get("ok")),
     }
+    replay = normalized.get("replay") or {}
     return {
         "symbol": symbol,
         "benchmark": benchmark,
+        "context": {
+            "timeframe": str(normalized.get("timeframe") or ""),
+            "session": str((normalized.get("session") or {}).get("policy") or ""),
+            "timezone": str(normalized.get("timezone") or ""),
+            "replay_cursor": replay.get("cursor") if replay.get("active") else None,
+        },
         "trend": trend,
         "patterns": patterns,
         "multi_timeframe": multi_timeframe,

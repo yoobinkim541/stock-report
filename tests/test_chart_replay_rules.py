@@ -98,3 +98,23 @@ def test_strategy_exit_rule_submits_full_position_exit():
     assert evaluated["orders"][-1]["side"] == "sell"
     assert evaluated["orders"][-1]["qty"] == 50
     assert next(event for event in evaluated["events"] if event["type"] == "rule_decision")["decision"] == "exit_all"
+
+
+def test_C_fix_alerts_condition_is_judged_at_replay_cursor_not_wall_clock():
+    # 벽시계보다 뒤에 있는 합성 리플레이 데이터: 커서가 "현재"여야 하며, 커서 봉은
+    # 마감된 확정 봉(bar_close)으로 판정되고 커서 이후 봉(하락 교차)은 영향이 없다.
+    bars = _bars()
+    bars.index = pd.date_range("2099-08-03 09:30", periods=6, freq="5min", tz="America/New_York")
+    packet = chart_replay_rules.condition_packet(
+        {"type": "price", "field": "close", "operator": "crossing_up", "value": 100},
+        symbol="MSFT", timeframe="5m", action="enter_long", position_pct=0.5,
+    )
+    session = chart_replay_rules.attach_rule_packet(_session(cursor=1), packet)
+
+    evaluated = chart_replay_rules.evaluate_and_apply(session, bars)
+
+    decision = next(event for event in evaluated["events"] if event["type"] == "rule_decision")
+    assert decision["decision"] == "enter_long"
+    leaf = next(row for row in decision["evaluations"][0]["trace"] if row["node"] == "leaf")
+    assert leaf["as_of"] == bars.index[1].tz_convert("UTC").isoformat()
+    assert evaluated["orders"][-1]["side"] == "buy"
