@@ -1174,8 +1174,17 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
             return cached.ohlc(symbol, period="max")
         return cached.ohlc_tf(symbol, timeframe)
 
+    # 리플레이 중이면 분석 레일이 불러오는 보조 시계열(상대강도 일봉·멀티봉)을 커서 봉 마감에서
+    # 자른다(chart_workbench 가 document["replay"] 로 적용). 저장·내보내기 문서에는 싣지 않는다.
+    analysis_document = {
+        **document,
+        "replay": {
+            "active": bool(replay_context["active"]),
+            "cursor": pd.Timestamp(replay_context["as_of"]).isoformat() if replay_context["active"] else None,
+        },
+    }
     snapshot = chart_workbench.build_analysis_snapshot(
-        document,
+        analysis_document,
         df,
         ohlc_loader=_analysis_loader,
         fundamental_loader=lambda symbol: cached.valuation(symbol) or {},
@@ -1534,28 +1543,78 @@ def _etf_peer_section(ticker, peers):
                f"표시·참고용 · 매매신호 아님")
 
 
+def _premium_state(pm):
+    """괴리율 → 할증/할인/근접. None 이면 None."""
+    if pm is None:
+        return None
+    if pm >= 0.3:
+        return "할증"
+    if pm <= -0.3:
+        return "할인"
+    return "근접"
+
+
+def _etf_return_chips(peers, ticker, dividends):
+    rows = (peers or {}).get("rows") or []
+    me = next((r for r in rows if r.get("ticker") == ticker), None)
+    if not me:
+        return []
+    yld = me.get("div_yield_pct")
+    if yld is None:
+        yld = (dividends or {}).get("yield_pct")
+    mdd = me.get("mdd")
+    if isinstance(mdd, (int, float)) and mdd > 0:
+        mdd = -mdd
+    return [
+        ("1년", me.get("tr_1y")),
+        ("3년 연환산", me.get("tr_3y_ann")),
+        ("MDD", mdd),
+        ("분배율", yld),
+    ]
+
+
 def _etf_sections(ticker, etf, price):
     is_kr = _is_kr_etf(etf)
     desc = (etf.get("description") or "").strip()
     if desc:
         st.info(desc[:280] + ("…" if len(desc) > 280 else ""), icon="📊")
 
-    st.subheader("ETF 한눈에")
-    dv = etf.get("dividends") or {}
-    k = st.columns(5)
-    k[0].metric("현재가", _etf_money(etf, etf.get("price") or price, 0 if is_kr else 2))
-    k[1].metric("NAV", _etf_money(etf, etf.get("nav"), 0 if is_kr else 2))
+    name = etf.get("name") or ticker_names.label(ticker, allow_net=False)
+    px = etf.get("price") or price
     pm = etf.get("premium_pct")
-    k[2].metric("괴리율", f"{pm:+.2f}%" if pm is not None else "—",
-                help="시장가격과 기준가(NAV)의 차이")
+    state = _premium_state(pm)
+    asof = f"{state} {pm:+.2f}%" if state and pm is not None else ""
+    theme.render(theme.ticker_hero_html(
+        etf.get("stock_code") or ticker, name, px, None, None,
+        asof=asof, currency="원" if is_kr else "USD"))
+
+    dv = etf.get("dividends") or {}
+    peers = cached.etf_peers(ticker)
+    chips = theme.etf_return_strip_html(_etf_return_chips(peers, ticker, dv))
+    if chips:
+        theme.render(chips)
+
+    st.subheader("ETF 한눈에")
     er = etf.get("expense_ratio")
-    k[3].metric("총보수", data.f_frac_pct(er) if er is not None else "—",
-                help="연간 총보수/운용보수")
-    k[4].metric("분배금 수익률", f"연 {dv['yield_pct']:.2f}%" if dv.get("yield_pct") else "—",
-                help="최근 12개월 분배금 합계 ÷ 현재가")
+    te = etf.get("tracking_error_pct")
+    facts = [
+        ("NAV", _etf_money(etf, etf.get("nav"), 0 if is_kr else 2), None,
+         "기준가"),
+        ("괴리율", f"{pm:+.2f}%" if pm is not None else "—", state,
+         "시장가격과 기준가(NAV)의 차이"),
+        ("운용보수", data.f_frac_pct(er) if er is not None else "—", None,
+         "연간 총보수/운용보수"),
+    ]
+    if is_kr:
+        facts.append(("추적오차", f"{te:.2f}%" if te is not None else "—", None,
+                      "ETF 수익률과 추종지수 수익률의 차이"))
+    facts.append(("분배금 수익률", f"연 {dv['yield_pct']:.2f}%" if dv.get("yield_pct") else "—",
+                  None, "최근 12개월 분배금 합계 ÷ 현재가"))
+    cols = st.columns(len(facts))
+    for col, (lab, val, delta, help_) in zip(cols, facts):
+        col.metric(lab, val, delta, help=help_)
 
     # ── 수익률·리스크 (TR vs PR) + 동종 ETF 비교·점수 ──
-    peers = cached.etf_peers(ticker)
     _etf_tr_pr_section(ticker, peers)
     _etf_peer_section(ticker, peers)
 
@@ -1581,57 +1640,32 @@ def _etf_sections(ticker, etf, price):
             f"<span style='color:{theme.MUTED}'>{k}</span><b>{v}</b></div>",
             unsafe_allow_html=True)
 
-    # ── 보유 비중 Top 10 (도넛 + 리스트) ──
+    # ── 보유 비중 (바 + 국내 ETF 는 수량 표) ──
     top = etf.get("top_holdings") or []
     if top:
         st.subheader("구성종목 Top 10" if is_kr else "보유 비중 Top 10")
-        dcol, lcol = st.columns([1, 1.4])
-        with dcol:
-            st.plotly_chart(charts.allocation_donut(
-                [{"ticker": h.get("symbol") or h.get("name"), "value": h.get("pct") or 0,
-                  "name": (h.get("name") if is_kr else
-                           ticker_names.display_name(h["symbol"], allow_net=False) or h.get("name"))}
-                 for h in top]), width="stretch", config=_NOBAR)
-        with lcol:
-            if is_kr:
-                rows = [{
-                    "구성종목": h.get("name") or h.get("symbol"),
-                    "비중": f"{h['pct']:.2f}%" if h.get("pct") is not None else "—",
-                    "수량": f"{h['shares']:,.0f}" if h.get("shares") is not None else "—",
-                    "평가금액": _f_krw_large(h.get("amount")) if h.get("amount") is not None else "—",
-                } for h in top]
-                st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
-            else:
-                half = (len(top) + 1) // 2
-                l1, l2 = st.columns(2)
-                for col, chunk in ((l1, top[:half]), (l2, top[half:])):
-                    with col:
-                        for h in chunk:
-                            nm = ticker_names.display_name(h["symbol"], allow_net=False) or h.get("name") or h["symbol"]
-                            pct = f"{h['pct']:.2f}%" if h.get("pct") is not None else "—"
-                            st.markdown(f"**{nm}** <span style='color:{theme.MUTED}'>{pct}</span>",
-                                        unsafe_allow_html=True)
+        bars = []
+        for h in top[:10]:
+            nm = h.get("name") or h.get("symbol")
+            if not is_kr and h.get("symbol"):
+                nm = ticker_names.display_name(h["symbol"], allow_net=False) or nm
+            bars.append({"name": nm, "pct": h.get("pct")})
+        theme.render(theme.etf_holdings_html(bars, title="구성 비중"))
+        if is_kr:
+            table = [{
+                "구성종목": h.get("name") or h.get("symbol"),
+                "비중": f"{h['pct']:.2f}%" if h.get("pct") is not None else "—",
+                "수량": f"{h['shares']:,.0f}" if h.get("shares") is not None else "—",
+                "평가금액": _f_krw_large(h.get("amount")) if h.get("amount") is not None else "—",
+            } for h in top]
+            st.dataframe(pd.DataFrame(table), hide_index=True, width="stretch")
         src = etf.get("top_holdings_source") or ("pykrx PDF" if is_kr else "yfinance funds_data")
         st.caption(f"출처: {src} · 비중은 공시/조회 시점 기준")
     else:
         st.caption("구성종목 데이터 없음" if is_kr else "보유 종목 데이터 없음 (yfinance funds_data)")
 
-    # ── 투자 지표: 운용보수·괴리율 | 배당 ──
-    st.subheader("투자 지표")
-    ic1, ic2 = st.columns(2)
-    with ic1:
-        st.markdown("**ETF 정보**")
-        st.metric("운용보수", data.f_frac_pct(er) if er is not None else "—",
-                  help="연간 총보수 (Expense Ratio)")
-        st.metric("괴리율", f"{pm:+.2f}%" if pm is not None else "—",
-                  help="(시장가 − NAV) / NAV — 음수 = NAV 대비 할인 거래")
-        if is_kr:
-            te = etf.get("tracking_error_pct")
-            st.metric("추적오차", f"{te:.2f}%" if te is not None else "—",
-                      help="ETF 수익률과 추종지수 수익률의 차이")
-    with ic2:
-        st.markdown(f"**분배금** <span style='color:{theme.MUTED};font-size:.8rem'>최근 12개월</span>",
-                    unsafe_allow_html=True)
+    if dv:
+        st.subheader("분배금")
         d1, d2, d3 = st.columns(3)
         d1.metric("횟수", f"{dv.get('count_12m', 0)}번",
                   dv.get("freq_label") if dv.get("freq_label", "—") != "—" else None)
@@ -1641,12 +1675,12 @@ def _etf_sections(ticker, etf, price):
 
     sw = etf.get("sector_weights") or {}
     if sw:
-        st.markdown("##### 🏭 섹터 비중")
         items = sorted(sw.items(), key=lambda x: -x[1])[:11]
-        st.plotly_chart(charts.hbar([k for k, _ in items], [v for _, v in items], "섹터 %", pct=False),
-                        width="stretch", config=_NOBAR)
+        theme.render(theme.etf_holdings_html(
+            [{"name": k, "pct": v} for k, v in items], title="섹터 비중"))
     src = etf.get("source") or ("KR ETF" if is_kr else "yfinance")
     st.caption(f"정보·표시용 · 매매신호 아님 · 결측 필드는 — 표기 · 데이터: {src}")
+
 
 
 # 섹션 셀렉터 + fragment — 활성 섹션만 렌더(그 섹션 네트워크만 호출)·전환은 fragment만 rerun.

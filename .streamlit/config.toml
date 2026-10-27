@@ -1,39 +1,34 @@
-# 퀀트 터미널 — Terminal Noir 테마 (TradingView/토스증권 영감)
-# 다크 블루블랙 + 일렉트릭 블루 액센트 + 틸그린/코랄레드 시맨틱 + Pretendard/JetBrains Mono.
-# 색·폰트는 여기서(무플래시 네이티브) · 컴포넌트/세부 CSS 는 dashboard/theme.py.
+# 퀀트 터미널 — 토스증권 톤 (평면 차콜/그레이 · Toss Blue · Pretendard)
+# 등락 시맨틱은 상승 초록·하락 빨강(프로젝트 규약). 표면색은 dashboard/theme.py 와 일치.
 
 [theme]
 base = "dark"
-primaryColor = "#2962ff"
-backgroundColor = "#0a0e17"
-secondaryBackgroundColor = "#131722"
-textColor = "#d1d4dc"
-linkColor = "#4d8bff"
+primaryColor = "#3182f6"
+backgroundColor = "#17171c"
+secondaryBackgroundColor = "#202027"
+textColor = "#f9fafb"
+linkColor = "#3182f6"
 
-# 시맨틱 색 (등락·델타·배지) = TradingView 톤
 greenColor = "#26a69a"
 redColor = "#ef5350"
-blueColor = "#2962ff"
+blueColor = "#3182f6"
 orangeColor = "#f7a600"
 violetColor = "#9b5de5"
 
-# 폰트 (Pretendard=한글+라틴 UI · JetBrains Mono=등폭 수치)
 font = "Pretendard"
 headingFont = "Pretendard"
 codeFont = "JetBrains Mono"
 baseFontSize = 15
 
-# 형태 — 얇은 보더 + 약한 라운드 = 터미널 패널
-baseRadius = "0.4rem"
-buttonRadius = "0.4rem"
-borderColor = "#222631"
-dataframeBorderColor = "#222631"
-dataframeHeaderBackgroundColor = "#161a25"
+baseRadius = "1rem"
+buttonRadius = "0.75rem"
+borderColor = "#3c3c47"
+dataframeBorderColor = "#3c3c47"
+dataframeHeaderBackgroundColor = "#202027"
 showWidgetBorder = true
 showSidebarBorder = true
 
-# 네이티브 차트 팔레트
-chartCategoricalColors = ["#2962ff", "#26a69a", "#ef5350", "#f7a600", "#9b5de5", "#00bcd4", "#ff7043", "#66bb6a"]
+chartCategoricalColors = ["#3182f6", "#26a69a", "#ef5350", "#f7a600", "#9b5de5", "#00bcd4", "#ff7043", "#66bb6a"]
 
 [[theme.fontFaces]]
 family = "Pretendard"
@@ -60,6 +55,6 @@ weight = 700
 style = "normal"
 
 [theme.sidebar]
-backgroundColor = "#0c1019"
-secondaryBackgroundColor = "#131722"
-borderColor = "#222631"
+backgroundColor = "#17171c"
+secondaryBackgroundColor = "#202027"
+borderColor = "#3c3c47"

@@ -1850,13 +1850,13 @@ def test_app_theme_toggle_light_dark():
     at.run()
     assert not at.exception, str(at.exception)
     dark_md = " ".join(str(getattr(m, "value", "")) for m in at.markdown)
-    assert "#f7f8fa" not in dark_md                    # 다크 기본 — 라이트 오버라이드 미주입
+    assert "#f2f4f6" not in dark_md                    # 다크 기본 — 라이트 오버라이드 미주입
     # 라이트로 전환
     at.session_state["tn_light"] = True
     at.run()
     assert not at.exception, str(at.exception)
     light_md = " ".join(str(getattr(m, "value", "")) for m in at.markdown)
-    assert "#f7f8fa" in light_md and "--tn-panel:#ffffff" in light_md
+    assert "#f2f4f6" in light_md and "--tn-panel:#ffffff" in light_md
 
 
 def test_ai_console_auto_question_routes_and_appends_to_single_thread(monkeypatch):

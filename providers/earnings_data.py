@@ -48,12 +48,19 @@ def is_kr(ticker: str) -> bool:
     t = (ticker or "").upper()
     return t.endswith(".KS") or t.endswith(".KQ")
 
+def _known_etf(ticker: str) -> bool:
+    """알려진 ETF 는 실적 캘린더가 없다. yfinance 가 ERROR 로 'delisted' 를 찍기 전에 건너뛴다."""
+    try:
+        from providers.etf_data import is_etf
+        return bool(is_etf(ticker))
+    except Exception:
+        return False
+
 
 def _ticker(symbol: str):
     """yfinance Ticker (테스트는 이 함수를 monkeypatch)."""
     import yfinance as yf
     return yf.Ticker(symbol)
-
 
 def _f(v):
     """None/NaN/비수치 → None, 그 외 float."""
@@ -246,6 +253,8 @@ def quarterly_fundamentals(ticker: str, *, force: bool = False, _t=None) -> dict
 
 def earnings_history(ticker: str, *, limit: int = 12, _t=None) -> list[dict]:
     """과거 실적 서프라이즈 [{date, eps_est, eps_actual, surprise_pct}] (최신순). 실패 시 []."""
+    if _known_etf(ticker):
+        return []
     try:
         t = _t or _ticker(ticker)
         df = t.get_earnings_dates(limit=limit) if hasattr(t, "get_earnings_dates") else t.earnings_dates
@@ -360,6 +369,8 @@ def next_earnings(ticker: str, *, _t=None, today: str | None = None) -> dict:
     today='YYYY-MM-DD' 주입 시 그 기준(테스트 결정성). 미주입 시 실제 오늘.
     """
     out = {"date": None, "days_until": None}
+    if _known_etf(ticker):
+        return out
     try:
         from datetime import date as _date
         ref = _date.fromisoformat(today) if today else _date.today()

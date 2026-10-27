@@ -41,21 +41,20 @@ if not getattr(st, "_tn_df_patched", False):
         try:
             if theme.is_light() and isinstance(data, _pd.DataFrame):
                 data = data.style.set_properties(
-                    **{"background-color": "#ffffff", "color": "#1a2233"})
+                    **{"background-color": "#ffffff", "color": "#191f28"})
         except Exception:
             pass
         return _orig_dataframe(data, *a, **k)
 
     st.dataframe = _themed_dataframe
     st._tn_df_patched = True
-# 선택 지속 — 매 런 쿠키를 현재 모드로 동기화 (다음 전체 새로고침에서 무플래시 복원 근접)
+# 테마 쿠키 + 재기동 워치독은 iframe 하나 — 매 rerun 마운트를 줄인다.
 st.iframe(
     "<script>parent.document.cookie='tn_theme="
     + ("light" if st.session_state["tn_light"] else "dark")
-    + "; path=/; max-age=31536000; SameSite=Lax'</script>", height=1)
-
-# 서버 재기동 감지 워치독 — 배포/재시작 후 좀비 탭이 자동 새로고침 → 로그인 게이트
-st.iframe(auth.reconnect_watchdog_html(), height=1)
+    + "; path=/; max-age=31536000; SameSite=Lax'</script>"
+    + auth.reconnect_watchdog_html(),
+    height=1)
 
 if not auth.password_gate():
     st.stop()
@@ -84,7 +83,7 @@ if _qtk:
             st.session_state["_nav_to_ticker"] = True  # st.navigation 이후 switch_page (기존 경로)
 
 with st.sidebar:
-    st.markdown("### 🔎 종목")
+    st.markdown("### 종목")
     _cur = st.session_state["ticker"]
     # 옵션 = 보유 우선 + 전체 유니버스. 현재 종목/정규화 가능한 대기입력이 유니버스 밖이면 앞에 보장.
     # accept_new_options 로 새로 입력한 티커(예: RIVN)가 아래 reconciliation 의 `_tsel not in _opts`
@@ -188,10 +187,11 @@ _watchlist_pg = st.Page(watchlist.render, title="관심종목", icon="⭐", url_
 st.session_state["_ticker_page"] = _ticker_pg
 st.session_state["_kr_etf_page"] = _kr_etf_pg
 st.session_state["_chart_page"] = _chart_pg          # ⛶ 전체화면 풀차트 왕복용
-st.session_state["_wiki_page"] = st.Page(ai_wiki.render, title="AI 위키", icon="🗂️", url_path="wiki")
+_wiki_pg = st.Page(ai_wiki.render, title="AI 위키", icon="🗂️", url_path="wiki")
+st.session_state["_wiki_page"] = _wiki_pg
 
 nav = st.navigation([_home_pg, _portfolio_pg, _watchlist_pg, _ticker_pg, _kr_etf_pg, _chart_pg,
-                     _market_pg, _paper_pg, _research_pg, _agent_pg])
+                     _market_pg, _paper_pg, _research_pg, _agent_pg, _wiki_pg])
 # 사이드바에서 종목을 새로 고르면 종목 분석 페이지로 이동 (홈 행클릭과 동일 UX)
 if st.session_state.pop("_nav_to_ticker", False):
     st.switch_page(_ticker_pg)
@@ -213,11 +213,6 @@ try:
     _tape = _theme.market_tape_html(_tape_items)
     if _tape:
         st.markdown(_tape, unsafe_allow_html=True)
-        _tape_meta = _tape_items[0] if _tape_items else {}
-        _tape_source = _tape_meta.get("source") or "미상"
-        _tape_freshness = _tape_meta.get("freshness") or "미상"
-        _tape_asof = _tape_meta.get("asof") or "기준 시각 미상"
-        st.caption(f"시장 마퀴 · source={_tape_source} · freshness={_tape_freshness} · {_tape_asof}")
 except Exception as _tape_err:
     import logging as _logging
     _logging.getLogger(__name__).warning("시장 마퀴 렌더 실패: %s", _tape_err)

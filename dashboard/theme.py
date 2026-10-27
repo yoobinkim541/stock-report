@@ -1,10 +1,11 @@
-"""dashboard/theme.py — Terminal Noir 테마 (TradingView/토스증권 영감).
+"""dashboard/theme.py — 토스증권 톤의 증권 앱 표면.
 
 단일 진실원: 팔레트 상수 + **순수 HTML/SVG 컴포넌트 빌더**(테스트가능·streamlit 무관)
 + plotly 테마(순수) + `inject_global_css()`(streamlit lazy import).
 
-`import dashboard.theme` 는 streamlit 을 끌어오지 않는다(charts.py 가 팔레트만 가져가도 순수 유지).
-색은 .streamlit/config.toml 과 일치시킨다.
+등락 시맨틱은 프로젝트 규약(상승 초록·하락 빨강)을 유지한다. 표면·타이포·카드·내비는
+토스 그레이/블루(#3182f6)·16px 라운드·평면 배경. 색은 .streamlit/config.toml 과 일치.
+`import dashboard.theme` 는 streamlit 을 끌어오지 않는다.
 """
 from __future__ import annotations
 
@@ -27,16 +28,16 @@ MUTED = "var(--tn-muted)"
 # 시맨틱 색 — 라이트/다크 공통 (등락·델타·배지). 실제 hex.
 GREEN = "#26a69a"
 RED = "#ef5350"
-BLUE = "#2962ff"
+BLUE = "#3182f6"
 AMBER = "#f7a600"
 VIOLET = "#9b5de5"
 
 # 표면 실제값 (inject_global_css 가 CSS 변수로 주입)
 _SURF = {
-    "dark":  {"bg": "#0a0e17", "panel": "#131722", "panel2": "#1a2030",
-              "border": "#222631", "grid": "#1e222d", "text": "#d1d4dc", "muted": "#9198a6"},
-    "light": {"bg": "#f7f8fa", "panel": "#ffffff", "panel2": "#eef1f6",
-              "border": "#dce2ea", "grid": "#e9ecf2", "text": "#1a2233", "muted": "#5c6472"},
+    "dark":  {"bg": "#17171c", "panel": "#202027", "panel2": "#2c2c35",
+              "border": "#3c3c47", "grid": "#2c2c35", "text": "#f9fafb", "muted": "#8b95a1"},
+    "light": {"bg": "#f2f4f6", "panel": "#ffffff", "panel2": "#f9fafb",
+              "border": "#e5e8eb", "grid": "#f2f4f6", "text": "#191f28", "muted": "#6b7684"},
 }
 
 # plotly 축·주석 — **테마 중립 그레이**(hex). 투명 paper 로 배경은 페이지를 따르고,
@@ -348,10 +349,10 @@ def macro_cards_html(items: list[dict], cols: int = 4, link: bool = True) -> str
     return f'''<style>
 .tn-macro {{ display:grid; grid-template-columns:repeat({cols}, minmax(0, 1fr)); gap:8px; }}
 @media (max-width: 600px) {{ .tn-macro {{ grid-template-columns:repeat(2, minmax(0, 1fr)); }} }}
-.tn-macro .tn-macro-card {{ padding:9px 11px; background:{PANEL}; border:1px solid {BORDER};
-  border-radius:10px; display:flex; flex-direction:column; gap:2px;
-  text-decoration:none !important; color:inherit; transition:border-color .12s, transform .12s; }}
-a.tn-macro-card:hover {{ border-color:{BLUE}; transform:translateY(-1px); }}
+.tn-macro .tn-macro-card {{ padding:12px 14px; background:{PANEL}; border:1px solid {BORDER};
+  border-radius:16px; display:flex; flex-direction:column; gap:2px;
+  text-decoration:none !important; color:inherit; transition:border-color .12s; }}
+a.tn-macro-card:hover {{ border-color:{BLUE}; }}
 </style><div class="tn-macro">{cards}</div>'''
 
 
@@ -406,30 +407,50 @@ def _money_compact(v, cur: str) -> str:
     return f"${v:,.0f}"
 
 
-def paper_rail_html(rows: list[dict], title="🧪 모의투자") -> str:
+def paper_rail_html(rows: list[dict], title="🧪 모의투자 · 평가액 · 현 세대 수익률") -> str:
     """사이드바 모의 계좌 레일 (워치리스트와 동일 tn-wl 스타일 — 순수 빌더).
 
-    rows: views.paper_glance 출력 [{label, currency, nav, cum_ret, day_ret, n_days}].
-    3열: 계좌 · NAV(압축) · 누적%(색). 전일·세대/전체 누적·기록일수는 title 툴팁.
+    rows: views.paper_glance 출력 [{label, currency, nav, cum_ret, current_cum_ret, day_ret, n_days,
+    awaiting_generation, balance_failure}].
+    3열: 계좌 · NAV(압축) · 수익률(색). NAV 는 현 세대 계좌라 수익률도 같은 세대 값을 보여준다
+    (세대 리셋 후 $100,000 옆에 전체 세대 누적 -60% 가 붙어 모순돼 보이던 문제).
+    세대 마감 직후 새 세대 첫 기록 전(awaiting_generation)에는 직전 세대 마감 NAV 와
+    "새 세대 대기" 를 보여준다 — 현 세대 수익률이 없으므로 전체 누적으로 대체하지 않는다.
+    마지막 유효 기록 이후 잔고 조회가 실패하고 있으면(balance_failure) NAV 는 마지막 유효값
+    그대로 두고 툴팁에 실패 시각을 붙인다. 전체 세대 누적·전일·기록일수는 title 툴팁.
     """
     body = []
     for r in rows or []:
-        cum = r.get("cum_ret")
-        up = (cum or 0) >= 0
-        col = GREEN if up else RED
-        chg = f"{'+' if up else ''}{_num(cum)}%" if cum is not None else "—"
-        cur_cum = r.get("current_cum_ret")
-        day = r.get("day_ret")
-        tip_bits = []
-        if day is not None:
-            tip_bits.append(f"전일 {day:+.2f}%")
-        if cur_cum is not None and cum is not None and cur_cum != cum:
-            tip_bits.append(f"세대 {cur_cum:+.2f}%")
-            tip_bits.append(f"전체 {cum:+.2f}%")
-        elif cum is not None:
-            tip_bits.append(f"누적 {cum:+.2f}%")
-        tip_bits.append(f"기록 {r.get('n_days', 0)}일")
-        tip = f' title="{" · ".join(tip_bits)}"' if tip_bits else ""
+        life = r.get("cum_ret")
+        gen = r.get("generation")
+        if r.get("awaiting_generation"):
+            col, chg = MUTED, "새 세대 대기"
+            closed = r.get("closed_generation")
+            tip_bits = [f"{f'세대 {closed} ' if closed else ''}마감 NAV"
+                        + (f" ({r['closed_nav_date']})" if r.get("closed_nav_date") else ""),
+                        "새 세대 첫 기록 대기"]
+            if life is not None:
+                tip_bits.append(f"{f'전체 {gen}세대' if gen else '전체'} 누적 {life:+.2f}%")
+        else:
+            cur_cum = r.get("current_cum_ret")
+            shown = cur_cum if cur_cum is not None else life
+            up = (shown or 0) >= 0
+            col = GREEN if up else RED
+            chg = f"{'+' if up else ''}{_num(shown)}%" if shown is not None else "—"
+            day = r.get("day_ret")
+            tip_bits = []
+            if day is not None:
+                tip_bits.append(f"전일 {day:+.2f}%")
+            if shown is not None:
+                tip_bits.append(f"현 세대 {shown:+.2f}%")
+            if life is not None and life != shown:
+                tip_bits.append(f"{f'전체 {gen}세대' if gen else '전체'} 누적 {life:+.2f}%")
+            tip_bits.append(f"기록 {r.get('n_days', 0)}일")
+        failure = r.get("balance_failure") or {}
+        if failure:
+            when = str(failure.get("date") or "")[:10]
+            tip_bits.append(f"잔고 조회 실패{f' {when}' if when else ''} — 마지막 유효 기록 기준")
+        tip = f' title="{" · ".join(tip_bits)}"'
         body.append(f'''<div class="tn-wl-row">
   <span class="tn-wl-sym"{tip}>{r.get("label", "?")}</span>
   <span class="tn-wl-last">{_money_compact(r.get("nav"), r.get("currency", ""))}</span>
@@ -536,47 +557,42 @@ def _surface_vars(light: bool) -> str:
 # 주요 표면만 정확히 재도색한다. 텍스트는 !important 없이(인라인 시맨틱 색 보존) 특이도로.
 _LIGHT_OVERRIDE = """
 <style>
-.stApp { background:
-    radial-gradient(1100px 460px at 50% -8%, #dfe7f533 0%, transparent 60%),
-    #f7f8fa !important; }
+.stApp { background: #f2f4f6 !important; }
 [data-testid="stHeader"] { background: transparent !important; }
-[data-testid="stSidebar"] { background: #ffffff !important; border-right: 1px solid #dce2ea !important; }
-[data-testid="stMetric"], [data-testid="stExpander"] { background: #ffffff !important; border-color: #dce2ea !important; }
-[data-testid="stMetric"]:hover { border-color: #b9c2d0 !important; }
-[data-testid="stMetricValue"] { color: #1a2233 !important; }
-[data-testid="stDataFrame"], [data-testid="stTable"] { border-color: #dce2ea !important; }
-.stTabs [data-baseweb="tab-list"] { border-bottom-color: #dce2ea !important; }
+[data-testid="stSidebar"] { background: #ffffff !important; border-right: 1px solid #e5e8eb !important; }
+[data-testid="stMetric"], [data-testid="stExpander"] { background: #ffffff !important; border-color: #e5e8eb !important; }
+[data-testid="stMetricValue"] { color: #191f28 !important; }
+[data-testid="stDataFrame"], [data-testid="stTable"] { border-color: #e5e8eb !important; }
+.stTabs [data-baseweb="tab-list"] { background: #f2f4f6 !important; }
 .stTabs [aria-selected="true"] { background: #ffffff !important; }
 /* 입력·선택·버튼 (baseweb) */
 [data-baseweb="select"] > div, [data-baseweb="input"] > div, [data-baseweb="base-input"],
 .stTextInput input, .stNumberInput input, [data-baseweb="popover"] [role="listbox"],
-[data-testid="stChatInput"] { background: #ffffff !important; border-color: #dce2ea !important; }
-[data-testid="stWidgetLabel"] p, .stRadio label, .stCheckbox label { color: #3a4353 !important; }
+[data-testid="stChatInput"] { background: #ffffff !important; border-color: #e5e8eb !important; }
+[data-testid="stWidgetLabel"] p, .stRadio label, .stCheckbox label { color: #4e5968 !important; }
 /* 버튼·세그먼트·라디오 pill·팝오버 트리거 — 다크 표면 → 라이트 (primary 파랑은 유지) */
 .stButton button:not([kind="primary"]):not([data-testid="stBaseButton-primary"]),
 [data-testid="stBaseButton-secondary"], [data-testid="stBaseButton-tertiary"],
 [data-testid="stBaseButton-borderless"], [data-testid="stFormSubmitButton"] button,
 [data-testid="stPopover"] button, [data-testid="stButtonGroup"] button,
 [data-baseweb="segmented-control"] button, [data-testid="stRadio"] label {
-  background: #ffffff !important; color: #1a2233 !important; border-color: #dce2ea !important; }
+  background: #ffffff !important; color: #191f28 !important; border-color: #e5e8eb !important; }
 [data-testid="stButtonGroup"] button[aria-checked="true"],
 [data-testid="stButtonGroup"] button[aria-selected="true"],
 [data-testid="stRadio"] label[data-checked="true"] {
-  background: #eaf1ff !important; color: #1a56db !important; border-color: #9fc0f5 !important; }
-[data-testid="stButtonGroup"] button:hover, .stButton button:hover { border-color: #9fc0f5 !important; }
+  background: #e8f3ff !important; color: #3182f6 !important; border-color: #3182f6 !important; }
 /* 팝오버/드롭다운 내용 배경 */
 [data-baseweb="popover"] [data-testid="stPopoverBody"], [data-baseweb="menu"] {
   background: #ffffff !important; }
 /* 본문 텍스트 — !important 없이(인라인 시맨틱 색 보존) 특이도로 다크 기본색만 교체 */
 .stApp p, .stApp li, .stApp label, .stMarkdown, [data-testid="stMarkdownContainer"],
-.stApp h1, .stApp h2, .stApp h3, .stApp h4, [data-testid="stMetricLabel"] p { color: #1a2233; }
-[data-testid="stCaptionContainer"], .stApp small { color: #5c6472; }
-.stCode, pre, code { background: #eef1f6 !important; color: #1a2233 !important; }
-/* alert/info 톤 (라이트) */
-[data-testid="stAlert"] { background: #eef2fb !important; }
-::-webkit-scrollbar-track { background: #eef1f6; }
-::-webkit-scrollbar-thumb { background: #c3ccd8; }
-::-webkit-scrollbar-thumb:hover { background: #a9b4c4; }
+.stApp h1, .stApp h2, .stApp h3, .stApp h4, [data-testid="stMetricLabel"] p { color: #191f28; }
+[data-testid="stCaptionContainer"], .stApp small { color: #6b7684; }
+.stCode, pre, code { background: #f2f4f6 !important; color: #191f28 !important; }
+[data-testid="stAlert"] { background: #e8f3ff !important; }
+::-webkit-scrollbar-track { background: #f2f4f6; }
+::-webkit-scrollbar-thumb { background: #d1d6db; }
+::-webkit-scrollbar-thumb:hover { background: #b0b8c1; }
 </style>
 """
 
@@ -611,179 +627,167 @@ def render(html: str):
 
 _CSS = f"""
 <style>
-/* ── 캔버스: 깊은 블루블랙 + 상단 글로우 (depth) ───────────────────────── */
-.stApp {{
-  background:
-    radial-gradient(1100px 460px at 50% -8%, #16203a55 0%, transparent 60%),
-    {BG};
-}}
-/* 상단 헤더 투명화 */
+html, body, .stApp {{ overscroll-behavior: none; }}
+.stApp {{ background: {BG}; }}
 [data-testid="stHeader"] {{ background: transparent; }}
-.block-container {{ padding-top: 2.4rem; padding-bottom: 3rem; max-width: 1500px; }}
+.block-container {{ padding-top: 1.6rem; padding-bottom: 3.2rem; max-width: 1280px; }}
 
-/* ── 타이포 ──────────────────────────────────────────────────────────── */
 html, body, [class*="st-"], .stApp, p, span, div, label, input, button {{
   font-family: 'Pretendard', -apple-system, BlinkMacSystemFont, sans-serif;
+  -webkit-font-smoothing: antialiased;
 }}
-/* Streamlit 머티리얼 아이콘 폰트 복원 — 위 광역 span override 가 아이콘 ligature 를
-   덮어 '_arrow_right_' 처럼 텍스트로 새는 것 방지 (expander 셰브런 등). */
 [data-testid="stIconMaterial"], .material-symbols-rounded, .material-symbols-outlined,
 [class*="material-symbols"], span[translate="no"] {{
   font-family: 'Material Symbols Rounded', 'Material Symbols Outlined', 'Material Icons' !important;
 }}
 
-/* ── 렌더링 진행감 — 스켈레톤 shimmer + stale 요소 숨쉬기 (멈춘 화면 느낌 제거) ── */
 [data-testid="stSkeleton"] {{
-  background: linear-gradient(90deg, #131722 25%, #1e2536 38%, #131722 55%) !important;
+  background: linear-gradient(90deg, {PANEL} 25%, {PANEL2} 38%, {PANEL} 55%) !important;
   background-size: 400% 100% !important;
   animation: tn-shimmer 1.3s ease-in-out infinite;
-  border-radius: 10px;
+  border-radius: 16px;
 }}
 @keyframes tn-shimmer {{
   0% {{ background-position: 100% 50%; }}
   100% {{ background-position: 0% 50%; }}
 }}
-/* rerun 중 이전 화면(stale) — 부드러운 숨쉬기 펄스로 '처리 중' 신호 */
-[data-stale="true"] {{
-  animation: tn-breathe 1.5s ease-in-out infinite !important;
-}}
-@keyframes tn-breathe {{
-  0%, 100% {{ opacity: 0.45; }}
-  50% {{ opacity: 0.8; }}
-}}
-.stSpinner > div {{ border-top-color: #2962ff !important; }}
-h1, h2, h3 {{ letter-spacing: -0.02em; font-weight: 700; }}
-h1 {{ font-size: 1.7rem !important; }}
-/* 숫자는 등폭 (터미널 정렬감) */
+/* rerun 중 이전 화면을 펄스하지 않는다 — 투명도 애니메이션이 화면 떨림으로 보인다 */
+[data-stale="true"] {{ animation: none !important; opacity: 1 !important; }}
+.stSpinner > div {{ border-top-color: {BLUE} !important; }}
+h1, h2, h3 {{ letter-spacing: -0.03em; font-weight: 700; }}
+h1 {{ font-size: 1.55rem !important; }}
 [data-testid="stMetricValue"], code, .tn-price, .tn-delta, .tn-wl-last,
 .tn-wl-chg, .tn-gauge text {{
-  font-family: {_MONO}; font-feature-settings: "tnum" 1; }}
+  font-variant-numeric: tabular-nums; font-feature-settings: "tnum" 1; }}
+.tn-price, .tn-delta, .tn-wl-last, .tn-wl-chg {{ font-family: {_MONO}; }}
 
-/* ── 메트릭 = 보더 카드 ───────────────────────────────────────────────── */
 [data-testid="stMetric"] {{
   background: {PANEL};
   border: 1px solid {BORDER};
-  border-radius: 8px;
-  padding: 15px 17px 13px;
-  transition: border-color .18s ease, transform .18s ease;
+  border-radius: 16px;
+  padding: 16px 18px 14px;
+  box-shadow: none;
 }}
-[data-testid="stMetric"]:hover {{ border-color: #2f3645; transform: translateY(-1px); }}
 [data-testid="stMetricLabel"] p {{
-  color: {MUTED} !important; font-size: .72rem !important;
-  text-transform: uppercase; letter-spacing: .08em; font-weight: 600; }}
-[data-testid="stMetricValue"] {{ font-size: 1.7rem !important; color: {TEXT}; }}
+  color: {MUTED} !important; font-size: .78rem !important;
+  text-transform: none; letter-spacing: -0.01em; font-weight: 500; }}
+[data-testid="stMetricValue"] {{ font-size: 1.55rem !important; color: {TEXT}; letter-spacing: -0.03em; }}
 
-/* ── 탭: 언더라인 액센트 ──────────────────────────────────────────────── */
-.stTabs [data-baseweb="tab-list"] {{ gap: 4px; border-bottom: 1px solid {BORDER}; }}
+.stTabs [data-baseweb="tab-list"] {{
+  gap: 4px; border-bottom: none; background: {PANEL2};
+  border-radius: 14px; padding: 4px; width: fit-content; max-width: 100%; }}
 .stTabs [data-baseweb="tab"] {{
-  color: {MUTED}; font-weight: 600; padding: 8px 14px;
-  border-radius: 6px 6px 0 0; }}
+  color: {MUTED}; font-weight: 600; padding: 8px 14px; border-radius: 10px; }}
 .stTabs [aria-selected="true"] {{ color: {TEXT} !important; background: {PANEL}; }}
-.stTabs [data-baseweb="tab-highlight"] {{ background: {BLUE} !important; height: 3px; }}
+.stTabs [data-baseweb="tab-highlight"] {{ display: none; }}
 
-/* ── 데이터프레임 ────────────────────────────────────────────────────── */
-[data-testid="stDataFrame"] {{ border: 1px solid {BORDER}; border-radius: 8px; }}
+.stButton button, [data-testid="stBaseButton-secondary"],
+[data-testid="stBaseButton-primary"] {{
+  border-radius: 12px !important; font-weight: 600; min-height: 40px; }}
+[data-baseweb="input"] > div, [data-baseweb="select"] > div {{ border-radius: 12px !important; }}
 
-/* ── 사이드바 ────────────────────────────────────────────────────────── */
+[data-testid="stDataFrame"] {{ border: 1px solid {BORDER}; border-radius: 16px; overflow: hidden; }}
+
 [data-testid="stSidebar"] {{ border-right: 1px solid {BORDER}; }}
-[data-testid="stSidebar"] h3 {{ font-size: .95rem; color: {TEXT}; }}
+[data-testid="stSidebar"] h3 {{ font-size: .95rem; color: {TEXT}; letter-spacing: -0.02em; }}
+[data-testid="stSidebarNav"] ul {{ padding: 4px 8px 8px; }}
+[data-testid="stSidebarNav"] a {{
+  border-radius: 12px; margin: 2px 0; font-weight: 600; letter-spacing: -0.02em; }}
+[data-testid="stSidebarNav"] a[aria-current="page"] {{
+  background: {BLUE}1f; color: {BLUE}; }}
 
-/* ── expander / info / alert 톤 ──────────────────────────────────────── */
-[data-testid="stExpander"] {{ border: 1px solid {BORDER}; border-radius: 8px; background: {PANEL}; }}
+[data-testid="stExpander"] {{ border: 1px solid {BORDER}; border-radius: 16px; background: {PANEL}; }}
 
-/* ── 스크롤바 ────────────────────────────────────────────────────────── */
-::-webkit-scrollbar {{ width: 9px; height: 9px; }}
-::-webkit-scrollbar-track {{ background: {BG}; }}
-::-webkit-scrollbar-thumb {{ background: #2a2f3d; border-radius: 6px; }}
-::-webkit-scrollbar-thumb:hover {{ background: #3a4252; }}
+::-webkit-scrollbar {{ width: 8px; height: 8px; }}
+::-webkit-scrollbar-track {{ background: transparent; }}
+::-webkit-scrollbar-thumb {{ background: {BORDER}; border-radius: 8px; }}
 
-/* ── 컴포넌트: 티커 히어로 ───────────────────────────────────────────── */
-.tn-hero {{ display: flex; align-items: center; gap: 18px; margin: 4px 0 20px; }}
+.tn-hero {{ display: flex; align-items: center; gap: 16px; margin: 2px 0 16px; }}
 .tn-badge {{
-  width: 62px; height: 62px; border-radius: 50%; border: 1.5px solid;
+  width: 56px; height: 56px; border-radius: 18px; border: 1px solid;
   display: flex; align-items: center; justify-content: center;
-  font-weight: 800; font-size: 1.1rem; letter-spacing: -.02em; flex: 0 0 auto;
-  font-family: {_MONO}; }}
-.tn-hero-name {{ font-size: 1.5rem; font-weight: 800; color: {TEXT}; line-height: 1.1; }}
-.tn-hero-sym {{ color: {MUTED}; font-size: .82rem; font-family: {_MONO}; margin-top: 1px; }}
-.tn-hero-row {{ display: flex; align-items: baseline; gap: 10px; margin-top: 6px; flex-wrap: wrap; }}
-.tn-price {{ font-size: 2.1rem; font-weight: 700; color: {TEXT}; line-height: 1; }}
+  font-weight: 800; font-size: 1rem; letter-spacing: -.03em; flex: 0 0 auto; }}
+.tn-hero-name {{ font-size: 1.35rem; font-weight: 700; color: {TEXT}; line-height: 1.15; letter-spacing: -0.03em; }}
+.tn-hero-sym {{ color: {MUTED}; font-size: .8rem; margin-top: 2px; }}
+.tn-hero-row {{ display: flex; align-items: baseline; gap: 8px; margin-top: 4px; flex-wrap: wrap; }}
+.tn-price {{ font-size: 2.15rem; font-weight: 700; color: {TEXT}; line-height: 1; letter-spacing: -0.04em; }}
 .tn-cur {{ color: {MUTED}; font-size: .85rem; }}
-.tn-delta {{ font-size: .92rem; font-weight: 600; padding: 3px 9px; border-radius: 6px; }}
+.tn-delta {{ font-size: .92rem; font-weight: 600; padding: 2px 8px; border-radius: 8px; }}
 .tn-asof {{ color: {MUTED}; font-size: .72rem; margin-top: 6px; }}
 
-/* ── 컴포넌트: 게이지 ────────────────────────────────────────────────── */
-.tn-gauge {{ background: {PANEL}; border: 1px solid {BORDER}; border-radius: 8px;
+.tn-gauge {{ background: {PANEL}; border: 1px solid {BORDER}; border-radius: 16px;
   padding: 16px 14px 18px; text-align: center; }}
-.tn-gauge-verdict {{ font-size: 1.25rem; font-weight: 800; margin-top: -6px; }}
+.tn-gauge-verdict {{ font-size: 1.2rem; font-weight: 700; margin-top: -6px; letter-spacing: -0.02em; }}
 .tn-gauge-sub {{ color: {MUTED}; font-size: .76rem; margin-top: 2px; }}
 
-/* ── 컴포넌트: 워치리스트 ────────────────────────────────────────────── */
-.tn-wl {{ background: {PANEL}; border: 1px solid {BORDER}; border-radius: 8px; overflow: hidden; }}
-.tn-wl-head {{ padding: 9px 14px; font-size: .72rem; font-weight: 700; color: {MUTED};
-  text-transform: uppercase; letter-spacing: .1em; border-bottom: 1px solid {BORDER}; }}
+.tn-wl {{ background: {PANEL}; border: 1px solid {BORDER}; border-radius: 16px; overflow: hidden; }}
+.tn-wl-head {{ padding: 12px 14px 8px; font-size: .78rem; font-weight: 600; color: {MUTED};
+  letter-spacing: -0.01em; }}
 .tn-wl-row {{ display: grid; grid-template-columns: 1fr auto auto; align-items: center;
-  gap: 10px; padding: 10px 14px; border-bottom: 1px solid {BORDER}; transition: background .15s; }}
+  gap: 10px; padding: 11px 14px; border-top: 1px solid {BORDER}; }}
 .tn-wl-row:hover {{ background: {PANEL2}; }}
-.tn-wl-row:last-child {{ border-bottom: none; }}
-.tn-wl-sym {{ font-weight: 700; color: {TEXT}; font-size: .9rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+.tn-wl-sym {{ font-weight: 600; color: {TEXT}; font-size: .9rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
 .tn-wl-last {{ font-family: {_MONO}; color: {TEXT}; font-size: .82rem; white-space: nowrap; }}
 .tn-wl-chg {{ font-family: {_MONO}; font-size: .82rem; font-weight: 600; text-align: right; white-space: nowrap; }}
 .tn-spark {{ display: block; }}
 
-/* ── 컴포넌트: 섹션 라벨 ─────────────────────────────────────────────── */
 .tn-sec {{ border-left: 3px solid {BLUE}; padding-left: 10px; margin: 18px 0 10px; }}
-.tn-sec span {{ font-size: .78rem; font-weight: 700; color: {MUTED};
-  text-transform: uppercase; letter-spacing: .12em; }}
+.tn-sec span {{ font-size: .84rem; font-weight: 700; color: {TEXT}; letter-spacing: -0.02em; }}
 
-/* ── segmented_control / pills: 선택 세그먼트 강조 (활성 신호 뚜렷하게) ──── */
 [data-testid="stButtonGroup"] button[aria-pressed="true"],
 [data-testid="stButtonGroup"] button[aria-checked="true"] {{
-  background: {BLUE}26 !important; border-color: {BLUE} !important; color: {TEXT} !important; }}
+  background: {BLUE}1a !important; border-color: {BLUE} !important; color: {BLUE} !important; }}
 
-/* ── 캡션 가독 (흐린 회색 상향) ──────────────────────────────────────── */
+.tn-etf-rets {{ display: flex; gap: 8px; flex-wrap: wrap; margin: 4px 0 12px; }}
+.tn-etf-chip {{ flex: 1 1 92px; background: {PANEL}; border: 1px solid {BORDER};
+  border-radius: 14px; padding: 10px 12px; }}
+.tn-etf-chip span {{ display: block; color: {MUTED}; font-size: .72rem; font-weight: 600; }}
+.tn-etf-chip b {{ font-size: 1.05rem; letter-spacing: -.03em; font-variant-numeric: tabular-nums; }}
+.tn-hold {{ background: {PANEL}; border: 1px solid {BORDER}; border-radius: 16px; padding: 4px 12px 8px; }}
+.tn-hold-head {{ padding: 10px 0 4px; color: {MUTED}; font-size: .78rem; font-weight: 600; }}
+.tn-hold-row {{ display: grid; grid-template-columns: minmax(0,1.1fr) 64px minmax(72px,1fr);
+  gap: 8px; align-items: center; padding: 7px 0; border-top: 1px solid {BORDER}; }}
+.tn-hold-name {{ overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; color: {TEXT}; }}
+.tn-hold-pct {{ text-align: right; font-variant-numeric: tabular-nums; color: {TEXT}; font-size: .82rem; }}
+.tn-hold-track {{ height: 6px; border-radius: 99px; background: {PANEL2}; overflow: hidden; }}
+.tn-hold-bar {{ height: 100%; border-radius: 99px; background: {BLUE}; }}
+
 [data-testid="stCaptionContainer"] {{ color: {MUTED} !important; }}
-
-/* ── Streamlit dev 크롬 숨김 (Deploy 버튼·데코) — 개인 대시보드 깔끔하게 ──── */
+footer {{ display: none !important; }}
 [data-testid="stAppDeployButton"], .stDeployButton {{ display: none !important; }}
 [data-testid="stDecoration"] {{ display: none !important; }}
+[data-testid="stElementContainer"]:has(iframe[height="1"]) {{
+  height: 0 !important; min-height: 0 !important; margin: 0 !important;
+  padding: 0 !important; overflow: hidden !important; }}
 
-/* ── 모바일 반응형 (≤600px) — 커스텀 컴포넌트 축소·재배치 ─────────────── */
 @media (max-width: 600px) {{
-  /* 신규 카드·스트립 — 모바일 축소 (인라인 스타일은 !important 로 우선) */
   div[style*="min-height:340px"] {{ min-height: 240px !important; }}
   div[style*="min-width:150px"] {{ min-width: 46% !important; }}
   div[style*="min-width:104px"] {{ min-width: 44% !important; }}
   .tn-tape {{ font-size: 0.7rem; }}
-
   .block-container {{ padding-top: 1.1rem; padding-left: .7rem; padding-right: .7rem;
                       padding-bottom: 1.6rem; }}
   h1 {{ font-size: 1.4rem !important; }}
   h2, h3 {{ font-size: 1.08rem !important; }}
   .tn-hero {{ gap: 12px; margin: 2px 0 12px; }}
-  .tn-badge {{ width: 46px; height: 46px; font-size: .95rem; }}
+  .tn-badge {{ width: 46px; height: 46px; font-size: .95rem; border-radius: 14px; }}
   .tn-hero-name {{ font-size: 1.2rem; }}
   .tn-price {{ font-size: 1.6rem; }}
   .tn-gauge {{ padding: 12px 10px 14px; }}
-  /* 워치리스트: 스파크라인 숨기고 3열로 (좁은 폭 판독) */
   .tn-wl-row {{ grid-template-columns: 1fr auto auto; gap: 8px; }}
   .tn-wl-spark {{ display: none; }}
-
-  /* ── 메트릭 카드 — 데스크톱 3열이 모바일에선 세로 스택되며 각 카드가 화면을 꽉
-        채워 세로 공간이 폭발한다. 패딩·값 폰트를 줄여 컴팩트하게 (핵심 개선). ── */
   [data-testid="stMetric"] {{ padding: 9px 12px 8px !important; }}
   [data-testid="stMetricValue"] {{ font-size: 1.25rem !important; }}
   [data-testid="stMetricLabel"] p {{ font-size: .66rem !important; }}
   [data-testid="stMetricDelta"] {{ font-size: .78rem !important; }}
-  /* 세로 스택 간격 축소 (기본 1rem gap → 촘촘) — 카드·섹션이 덜 벌어짐 */
   [data-testid="stVerticalBlock"] {{ gap: .55rem !important; }}
   [data-testid="stHorizontalBlock"] {{ gap: .5rem !important; }}
-  /* 탭·버튼 터치 타깃은 유지하되 폰트만 소폭 축소 */
   .stTabs [data-baseweb="tab"] {{ padding: 7px 10px; font-size: .84rem; }}
-  [data-testid="stExpander"] summary {{ padding: 8px 12px; }}
+  .tn-etf-rets {{ gap: 6px; }}
+  .tn-hold-row {{ grid-template-columns: minmax(0,1fr) 58px; }}
+  .tn-hold-track {{ display: none; }}
 }}
 
-/* ── 소형 폰(≤430px) — 한 단계 더 촘촘 ──────────────────────────────── */
 @media (max-width: 430px) {{
   [data-testid="stMetricValue"] {{ font-size: 1.12rem !important; }}
   [data-testid="stMetric"] {{ padding: 8px 10px 7px !important; }}
@@ -890,7 +894,7 @@ def market_tape_html(items: list[dict]) -> str:
         arrow = "▲" if (pct or 0) >= 0 else "▼"
         spans.append(
             f"<span style='margin:0 18px;white-space:nowrap'>"
-            f"<b style='color:#d1d4dc'>{it['label']}</b> "
+            f"<b style='color:{TEXT}'>{it['label']}</b> "
             f"<span style='font-family:{_MONO}'>{it['value']:,}</span> "
             f"<span style='color:{color};font-family:{_MONO};font-size:11px'>"
             f"{arrow}{abs(chg):,} ({pct:+.2f}%)</span></span>")
@@ -910,9 +914,47 @@ def market_tape_html(items: list[dict]) -> str:
 """
 
 
+def etf_return_strip_html(chips: list) -> str:
+    """기간 수익률 칩 — [(라벨, 값%|None)]. 없음이면 ''. 상승 초록·하락 빨강."""
+    rows = []
+    for lab, val in chips or []:
+        if val is None:
+            num, col = "—", MUTED
+        else:
+            num, col = f"{float(val):+.1f}%", (GREEN if float(val) >= 0 else RED)
+        rows.append(
+            f'<div class="tn-etf-chip"><span>{lab}</span>'
+            f'<b style="color:{col}">{num}</b></div>')
+    if not rows:
+        return ""
+    return f'<div class="tn-etf-rets">{"".join(rows)}</div>'
+
+
+def etf_holdings_html(rows: list, *, title: str = "구성 비중") -> str:
+    """구성종목·섹터 비중 바. 가장 큰 비중이 트랙을 채운다. 없으면 ''."""
+    items = []
+    for row in rows or []:
+        name = str((row or {}).get("name") or (row or {}).get("symbol") or "").strip()
+        pct = (row or {}).get("pct")
+        if not name or not isinstance(pct, (int, float)):
+            continue
+        items.append((name, float(pct)))
+    if not items:
+        return ""
+    peak = max(abs(p) for _, p in items) or 1.0
+    body = []
+    for name, pct in items[:12]:
+        width = max(4, min(100, abs(pct) / peak * 100))
+        body.append(
+            f'<div class="tn-hold-row"><span class="tn-hold-name">{name}</span>'
+            f'<span class="tn-hold-pct">{pct:.2f}%</span>'
+            f'<div class="tn-hold-track"><div class="tn-hold-bar" style="width:{width:.1f}%"></div></div>'
+            f'</div>')
+    return (f'<div class="tn-hold"><div class="tn-hold-head">{title}</div>{"".join(body)}</div>')
+
+
 # ── ETF 점수 게이지 (동종그룹 1~100 — 표시·참고용) ─────────────────────────────
 _ETF_SCORE_ZONES = [(20, RED), (40, "#f97316"), (60, MUTED), (80, "#86c26a"), (100, GREEN)]
-
 
 def etf_score_label(s):
     if s >= 80:

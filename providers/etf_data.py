@@ -18,7 +18,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
-
+# pykrx 는 KRX 빈 응답을 logger.error("%s", exc) 가 아니라 % 포맷이 깨진 호출로 남긴다.
+# 그 TypeError 가 Streamlit 스크립트 스레드의 로깅까지 터뜨린다.
+logging.getLogger("pykrx").setLevel(logging.CRITICAL)
 CACHE_DIR = Path(os.path.expanduser("~/reports/ml-cache"))
 CACHE_TTL_S = 12 * 3600
 

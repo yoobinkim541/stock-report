@@ -261,6 +261,17 @@ def test_etf_score_html_gauge():
     assert "데이터 부족" in none_h and "<svg" not in none_h
     assert "그룹 최상위" in theme.etf_score_html(90) and "그룹 최하위" in theme.etf_score_html(5)
 
+def test_etf_return_strip_and_holdings():
+    """수익률 칩은 상승 초록·하락 빨강, 비중 바는 최대 비중이 트랙을 채운다."""
+    chips = theme.etf_return_strip_html([("1년", 12.4), ("MDD", -8.2), ("분배율", None)])
+    assert "tn-etf-chip" in chips and "+12.4%" in chips and "-8.2%" in chips
+    assert "분배율" in chips and ">—</b>" in chips
+    assert theme.etf_return_strip_html([]) == ""
+    bars = theme.etf_holdings_html(
+        [{"name": "삼성전자", "pct": 28.0}, {"name": "", "pct": 10}, {"symbol": "SK하이닉스", "pct": 14}])
+    assert "삼성전자" in bars and "28.00%" in bars and "SK하이닉스" in bars
+    assert 'width:100.0%' in bars and 'width:50.0%' in bars
+    assert theme.etf_holdings_html([]) == ""
 
 def test_valuation_gauge_html():
     """가치평가 게이지 — 라벨 체계(고평가/저평가)·타이틀·verdict 존."""
@@ -297,12 +308,12 @@ def test_analysis_card_html():
     assert "다음 확인" not in good
 
 
-def test_css_render_progress_animations():
-    """렌더링 진행감 — 스켈레톤 shimmer·stale 숨쉬기 keyframes 계약."""
+def test_css_keeps_stale_frame_stable():
+    """rerun 중 opacity 펄스가 없어야 한다 — 화면 떨림의 원인이었다."""
     css = theme._CSS
     assert "stSkeleton" in css and "tn-shimmer" in css
-    assert 'data-stale="true"' in css and "tn-breathe" in css
-    assert css.count("@keyframes tn-shimmer") == 1 and css.count("@keyframes tn-breathe") == 1
+    assert 'data-stale="true"' in css and "tn-breathe" not in css
+    assert "opacity: 1" in css
 
 
 def test_market_temp_and_valuation_strip():
@@ -332,9 +343,9 @@ def test_light_dark_surface_vars():
     """표면 CSS 변수 — 모드별 값 주입·plotly 중립 그레이 분리 (라이트모드 W)."""
     dark = theme._surface_vars(False)
     light = theme._surface_vars(True)
-    assert "--tn-bg:#0a0e17" in dark and "--tn-panel:#131722" in dark
-    assert "--tn-bg:#f7f8fa" in light and "--tn-panel:#ffffff" in light
-    assert "--tn-text:#1a2233" in light
+    assert "--tn-bg:#17171c" in dark and "--tn-panel:#202027" in dark
+    assert "--tn-bg:#f2f4f6" in light and "--tn-panel:#ffffff" in light
+    assert "--tn-text:#191f28" in light
     # 표면 상수는 var 참조 (HTML 자동 전환) — plotly 는 별도 중립 hex
     assert theme.PANEL == "var(--tn-panel)" and theme.TEXT == "var(--tn-text)"
     assert theme.AXIS_GRID.startswith("rgba") and theme.AXIS_TEXT.startswith("#")
@@ -352,7 +363,7 @@ def test_light_override_covers_native_surfaces():
     """라이트 오버라이드 — 앱/사이드바/메트릭/입력 등 네이티브 표면 재도색 규칙 존재."""
     ov = theme._LIGHT_OVERRIDE
     for sel in ('.stApp {', '[data-testid="stSidebar"]', '[data-testid="stMetric"]',
-                '[data-baseweb="select"]', "#f7f8fa"):
+                '[data-baseweb="select"]', "#f2f4f6"):
         assert sel in ov, f"누락: {sel}"
 
 

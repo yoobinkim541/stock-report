@@ -115,18 +115,18 @@ def compare_bounds_json(main_hist, compare: dict, view_days=None) -> str:
 # ── HTML/JS 템플릿 (평문 — f-string 아님 · @@TOKEN@@ 치환) ─────────────────────
 _TEMPLATE = r"""
 <style>
-  /* 표면색 = CSS 변수 — 기본 다크, #wrap.tn-light 에서 라이트 재정의 (부모 테마와 동조) */
-  #wrap { --e-panel:#131722; --e-text:#d1d4dc; --e-border:#1e222d; --e-muted:#9198a6;
-          --e-xh:#6b7385; --e-bub:#2a2e39; }
-  #wrap.tn-light { --e-panel:#ffffff; --e-text:#1a2233; --e-border:#dce2ea; --e-muted:#5c6472;
-                   --e-xh:#9aa3b2; --e-bub:#e9edf3; }
+  /* 표면색 = CSS 변수 — 토스 다크/라이트. #wrap.tn-light 가 부모 테마와 동조 */
+  #wrap { --e-panel:#202027; --e-text:#f9fafb; --e-border:#3c3c47; --e-muted:#8b95a1;
+          --e-xh:#6b7684; --e-bub:#2c2c35; }
+  #wrap.tn-light { --e-panel:#ffffff; --e-text:#191f28; --e-border:#e5e8eb; --e-muted:#6b7684;
+                   --e-xh:#8b95a1; --e-bub:#f2f4f6; }
   #tools { display:flex; gap:6px; align-items:center; flex-wrap:wrap; margin:0 0 6px 2px;
            font:12px Pretendard, -apple-system, sans-serif; }
-  .tbtn { box-sizing:border-box; background:var(--e-panel); color:var(--e-text); border:1px solid var(--e-border); border-radius:6px;
-          padding:3px 9px; font:12px Pretendard, -apple-system, sans-serif; cursor:pointer;
+  .tbtn { box-sizing:border-box; background:var(--e-panel); color:var(--e-text); border:1px solid var(--e-border); border-radius:10px;
+          padding:4px 10px; font:12px Pretendard, -apple-system, sans-serif; cursor:pointer;
           line-height:1.5; white-space:nowrap; }
-  .tbtn:hover { border-color:#2f81f7; }
-  .tbtn.on { border-color:#2f81f7; color:#2f81f7; background:rgba(47,129,247,.08); }
+  .tbtn:hover { border-color:#3182f6; }
+  .tbtn.on { border-color:#3182f6; color:#3182f6; background:rgba(49,130,246,.10); }
   .tsep { width:1px; align-self:stretch; background:var(--e-border); margin:0 2px; }
   #tool-hint { color:var(--e-muted); font-size:11px; margin-left:4px; }
   /* 좌측 도구 독 (풀뷰 — TradingView 배치) */
@@ -268,10 +268,15 @@ _TEMPLATE = r"""
   fig.layout.height = fitVH ? vhFit() : @@HEIGHT@@;
   if (fitVH) {
     try {
+      let vhTimer = 0;
       window.parent.addEventListener("resize", () => {
-        const h = vhFit();
-        guard++;
-        Plotly.relayout(gd, {height: h}).then(() => { unguard(); });
+        clearTimeout(vhTimer);
+        vhTimer = setTimeout(() => {
+          const h = vhFit();
+          if (gd.layout && gd.layout.height === h) return;
+          guard++;
+          Plotly.relayout(gd, {height: h}).then(() => { unguard(); });
+        }, 120);
       });
     } catch (e) {}
   }
@@ -367,7 +372,7 @@ _TEMPLATE = r"""
   }
 
   function applyRemoteRange() {
-    if (!rangeSyncKey) return;
+    if (!rangeSyncKey || dragging || zooming) return;
     let payload = null;
     try {
       payload = JSON.parse(localStorage.getItem("tnrange:" + rangeSyncKey) || "null");
@@ -375,6 +380,8 @@ _TEMPLATE = r"""
     if (!payload || payload.src === chartNonce || Date.now() - (payload.ts || 0) > 5000) return;
     const x0 = Number(payload.x0), x1 = Number(payload.x1);
     if (!Number.isFinite(x0) || !Number.isFinite(x1) || !(x1 > x0)) return;
+    const cur = curXRangeMs();
+    if (cur && Math.abs(cur[0] - x0) < 40 && Math.abs(cur[1] - x1) < 40) return;
     const a0 = rangeMsToAxis(x0), a1 = rangeMsToAxis(x1);
     if (a0 == null || a1 == null) return;
     guard++;
@@ -497,55 +504,30 @@ _TEMPLATE = r"""
             vol: [0, Math.min(vmax, volCap) * 1.1 || 1]};
   }
 
-  // ── 부드러운 y 전환 — 시간 기반 lerp + **비용 적응형 스로틀** ──
-  // 일목 구름·채널처럼 fill 폴리곤이 많으면 relayout 1회가 비싸다 → 실제 리드로우
-  // 비용(EMA)을 재서 갱신 간격을 자동으로 벌리고(무거우면 ~10fps·가벼우면 60fps),
-  // 목표와 차이가 시각적으로 무의미하면(데드밴드) relayout 자체를 생략한다.
-  let target = null, curY = null, raf = null, busy = false;
-  let costMs = 8, lastApply = 0, lastStep = 0;
-  const HEAVY_REDRAW_MS = 24;   // relayout 1회가 이보다 비싸면(지표 많은 무거운 차트)
-                                 // 드래그·핀치·휠줌 "중"엔 y 적용을 생략 — 네이티브 팬/줌과
-                                 // 경합 방지. curY 는 계속 target 을 lerp 로 쫓아가고, 제스처가
-                                 // 끝나 dragging/zooming 이 false 가 되는 즉시 캐치업한다.
+  // ── y 맞춤 — 제스처 중에는 relayout 하지 않는다 ──
+  // 휠·핀치·드래그 매 틱 Plotly.relayout(yaxis) 은 네이티브 x 줌과 겹쳐 축이 떨린다.
+  // 제스처 중엔 target 만 갱신하고, 손을 뗀 뒤 차이가 있을 때 한 번 스냅한다.
+  let target = null, raf = null, busy = false;
 
   function animStep() {
     raf = null;
-    if (!target) return;
-    const now = performance.now();
-    const dt = Math.min(100, now - (lastStep || now));
-    lastStep = now;
-    if (!curY) curY = {price: target.price.slice(), vol: target.vol.slice()};
-    const a = 1 - Math.exp(-dt / 90);            // 프레임률 무관 ~90ms 수렴 ease-out
-    curY.price[0] += (target.price[0] - curY.price[0]) * a;
-    curY.price[1] += (target.price[1] - curY.price[1]) * a;
-    curY.vol[1]   += (target.vol[1] - curY.vol[1]) * a;
+    if (!target || dragging || zooming || busy) return;
+    const applied = (gd.layout.yaxis && gd.layout.yaxis.range) || [];
     const span = Math.abs(target.price[1] - target.price[0]) || 1;
-    const dist = Math.abs(curY.price[0] - target.price[0])
-               + Math.abs(curY.price[1] - target.price[1]);
-    const done = dist < span * 0.002;
-    if (done) curY = {price: target.price.slice(), vol: target.vol.slice()};
-    const minGap = Math.max(16, costMs * 1.2);   // 리드로우 비용만큼 간격 자동 확대
-    const applied = gd.layout.yaxis.range || [];
-    const visDelta = Math.abs((applied[0] ?? 1e18) - curY.price[0])
-                   + Math.abs((applied[1] ?? 1e18) - curY.price[1]);
-    const heavyWhileGesturing = (dragging || zooming) && costMs > HEAVY_REDRAW_MS;
-    if (!heavyWhileGesturing && !busy && now - lastApply >= minGap && visDelta > span * 0.004) {
-      busy = true; guard++; lastApply = now;
-      const t0 = performance.now();
-      const upd = {"yaxis.range": curY.price.slice()};
-      if (volAxis && !dragging) upd[volAxis + ".range"] = [0, curY.vol[1]];
-      Plotly.relayout(gd, upd).then(() => {
-        costMs = costMs * 0.7 + (performance.now() - t0) * 0.3;   // 비용 EMA
-        busy = false; unguard();
-      });
-    }
-    if (!done || dragging || zooming) raf = requestAnimationFrame(animStep);
+    const visDelta = Math.abs((applied[0] ?? 1e18) - target.price[0])
+                   + Math.abs((applied[1] ?? 1e18) - target.price[1]);
+    if (visDelta <= span * 0.004) return;
+    busy = true; guard++;
+    const upd = {"yaxis.range": target.price.slice()};
+    if (volAxis) upd[volAxis + ".range"] = [0, target.vol[1]];
+    Plotly.relayout(gd, upd).then(() => { busy = false; unguard(); });
   }
 
   function setTargetFrame(x0, x1) {
     const r = yFit(x0, x1);
     if (!r) return;
     target = r;
+    if (dragging || zooming) return;
     if (!raf) raf = requestAnimationFrame(animStep);
   }
   function setTarget(x0, x1) {
@@ -709,6 +691,14 @@ _TEMPLATE = r"""
   if (rangeSyncKey) {
     setInterval(applyRemoteRange, 700);
   }
+  gd.addEventListener("wheel", (e) => {
+    const drag = gd.querySelector(".nsewdrag");
+    if (!drag) return;
+    const r = drag.getBoundingClientRect();
+    if (e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom) {
+      e.preventDefault();
+    }
+  }, {passive: false, capture: true});
   gd.addEventListener("mousemove", (e) => {
     xhEvt = e;
     if (!xhRaf) xhRaf = requestAnimationFrame(xhApply);

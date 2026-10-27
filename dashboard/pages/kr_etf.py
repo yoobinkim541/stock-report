@@ -74,15 +74,5 @@ def render():
         st.info("해당 종목은 국내 ETF가 아닙니다 — 해외 ETF·개별주는 ‘종목 분석’ 페이지에서 보세요.")
         return
 
-    cols = st.columns(5)
-    cols[0].metric("현재가", ticker_page._etf_money(etf, etf.get("price"), 0))
-    cols[1].metric("NAV", ticker_page._etf_money(etf, etf.get("nav"), 0))
-    pm = etf.get("premium_pct")
-    cols[2].metric("괴리율", f"{pm:+.2f}%" if pm is not None else "—")
-    te = etf.get("tracking_error_pct")
-    cols[3].metric("추적오차", f"{te:.2f}%" if te is not None else "—")
-    cols[4].metric("총보수", ticker_page.data.f_frac_pct(etf.get("expense_ratio"))
-                   if etf.get("expense_ratio") is not None else "—")
-
-    st.caption("선택한 ETF의 세부 정보는 아래 원형 뷰와 동일한 기준으로 렌더됩니다.")
+    st.caption("가격·괴리·보수·구성은 아래 한 화면에서 봅니다.")
     ticker_page._etf_sections(ticker, etf, etf.get("price"))

@@ -337,7 +337,7 @@ button{border:1px solid @@GRID@@;background:@@PANEL@@;color:@@TEXT@@;padding:7px
   clearTimeout(loadTimer);
   try {
     const LC = window.LightweightCharts;
-    const C = payload.colors || {up:"#26a69a",down:"#ef5350",accent:"#2962ff",accent_fill:"rgba(41,98,255,.3)",accent_fill_faint:"rgba(41,98,255,.02)"};
+    const C = payload.colors || {up:"#26a69a",down:"#ef5350",accent:"#3182f6",accent_fill:"rgba(49,130,246,.3)",accent_fill_faint:"rgba(49,130,246,.02)"};
     const bars = payload.bars.time.map((time, index) => ({
       time,
       open:payload.bars.open[index], high:payload.bars.high[index],
@@ -376,13 +376,15 @@ button{border:1px solid @@GRID@@;background:@@PANEL@@;color:@@TEXT@@;padding:7px
       width: Math.max(1, chartEl.clientWidth), height: Math.max(1, chartEl.clientHeight),
       attributionLogo: true,
       localization: {locale:"en-US", timeFormatter: fmtFull},
-      layout: {background:{type:"solid",color:"transparent"},textColor:@@TEXT_JSON@@},
+      layout: {background:{type:"solid",color:"transparent"},textColor:@@TEXT_JSON@@, fontFamily:"Pretendard, -apple-system, sans-serif"},
       grid: {vertLines:{color:@@GRID_JSON@@},horzLines:{color:@@GRID_JSON@@}},
-      rightPriceScale: {borderColor:@@GRID_JSON@@,mode:payload.log_scale ? 1 : 0},
+      rightPriceScale: {borderColor:@@GRID_JSON@@,mode:payload.log_scale ? 1 : 0, scaleMargins:{top:0.08,bottom:0.22}},
       timeScale: {borderColor:@@GRID_JSON@@,timeVisible:intraday,secondsVisible:false,rightOffset:3,
-                  tickMarkFormatter: tickMark},
+                  tickMarkFormatter: tickMark, lockVisibleTimeRangeOnResize:true},
       crosshair: {mode:1},
-      handleScroll: true, handleScale: true,
+      handleScroll: {mouseWheel:true, pressedMouseMove:true, horzTouchDrag:true, vertTouchDrag:false},
+      handleScale: {mouseWheel:true, pinch:true, axisPressedMouseMove:true},
+      kineticScroll: {mouse:false, touch:false},
     });
     const options = {priceLineVisible:false,lastValueVisible:true};
     let series;
@@ -425,9 +427,16 @@ button{border:1px solid @@GRID@@;background:@@PANEL@@;color:@@TEXT@@;padding:7px
     }
     showBar(bars[bars.length - 1]);
     chart.subscribeCrosshairMove(param => showBar(byTime.get(Number(param.time))));
+    let lastW = 0, lastH = 0;
     const resize = new ResizeObserver(entries => {
       const box = entries[0] && entries[0].contentRect;
-      if (box) chart.applyOptions({width:Math.max(1,Math.floor(box.width)),height:Math.max(1,Math.floor(box.height))});
+      if (!box) return;
+      const w = Math.max(1, Math.floor(box.width));
+      const h = Math.max(1, Math.floor(box.height));
+      if (w === lastW && h === lastH) return;
+      if (lastH && w === lastW && Math.abs(h - lastH) < 2) return;
+      lastW = w; lastH = h;
+      chart.applyOptions({width:w, height:h});
     });
     resize.observe(chartEl);
     chart.timeScale().fitContent();
@@ -493,9 +502,9 @@ def lightweight_chart_html(
         raise ValueError("Canvas payload contains no bars")
     encoded = json.dumps(dict(payload), ensure_ascii=False, separators=(",", ":"), allow_nan=False)
     encoded = encoded.replace("</", "<\\/")
-    text = "#24292f" if light else "#9aa7bd"
-    grid = "#d0d7de" if light else "#283142"
-    panel = "#ffffff" if light else "#111827"
+    text = "#6b7684" if light else "#b0b8c1"
+    grid = "#e5e8eb" if light else "#2c2c35"
+    panel = "#ffffff" if light else "#202027"
     return (_HTML
             .replace("@@CDN@@", LIGHTWEIGHT_CHARTS_URL)
             .replace("@@PAYLOAD@@", encoded)

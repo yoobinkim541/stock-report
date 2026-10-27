@@ -318,19 +318,18 @@ def test_pannable_bounds_override():
 
 
 def test_embed_drag_ux_contract():
-    """드래그 UX — 실시간 y-follow·lerp·y 고정·이진탐색·hover 중지 계약."""
+    """드래그 UX — 제스처 중 y relayout 금지·종료 스냅·y 고정·이진탐색·hover 중지."""
     hist = _hist(60)
     fig = charts.price_chart(hist, "T", show_rsi=True, show_volume=True)
     html = plotly_embed.pannable_chart_html(fig, hist, view_days=30, vol_axis="yaxis2")
-    for token in ("plotly_relayouting",          # 드래그 중 이벤트 — 종료 스냅 제거
-                  "requestAnimationFrame",       # rAF lerp 루프
-                  "fixedrange = true",           # y축 사용자 팬 고정 (y 싸움 제거)
-                  "function lowerBound",         # bounds 이진 탐색
-                  "hovermode: false",            # 드래그 중 hover 중지
-                  "costMs",                      # 리드로우 비용 EMA — 적응형 스로틀
-                  "visDelta",                    # 데드밴드 — 무의미한 relayout 생략
-                  "performance.now",
-                  "const volCap",                # 거래량 q98 캡 — 스파이크 축 지배 방지
+    for token in ("plotly_relayouting",
+                  "requestAnimationFrame",
+                  "fixedrange = true",
+                  "function lowerBound",
+                  "hovermode: false",
+                  "if (!target || dragging || zooming || busy) return",
+                  "visDelta",
+                  "const volCap",
                   "function finishGesture",      # 제스처 끝 1회 마무리 (휠 줌 랙 제거)
                   "gestureTimer = setTimeout(finishGesture, 160)",
                   "function animStep"):
