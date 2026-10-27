@@ -1,0 +1,4 @@
+# Linux cron/watchdog scripts are executed as-is. Windows core.autocrlf must not
+# check them out with CR, or bash treats `pipefail\r` as an invalid option.
+*.sh text eol=lf
+*.bash text eol=lf

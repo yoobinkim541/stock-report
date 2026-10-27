@@ -38,7 +38,8 @@ def test_archived_knowledge_without_evidence_is_not_revived(monkeypatch):
     monkeypatch.setattr(wd.wiki, "_all_wiki_pages", lambda: [source, archived])
     monkeypatch.setattr(wd, "_attach_article_context", lambda _: None)
     saved = []
-    monkeypatch.setattr(wd.wiki, "upsert_page", lambda p: saved.append(p) or p)
+    # run() persists attempt states in one batch (master 21c7574).
+    monkeypatch.setattr(wd.wiki, "batch_upsert_pages", lambda pages: saved.extend(pages) or list(pages))
     def forbidden(_):
         raise AssertionError("must not regenerate archived knowledge")
     result = wd.run(llm_fn=forbidden, fulltext=True, page_ids=["source-s"])
@@ -46,6 +47,24 @@ def test_archived_knowledge_without_evidence_is_not_revived(monkeypatch):
     assert [p["id"] for p in saved] == ["source-s"]
     assert saved[0]["distillation_state"]["status"] == "failed"
     assert "unavailable" in saved[0]["distillation_state"]["reason"]
+
+
+def test_archived_knowledge_is_not_revived(monkeypatch):
+    source = {"id": "source-s", "kind": "source_digest", "evidence_ids": ["new"],
+              "links": ["old"], "distillation_state": {"status": "created", "last_result_id": "old"}}
+    # 21c7574(문서 ID 정합성 복구) 이후 이전 결과는 source 와의 연결(links/source_refs)이
+    # 확인될 때만 '이전 지식'으로 인정된다 — 연결 없는 고아 ID 는 재생성 대상.
+    archived = {"id": "old", "kind": "concept", "status": "archived", "links": ["source-s"]}
+    monkeypatch.setattr(wd.wiki, "_all_wiki_pages", lambda: [source, archived])
+    monkeypatch.setattr(wd, "_attach_article_context", lambda *_args, **_kwargs: None)
+    saved = []
+    monkeypatch.setattr(wd.wiki, "batch_upsert_pages", lambda pages: saved.extend(pages) or list(pages))
+    def forbidden(_):
+        raise AssertionError("must not regenerate archived knowledge")
+    result = wd.run(llm_fn=forbidden, fulltext=True, page_ids=["source-s"])
+    assert result["created"] == []
+    assert [p["id"] for p in saved] == ["source-s"]
+    assert saved[0]["distillation_state"]["status"] == "skipped"
 
 
 @pytest.mark.parametrize("fulltext", [False, True])

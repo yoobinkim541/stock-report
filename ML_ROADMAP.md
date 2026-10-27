@@ -222,6 +222,7 @@ paper_track.json: {
 | 피처 10개 이상 추가 | 상관된 가격 피처 추가는 IC 개선 없이 과적합 위험만 증가 |
 | 다음날 예측 신호로 매일 리밸런싱 | 거래비용으로 알파 소멸, 보유기간 최소 5~10일 |
 | In-sample 최적화 결과를 바로 실전 반영 | Walk-Forward OOS 검증 없이는 곡선 맞추기에 불과 |
+| 수정주가(`auto_adjust=True`) 레벨 피처를 point-in-time 으로 취급 | `ml/data_pipeline.fetch_prices` 는 다운로드 시점 기준으로 **소급 조정**된 가격을 준다 — 수익률·비율 피처는 무해하지만 가격 레벨·거래량 레벨 피처는 미래 분할/배당이 과거 값에 반영된 누수. provenance 의 `adjustment="adjusted"` 는 PIT 보장이 아니다. 레벨 피처를 쓰려면 미조정 원시가+이벤트 테이블로 재구성 |
 
 ---
 

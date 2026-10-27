@@ -1781,13 +1781,15 @@ def run(send_alert: bool = False) -> dict | None:
     # Phase 변화 감지
     phase_changed = has_phase_changed(old_state, market_type, phase_key)
 
-    # 리포트 생성 및 출력
-    report = build_report(qqq, rsi, vix, ma, portfolio, exchange_rate, qqqi_div, old_state, fg)
-    print(report)
-
     # 가격 stale 시 — 묵은 데이터 기반 Phase 에스컬레이션(특히 Phase 5 전면 매수)은 보류.
     # 잘못된 신호로 레버리지 권고가 나가는 것을 막고, 대신 데이터 경보만 보낸다 (비평 #2).
     data_stale = bool(qqq.get("stale"))
+
+    # 리포트 생성 및 출력 — stale 이면 stdout/반환값 소비자도 알 수 있게 배너를 앞에 붙인다
+    report = build_report(qqq, rsi, vix, ma, portfolio, exchange_rate, qqqi_div, old_state, fg)
+    if data_stale:
+        print(f"⚠️ STALE DATA — QQQ 종가 {qqq.get('data_age_days', 0)}일 전. 아래 Phase/권고는 판정 보류(참고용).")
+    print(report)
 
     # 텔레그램: Phase 변화 시 또는 강제 발송 시
     if send_alert or phase_changed:
@@ -1828,6 +1830,7 @@ def run(send_alert: bool = False) -> dict | None:
         save_phase_state(market_type, phase_key, qqq.get("drawdown_pct", 0))
 
     return {
+        "stale": data_stale,                 # True 면 phase/권고를 전략 입력으로 쓰지 말 것
         "market_type": market_type,
         "phase": phase_key,
         "drawdown_pct": qqq.get("drawdown_pct", 0),

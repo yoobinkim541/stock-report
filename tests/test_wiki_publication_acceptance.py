@@ -9,13 +9,7 @@ import pytest
 from agent_console import shared_memory, wiki, wiki_publication, qmd_generation
 from reports import wiki_publication_effects, wiki_public_budget
 from reports.wiki_topic_transaction import prepare_topic_batch, recover_topic_operation
-from test_wiki_topic_transaction import transaction as transaction_fixture, proposal, validate, NOW
-from test_wiki_topic_integration import evidence as evidence_fixture
-
-
-@pytest.fixture
-def transaction(evidence_fixture, tmp_path, monkeypatch):
-    return transaction_fixture.__wrapped__(evidence_fixture, tmp_path, monkeypatch)
+from test_wiki_topic_transaction import proposal, validate, NOW
 
 
 class SyntheticQmdRunner:

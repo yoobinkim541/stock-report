@@ -9,6 +9,7 @@ import math
 import re
 import threading
 import time
+import uuid
 from copy import deepcopy
 from collections import Counter, defaultdict
 from collections.abc import Callable
@@ -16,8 +17,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-from . import evidence_usage, qmd_search, shared_memory, storage
 import safe_io
+
+from . import evidence_usage, qmd_search, shared_memory, storage
 from . import wiki_contract
 
 
@@ -728,6 +730,10 @@ def _backlink_index(records: list[dict]) -> dict[str, list[str]]:
         row_id = _clean(row.get("id"), 80)
         if not row_id:
             continue
+        # Archived pages remain available for audit, but must not inflate the
+        # active graph or leak historical backlinks into answer context.
+        if _status_from_tags(row.get("tags") or []) == "archived":
+            continue
         for target_id in _clean_links(row.get("links") or [], self_id=row_id):
             index[target_id].append(row_id)
     return index
@@ -851,6 +857,12 @@ def _knowledge_search_text(knowledge: object) -> str:
 def _candidate_score(record: dict, query: str, surface: str, status: str,
                      *, include_document_content: bool = False) -> int:
     page = _record_to_page(record)
+    return _candidate_score_page(page, query, surface, status,
+                                 include_document_content=include_document_content)
+
+
+def _candidate_score_page(page: dict, query: str, surface: str, status: str,
+                          *, include_document_content: bool = False) -> int:
     haystack = " ".join(
         [
             page["title"],
@@ -929,24 +941,18 @@ def list_pages(*, query: str = "", surface: str = "all", status: str = "all", li
         records = [row for row in records if not _record_is_archived(row)]
     if not records:
         return []
-    fallback = _fallback_ranked_pages(records, query=query, surface=surface, status=status, limit=limit)
     qmd_pages = _qmd_ranked_pages(records, query=query, surface=surface, status=status, limit=limit)
     if not qmd_pages:
+        fallback = _fallback_ranked_pages(records, query=query, surface=surface, status=status, limit=limit)
         pages = _apply_backlinks(fallback, records)
         _record_retrieval_usage(query, surface, status, pages, provider="fallback")
         return pages
-    merged: list[dict] = []
-    seen: set[str] = set()
-    for page in [*qmd_pages, *fallback]:
-        page_id = _clean(page.get("id"), 120)
-        if page_id and page_id in seen:
-            continue
-        if page_id:
-            seen.add(page_id)
-        merged.append(page)
-        if len(merged) >= limit:
-            break
-    pages = _apply_backlinks(merged, records)
+
+    # QMD가 한 건이라도 반환하면 전체 원장을 다시 점수화하지 않는다. 이전에는
+    # 결과가 limit보다 적다는 이유로 매 검색마다 fallback 전체 스캔을 실행해
+    # 대형 위키에서 검색 지연과 중복 결과가 생겼다. QMD 장애/무결과일 때만 위
+    # 분기의 bounded fallback을 사용한다.
+    pages = _apply_backlinks(qmd_pages[:limit], records)
     _record_retrieval_usage(query, surface, status, pages, provider="qmd")
     return pages
 
@@ -983,7 +989,7 @@ def _fallback_ranked_pages(records: list[dict], *, query: str, surface: str, sta
             continue
         if surface and surface != "all" and page["surface"] != surface.lower():
             continue
-        score = _candidate_score(row, query, surface, status, include_document_content=True)
+        score = _candidate_score_page(page, query, surface, status, include_document_content=True)
         scored.append((score, -idx, page))
     scored.sort(key=lambda item: (item[0], item[1], item[2].get("updated_at", "")), reverse=True)
     return [page for _score, _idx, page in scored[:limit]]
@@ -1000,14 +1006,13 @@ def _qmd_ranked_pages(records: list[dict], *, query: str, surface: str, status: 
             return []
     except Exception:
         return []
-    source_pages = [_record_to_page(row) for row in records]
     try:
         hits = qmd_search.search(query, limit=limit, surface=surface, status=status)
     except Exception:
         return []
     if not hits:
         return []
-    by_id = {_clean(page.get("id"), 120): page for page in source_pages if page.get("id")}
+    by_id = {_clean(row.get("id"), 120): row for row in records if row.get("id")}
     out: list[dict] = []
     seen: set[str] = set()
     for hit in hits:
@@ -1040,7 +1045,7 @@ def _page_from_qmd_hit(hit: dict, *, by_id: dict[str, dict], surface: str, statu
     source = by_id.get(page_id)
     if not source:
         return None
-    page = dict(source)
+    page = _record_to_page(source)
     if status and status != "all" and page.get("status") != status:
         return None
     if surface and surface != "all" and page.get("surface") != surface:
@@ -1414,9 +1419,11 @@ def search_health() -> dict:
     }
 
 
-# 그룹핑에서도 내부 참조와 로컬 경로 자리표시자는 출처로 사용하지 않는다.
-MAX_CROSS_REF_GROUP = 30   # 이보다 큰 그룹은 pairwise 제안이 실질 가치가 없고(N개 다
-                            # 묶어 제안할 리 없음) O(n²) 폭증 위험만 크다 — 통째로 스킵.
+# 출처 URL은 provenance이지 페이지 간 의미 관계가 아니다. 관계 린트는 티커 태그만
+# 사용하고, 작은 그룹의 고신뢰 후보만 제한적으로 제안해 대형 원문 공유 그룹의
+# pairwise 경고와 UI/헬스체크 비용을 줄인다.
+MAX_CROSS_REF_GROUP = 8
+MAX_CROSS_REF_ISSUES = 1_000
 
 
 def _lint_relational_issues(pages: list[dict]) -> list[dict]:
@@ -1446,17 +1453,14 @@ def _lint_relational_issues(pages: list[dict]) -> list[dict]:
             })
 
     ticker_index: dict[str, list[dict]] = defaultdict(list)
-    ref_index: dict[str, list[dict]] = defaultdict(list)
     for page in valid_pages:
         for clean_tag in sorted({_clean(tag, 60).lower() for tag in page.get("tags") or []}):
             if clean_tag.startswith("ticker:"):
                 ticker_index[clean_tag].append(page)
-        for clean_ref in sorted(shared_memory.normalize_artifact_refs(page.get("source_refs") or page.get("artifacts") or [])):
-            if _is_verifiable_source_ref(clean_ref):
-                ref_index[clean_ref].append(page)
+
 
     seen_pairs: set[tuple[str, str]] = set()
-    for group in [*ticker_index.values(), *ref_index.values()]:
+    for group in ticker_index.values():
         if len(group) < 2 or len(group) > MAX_CROSS_REF_GROUP:
             continue
         for i in range(len(group)):
@@ -1466,11 +1470,17 @@ def _lint_relational_issues(pages: list[dict]) -> list[dict]:
                 right_id = _clean(right.get("id"), 80)
                 if not left_id or not right_id or left_id == right_id:
                     continue
+                # source_digest 간 공통 URL/티커는 provenance이지 병합 후보가
+                # 아니다. 원문은 source_refs로 검색되므로 관계 경고를 생략한다.
+                if left.get("kind") == "source_digest" or right.get("kind") == "source_digest":
+                    continue
                 pair = tuple(sorted((left_id, right_id)))
                 if pair in seen_pairs:
                     continue
                 if right_id in neighbors[left_id]:
                     continue
+                if len(issues) >= MAX_CROSS_REF_ISSUES:
+                    return issues
                 seen_pairs.add(pair)
                 left_title = _clean(left.get("title") or "위키 페이지", 160)
                 right_title = _clean(right.get("title") or "위키 페이지", 160)
@@ -1946,6 +1956,60 @@ def upsert_page(page: dict) -> dict:
     return saved
 
 
+def batch_upsert_pages(pages: Iterable[dict]) -> list[dict]:
+    """Persist a group of wiki pages with one shared-memory rewrite.
+
+    Distillation can create a source page and its linked judgment page in the
+    same batch. Rewriting the append-only store once avoids scheduling a full
+    artifact rebuild for every page and keeps large local-only backfills fast.
+    """
+    candidates = [dict(page or {}) for page in pages or [] if isinstance(page, dict)]
+    if not candidates:
+        return []
+    existing_by_id = {
+        str(record.get("id")): record
+        for record in _wiki_records()
+        if isinstance(record, dict) and record.get("id")
+    }
+    records = [
+        _build_wiki_record(page, existing=existing_by_id.get(str(page.get("id") or "")))
+        for page in candidates
+    ]
+    shared_memory.batch_upsert_delete(upserts=records, deletes=[])
+    _CACHE.clear()
+    _debounced_rebuild()
+    return [_record_to_page(record) for record in records]
+
+
+def batch_replace_pages(pages: Iterable[dict], *, deletes: Iterable[str] = ()) -> list[dict]:
+    """Atomically replace wiki rows while removing obsolete IDs.
+
+    This is intentionally separate from ``batch_upsert_pages``: record-ID
+    repair must delete the old colliding key in the same lock window in which
+    the repaired rows are written, otherwise QMD can observe a mixed snapshot.
+    """
+    candidates = [dict(page or {}) for page in pages or [] if isinstance(page, dict)]
+    delete_ids = [str(page_id) for page_id in (deletes or []) if str(page_id).strip()]
+    if not candidates and not delete_ids:
+        return []
+    existing_by_id = {
+        str(record.get("id")): record
+        for record in _wiki_records()
+        if isinstance(record, dict) and record.get("id")
+    }
+    records = [
+        _build_wiki_record(page, existing=existing_by_id.get(str(page.get("id") or "")))
+        for page in candidates
+    ]
+    shared_memory.batch_upsert_delete(
+        upserts=records,
+        deletes=delete_ids,
+    )
+    _CACHE.clear()
+    _debounced_rebuild()
+    return [_record_to_page(record) for record in records]
+
+
 def split_child_ids(page: dict | None) -> list[str]:
     if not page:
         return []
@@ -1976,30 +2040,24 @@ def split_children_for_page(page: dict | None) -> list[dict]:
 
 
 def track_page_usage(page_id: str, query: str) -> None:
-    """페이지가 LLM 컨텍스트로 제공될 때 호출한다. useCount 증가, lastUsedAt/lastQuery 갱신."""
-    page = get_page(page_id)
-    if not page:
+    """페이지가 LLM 컨텍스트로 제공될 때 호출한다. useCount 증가, lastUsedAt/lastQuery 갱신.
+
+    저장 계층 락 안에서 현재 값을 읽어 증분(shared_memory.patch_record) — 종전 get→upsert 는
+    동시 요청이 같은 useCount 를 읽어 증분 하나가 사라졌다. 다른 필드는 손대지 않는다."""
+    page_id = _clean(page_id, 80)
+    if not page_id:
         return
-    upsert_page({
-        "id": page["id"],
-        "title": page.get("title"),
-        "summary": page.get("summary"),
-        "body": page.get("body"),
-        "surface": page.get("surface"),
-        "kind": page.get("kind"),
-        "status": page.get("status"),
-        "tags": page.get("tags") or [],
-        "source_refs": page.get("source_refs") or [],
-        "links": page.get("links") or [],
-        "messages": page.get("messages") or [],
-        "decisions": page.get("decisions") or [],
-        "openQuestions": page.get("openQuestions") or [],
-        "confidence": page.get("confidence"),
-        "created_at": page.get("created_at"),
-        "useCount": _safe_count(page.get("useCount")) + 1,
-        "lastUsedAt": _now(),
-        "lastQuery": _clean(query, 200),
-    })
+    query_text = _clean(query, 200)
+
+    def _bump(record: dict) -> dict:
+        record["useCount"] = _safe_count(record.get("useCount")) + 1
+        record["lastUsedAt"] = _now()
+        record["lastQuery"] = query_text
+        return record
+
+    if shared_memory.patch_record(page_id, _bump) is None:
+        return
+    _CACHE.clear()
     _debounced_rebuild()
 
 
@@ -2007,28 +2065,19 @@ def _store_page_feedback(page_id: str, rating: str) -> None:
     """페이지의 유용성 피드백을 저장/증분한다. rating: 'helpful' | 'not_helpful' | 'neutral'."""
     if rating not in ("helpful", "not_helpful", "neutral"):
         return
-    page = get_page(page_id)
-    if not page:
+    page_id = _clean(page_id, 80)
+    if not page_id:
         return
-    existing_feedback = dict(page.get("feedback") or {})
-    existing_feedback[rating] = existing_feedback.get(rating, 0) + 1
-    upsert_page({
-        "id": page["id"],
-        "title": page.get("title"),
-        "summary": page.get("summary"),
-        "body": page.get("body"),
-        "surface": page.get("surface"),
-        "kind": page.get("kind"),
-        "status": page.get("status"),
-        "tags": page.get("tags") or [],
-        "source_refs": page.get("source_refs") or [],
-        "links": page.get("links") or [],
-        "messages": page.get("messages") or [],
-        "decisions": page.get("decisions") or [],
-        "openQuestions": page.get("openQuestions") or [],
-        "confidence": page.get("confidence"),
-        "feedback": existing_feedback,
-    })
+
+    def _bump(record: dict) -> dict:
+        feedback = dict(record.get("feedback") or {})
+        feedback[rating] = _safe_count(feedback.get(rating)) + 1
+        record["feedback"] = feedback
+        return record
+
+    if shared_memory.patch_record(page_id, _bump) is None:
+        return
+    _CACHE.clear()
     _debounced_rebuild()
 
 
@@ -2626,7 +2675,7 @@ def _title_lookup_for(page_ids: set[str]) -> dict[str, str]:
     lookup: dict[str, str] = {}
     for row in _wiki_records():
         row_id = _clean(row.get("id"), 80)
-        if row_id in page_ids:
+        if row_id in page_ids and _status_from_tags(row.get("tags") or []) != "archived":
             lookup[row_id] = _clean(row.get("title") or "위키 페이지", 160)
     return lookup
 
@@ -2862,6 +2911,121 @@ def _extract_questions(text: str) -> list[str]:
     return out
 
 
+
+# ── 파괴적 큐레이션(삭제·병합·분할) 승인 대기열 ─────────────────────────────────────
+
+def curation_auto_apply_enabled() -> bool:
+    return os.getenv("WIKI_CURATION_AUTO_APPLY", "0").lower() in {"1", "true", "yes", "on"}
+
+
+def _pending_curation_path():
+    return shared_memory.shared_memory_dir() / "pending_curation.jsonl"
+
+
+def _read_pending_curation() -> list[dict]:
+    path = _pending_curation_path()
+    if not path.exists():
+        return []
+    rows = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            row = json.loads(line)
+        except Exception:
+            continue
+        if isinstance(row, dict) and row.get("id"):
+            rows.append(row)
+    return rows
+
+
+def _write_pending_curation(rows: list[dict]) -> None:
+    path = _pending_curation_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    safe_io.atomic_write_text(str(path), "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows))
+
+
+def _store_pending_curation(action: str, plan: dict, *, surface: str, question: str,
+                            target_id: str, source: str) -> dict:
+    proposal = {
+        "id": f"cur-{uuid.uuid4().hex[:12]}",
+        "action": action,
+        "plan": {k: v for k, v in dict(plan or {}).items() if k != "source"},
+        "surface": surface,
+        "question": _clean(question, 300),
+        "target_id": _clean(target_id, 80),
+        "source": source,
+        "created_at": _now(),
+    }
+    with safe_io.file_write_lock(str(_pending_curation_path())):
+        rows = _read_pending_curation()
+        rows.append(proposal)
+        _write_pending_curation(rows)
+    return proposal
+
+
+def list_pending_curation() -> list[dict]:
+    """승인 대기 중인 파괴적 큐레이션 제안 (최신순)."""
+    return sorted(_read_pending_curation(), key=lambda r: r.get("created_at") or "", reverse=True)
+
+
+def _pop_pending_curation(proposal_id: str) -> dict | None:
+    with safe_io.file_write_lock(str(_pending_curation_path())):
+        rows = _read_pending_curation()
+        found = next((r for r in rows if r.get("id") == proposal_id), None)
+        if found is None:
+            return None
+        _write_pending_curation([r for r in rows if r.get("id") != proposal_id])
+    return found
+
+
+def reject_pending_curation(proposal_id: str) -> bool:
+    return _pop_pending_curation(_clean(proposal_id, 40)) is not None
+
+
+def apply_pending_curation(proposal_id: str) -> dict | None:
+    """승인 — 제안된 삭제/병합/분할을 실제로 실행한다. 없거나 실패면 None (제안은 제거)."""
+    proposal = _pop_pending_curation(_clean(proposal_id, 40))
+    if not proposal:
+        return None
+    target = get_page(proposal.get("target_id") or "") if proposal.get("target_id") else None
+    return _apply_destructive_plan(str(proposal.get("action") or ""), proposal.get("plan") or {},
+                                   target=target, plan_source=str(proposal.get("source") or "heuristic"))
+
+
+def _apply_destructive_plan(action: str, plan: dict, *, target: dict | None, plan_source: str) -> dict | None:
+    if action == "delete":
+        target_id = _clean(plan.get("target_id") or (target.get("id") if target else ""), 80)
+        if not target_id:
+            return None
+        deleted = delete_page(target_id)
+        if not deleted:
+            return None
+        rebuild_artifacts()
+        return {"ok": True, "action": "delete", "page_id": target_id, "source": plan_source}
+    if action == "merge":
+        target_id = _clean(plan.get("target_page_id") or "", 80)
+        source_ids = [_clean(sid, 80) for sid in (plan.get("source_page_ids") or [])]
+        synthesis = _clean(plan.get("body") or plan.get("summary") or "", WIKI_SUMMARY_LIMIT)
+        merge_result = _merge_pages(source_ids, target_id, synthesis, reason=plan.get("reason") or "")
+        if not merge_result:
+            return None
+        rebuild_artifacts()
+        try:
+            qmd_result = sync_qmd()
+        except Exception as exc:
+            qmd_result = {"ok": False, "error": _clean(exc, 500)}
+        return {"ok": True, "source": plan_source, "qmd": qmd_result, **merge_result}
+    if action == "split":
+        source_id = _clean(plan.get("source_page_id") or "", 80)
+        new_titles = plan.get("new_titles") or []
+        new_bodies = plan.get("new_bodies") or []
+        split_result = _split_page(source_id, new_titles, new_bodies)
+        if not split_result:
+            return None
+        rebuild_artifacts()
+        return {"ok": True, "source": plan_source, **split_result}
+    return None
+
+
 def auto_curate_from_chat(
     question: str,
     answer: str,
@@ -3009,37 +3173,16 @@ def auto_curate_from_chat(
                 or has_non_conversation_source_refs(split_source)
             ):
                 return {"ok": False, "action": "skipped_injection_guard", "reason": "split target protected or invalid"}
-    if action == "delete":
-        target_id = _clean(plan.get("target_id") or (target.get("id") if target else ""), 80)
-        if not target_id:
-            return None
-        deleted = delete_page(target_id)
-        if not deleted:
-            return None
-        rebuild_artifacts()
-        return {"ok": True, "action": "delete", "page_id": target_id, "source": plan_source}
-    if action == "merge":
-        target_id = _clean(plan.get("target_page_id") or "", 80)
-        source_ids = [_clean(sid, 80) for sid in (plan.get("source_page_ids") or [])]
-        synthesis = _clean(plan.get("body") or plan.get("summary") or "", WIKI_SUMMARY_LIMIT)
-        merge_result = _merge_pages(source_ids, target_id, synthesis, reason=plan.get("reason") or "")
-        if not merge_result:
-            return None
-        rebuild_artifacts()
-        try:
-            qmd_result = sync_qmd()
-        except Exception as exc:
-            qmd_result = {"ok": False, "error": _clean(exc, 500)}
-        return {"ok": True, "source": plan_source, "qmd": qmd_result, **merge_result}
-    if action == "split":
-        source_id = _clean(plan.get("source_page_id") or "", 80)
-        new_titles = plan.get("new_titles") or []
-        new_bodies = plan.get("new_bodies") or []
-        split_result = _split_page(source_id, new_titles, new_bodies)
-        if not split_result:
-            return None
-        rebuild_artifacts()
-        return {"ok": True, "source": plan_source, **split_result}
+    if action in ("delete", "merge", "split"):
+        if not curation_auto_apply_enabled():
+            # 파괴적 변경은 기본적으로 '제안'으로만 저장 — 사용자가 승인(apply_pending_curation)
+            # 해야 실행된다. 가드를 통과했어도 LLM 계획이 대화 전용 페이지를 지우는 범위가 남아
+            # 있었다(리뷰 2026-07-24 미해결). WIKI_CURATION_AUTO_APPLY=1 이면 종전처럼 즉시 적용.
+            proposal = _store_pending_curation(action, plan, surface=surface, question=question,
+                                               target_id=(target.get("id") if target else ""), source=plan_source)
+            return {"ok": True, "action": "proposed", "proposed_action": action,
+                    "proposal_id": proposal["id"], "source": plan_source}
+        return _apply_destructive_plan(action, plan, target=target, plan_source=plan_source)
 
     payload = _plan_to_page_payload(
         plan,

@@ -152,6 +152,35 @@ def test_qmd_health_reports_installation_and_wiki_file_count(monkeypatch, tmp_pa
     assert health["fallback_available"] is True
 
 
+def test_qmd_health_rejects_duplicate_wiki_ids(monkeypatch, tmp_path):
+    wiki_dir = tmp_path / "wiki-md"
+    wiki_dir.mkdir()
+    (wiki_dir / "same.md").write_text("# same", encoding="utf-8")
+    monkeypatch.setenv("AGENT_CONSOLE_QMD_ENABLED", "1")
+    monkeypatch.setenv("AGENT_CONSOLE_QMD_BIN", "qmd")
+    monkeypatch.setenv("AGENT_CONSOLE_QMD_WIKI_DIR", str(wiki_dir))
+
+    from agent_console import qmd_search
+
+    monkeypatch.setattr(qmd_search.shutil, "which", lambda _binary: "/usr/bin/qmd")
+    monkeypatch.setattr(
+        qmd_search.shared_memory,
+        "inspect_records",
+        lambda: [
+            {"id": "same", "tags": ["wiki"], "updatedAt": "2026-09-01T00:00:00+00:00"},
+            {"id": "same", "tags": ["wiki"], "updatedAt": "2026-09-01T00:00:00+00:00"},
+        ],
+    )
+
+    health = qmd_search.health(runner=lambda *args, **kwargs: _Result("[]"))
+
+    assert health["duplicate_wiki_id_count"] == 1
+    assert health["duplicate_wiki_id_group_count"] == 1
+    assert health["coverage_ok"] is False
+    assert health["mirror_complete"] is False
+    assert "duplicate wiki record IDs" in health["error"]
+
+
 def test_qmd_sync_exports_pages_and_updates_index_once(monkeypatch, tmp_path):
     wiki_dir = tmp_path / "wiki-md"
     monkeypatch.setenv("AGENT_CONSOLE_QMD_ENABLED", "1")

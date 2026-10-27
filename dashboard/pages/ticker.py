@@ -974,8 +974,11 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
         df, compare = _align_compare_window(df, compare, view_days)
     # 직렬화 윈도잉 — max 전량(장기주 ~11k봉) fig+bounds 직렬화가 지표/기간 토글마다
     # 수 MB push + 수초 ScriptRunner 점유의 주원인. 뷰의 5배 팬버퍼+지표 워밍업만
-    # 남긴다("전체"=무윈도잉). 이하 실시간 패치·이벤트마커·HA·bounds 전부 같은 윈도우.
+    # 남긴다("전체"=charts.MAX_SERIALIZED_BARS 상한). 이하 실시간 패치·이벤트마커·HA·bounds 전부 같은 윈도우.
+    _src_bars = len(df) if df is not None else 0
     df = charts.view_window(df, view_days)
+    if view_days is None and df is not None and len(df) < _src_bars:
+        st.caption(f"전체 {_src_bars:,}봉 중 최근 {len(df):,}봉만 렌더(Plotly 직렬화 상한 {charts.MAX_SERIALIZED_BARS:,}봉)")
     if compare:
         compare = {k: charts.view_window(s, view_days) for k, s in compare.items()}
     # ⚡ live(자동갱신) — 실시간가는 **클라이언트 패치**(피더 iframe → localStorage →
@@ -1129,7 +1132,8 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
             st.plotly_chart(fig, width="stretch", config=charts.PAN_DRAW_CFG)
     else:
         # 커스텀 임베드 — 팬 시 보이는 구간에 y축(가격·거래량) 부드러운 자동 맞춤
-        from dashboard import plotly_embed
+        # (plotly_embed 는 모듈 임포트 — 여기서 다시 import 하면 함수 지역변수가 돼 위 Canvas
+        #  분기의 realtime_feed_html 호출이 UnboundLocalError 로 죽었다: ruff F823)
         _bj = (plotly_embed.compare_bounds_json(df, compare, view_days)
                if compare else None)                   # 비교 모드 — % 프레임으로 y 맞춤
         # 드로잉 영속화 키 — 좌표계가 다른 조합(스케일·HA)은 분리 버킷
@@ -1150,6 +1154,9 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
             st.iframe(plotly_embed.realtime_feed_html(_sk, _rtp), height=1)
     if prepared.decision.backend == "canvas":
         st.caption("드래그=이동 · 휠/핀치=확대·축소 · 크로스헤어=OHLC · 드로잉과 주문선 편집은 렌더러 ‘분석’에서 사용")
+    elif legacy or sequence_chart:
+        st.caption("🖱️ 드래그=이동 · 휠=확대/축소 · ✏️ 모드바 직접 그리기(선·자유곡선·박스)·지우개 · "
+                   "▲/▼ 거래 마커 클릭=상세 · ⚠️ 이 경로의 드로잉은 재실행 시 사라집니다(저장 안 됨)")
     else:
         st.caption("🖱️ 드래그=이동(y축 자동 맞춤) · 휠=확대/축소 · 더블클릭=원위치 · "
                    "✏️ 모드바 직접 그리기(선·자유곡선·박스)·지우개 + 차트 위 도구바: "

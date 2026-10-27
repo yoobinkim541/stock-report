@@ -7,7 +7,8 @@ import notify
 def test_notification_supports_recovery_buttons(monkeypatch):
     calls=[]
     class Response:
-        def raise_for_status(self): pass
+        ok=True
+        status_code=200
     monkeypatch.setattr(notify.requests,'post',lambda url,**kw:(calls.append(kw['json']),Response())[1])
     markup={'inline_keyboard':[[{'text':'확인','callback_data':'savecheck:'+'a'*24}]]}
     assert notify.send_telegram('재인증',token='test',chat_id='owner',reply_markup=markup)
@@ -27,6 +28,22 @@ def test_owner_check_button_queues_authorized_confirmation(monkeypatch):
     monkeypatch.setattr(bot,'_DISPATCH_Q',q)
     monkeypatch.setattr(bot,'_api',lambda method,**kw:(calls.append(method),{'ok':True})[1])
     assert bot._handle_save_recovery_callback(callback()) is True
+    assert q.get_nowait()==('/save check '+'a'*24,'owner','owner')
+    assert calls==['answerCallbackQuery']
+
+
+def test_polling_ingest_routes_check_button_to_dispatch_queue(monkeypatch):
+    """폴링 루프는 업데이트를 _ingest_update 로만 넘긴다 — message 가 없는 callback_query 도
+    빈 텍스트로 버려지지 않고 소유자 확인 명령으로 큐잉돼야 한다."""
+    bot=importlib.import_module('telegram_bot')
+    monkeypatch.setattr(bot,'OWNER_CHAT_ID','owner')
+    monkeypatch.delenv('STOCK_BOT_OWNER_USER_ID',raising=False)
+    q=queue.Queue(); calls=[]
+    monkeypatch.setattr(bot,'_DISPATCH_Q',q)
+    monkeypatch.setattr(bot,'_api',lambda method,**kw:(calls.append(method),{'ok':True})[1])
+    update=callback()
+    update['update_id']=11
+    bot._ingest_update(update)
     assert q.get_nowait()==('/save check '+'a'*24,'owner','owner')
     assert calls==['answerCallbackQuery']
 

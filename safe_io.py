@@ -14,11 +14,36 @@ holding_manager)이 동시에 read-modify-write 하는 파일을 보호한다.
 from __future__ import annotations
 
 import contextlib
+import errno
 import fcntl
 import json
 import os
 import tempfile
 import time
+
+
+# 디렉터리 fsync 를 지원하지 않는 파일시스템(일부 네트워크/가상 마운트)에서 나는 오류만 무시한다.
+_DIR_FSYNC_UNSUPPORTED = {errno.EINVAL, errno.ENOTSUP, errno.EOPNOTSUPP, errno.EBADF}
+
+
+def _fsync_dir(d: str) -> None:
+    """rename 자체를 내구성 있게 — 전원 장애 시 디렉터리 엔트리(새 이름)가 유실되지 않도록
+    부모 디렉터리도 fsync. 파일 내용 fsync 만으로는 rename 이 디스크에 안 닿을 수 있다.
+
+    디렉터리를 열 수 없거나 디렉터리 fsync 를 지원하지 않는 환경은 건너뛴다. 그 밖의 I/O 오류
+    (EIO 등)는 rename 이 디스크에 닿았는지 보장할 수 없으므로 전파한다 — 위키 발행처럼 장애 경계에서
+    복구 절차를 밟는 호출자가 실패를 알아야 한다."""
+    try:
+        dfd = os.open(d, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(dfd)
+    except OSError as exc:
+        if exc.errno not in _DIR_FSYNC_UNSUPPORTED:
+            raise
+    finally:
+        os.close(dfd)
 
 
 def atomic_write_json(path: str, obj, *, indent: int = 2) -> None:
@@ -33,6 +58,7 @@ def atomic_write_json(path: str, obj, *, indent: int = 2) -> None:
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, path)   # 원자적 교체
+        _fsync_dir(d)
     except BaseException:
         with contextlib.suppress(OSError):
             os.unlink(tmp)
@@ -55,6 +81,7 @@ def atomic_write_text(path: str, text: str) -> None:
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, path)
+        _fsync_dir(d)
     except BaseException:
         with contextlib.suppress(OSError):
             os.unlink(tmp)

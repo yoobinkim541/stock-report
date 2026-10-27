@@ -100,15 +100,20 @@ def render():
                 st.caption(rec.get("category", "general"))
                 st.write(rec.get("detail", ""))
 
-    query = st.text_input("검색", key="wiki_query", placeholder="손실한도, 레버리지, SOL, 중동, 크레딧...")
-    f1, f2, f3 = st.columns([1, 1, 1])
-    surface = f1.selectbox("surface", SURFACE_OPTIONS, index=0, key="wiki_surface_filter")
-    status = f2.selectbox("status", STATUS_OPTIONS, index=0, key="wiki_status_filter")
-    kind_filter = f3.selectbox("kind", KIND_OPTIONS, index=0, key="wiki_kind_filter")
+    # 폼 제출형 검색 — 종전엔 text_input 이 폼 밖이라 글자 하나 칠 때마다 전체 rerun + 위키 조회
+    with st.form("wiki_search_form", border=False):
+        query = st.text_input("검색", key="wiki_query", placeholder="손실한도, 레버리지, SOL, 중동, 크레딧...")
+        f1, f2, f3, f4 = st.columns([1, 1, 1, 0.6])
+        surface = f1.selectbox("화면(surface)", SURFACE_OPTIONS, index=0, key="wiki_surface_filter")
+        status = f2.selectbox("상태", STATUS_OPTIONS, index=0, key="wiki_status_filter")
+        kind_filter = f3.selectbox("종류", KIND_OPTIONS, index=0, key="wiki_kind_filter")
+        f4.form_submit_button("검색", width="stretch")
 
     pages = cached.wiki_pages(query=query, surface=surface, status=status, limit=60)
     if kind_filter != "all":
         pages = [page for page in pages if page.get("kind") == kind_filter]
+
+    _pending_curation_section()
 
     left, right = st.columns([1.05, 0.95], gap="large")
     with left:
@@ -267,3 +272,40 @@ def _page_card(page: dict):
         {"필드": "source refs", "값": ", ".join(page.get("source_refs", [])) or "—"},
     ])
     st.dataframe(meta, hide_index=True, width="stretch")
+
+
+_ACTION_LABEL = {"delete": "삭제", "merge": "병합", "split": "분할"}
+
+
+def _pending_curation_section() -> None:
+    """AI 자동 큐레이션이 제안한 삭제·병합·분할 — 사용자 승인 전엔 실행되지 않는다."""
+    try:
+        proposals = wiki.list_pending_curation()
+    except Exception:
+        proposals = []
+    if not proposals:
+        return
+    with st.expander(f"🛠 승인 대기 큐레이션 제안 {len(proposals)}건", expanded=True):
+        st.caption("AI 가 제안한 파괴적 변경입니다. 적용 전까지 위키는 바뀌지 않습니다.")
+        for prop in proposals:
+            plan = prop.get("plan") or {}
+            action = str(prop.get("action") or "")
+            ids = [plan.get("target_id"), plan.get("target_page_id"), plan.get("source_page_id"),
+                   *(plan.get("source_page_ids") or [])]
+            ids = [i for i in ids if i]
+            with st.container(border=True):
+                st.markdown(f"**{_ACTION_LABEL.get(action, action)}** · {', '.join(f'`{i}`' for i in ids) or '대상 없음'}")
+                if plan.get("reason"):
+                    st.caption(f"사유: {plan['reason']}")
+                if prop.get("question"):
+                    st.caption(f"출처 질문: {prop['question'][:120]}")
+                c1, c2 = st.columns(2)
+                if c1.button("적용", key=f"cur_apply_{prop['id']}", width="stretch"):
+                    result = wiki.apply_pending_curation(prop["id"])
+                    cached.clear_wiki_caches()
+                    st.toast("적용 완료" if result else "적용 실패 — 대상이 이미 바뀌었을 수 있습니다")
+                    st.rerun()
+                if c2.button("거부", key=f"cur_reject_{prop['id']}", width="stretch"):
+                    wiki.reject_pending_curation(prop["id"])
+                    st.toast("제안 폐기")
+                    st.rerun()

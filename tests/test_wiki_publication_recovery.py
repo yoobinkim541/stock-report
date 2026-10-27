@@ -7,8 +7,7 @@ import pytest
 
 from agent_console import shared_memory, wiki, wiki_publication as publication
 from reports.wiki_source_journal import Journal
-from test_wiki_topic_integration import evidence
-from test_wiki_topic_transaction import transaction, prepare, recover
+from test_wiki_topic_transaction import prepare, recover
 
 
 @pytest.fixture

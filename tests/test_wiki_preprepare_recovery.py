@@ -5,7 +5,7 @@ import pytest
 
 from agent_console import wiki
 from reports.wiki_source_journal import Journal
-from test_wiki_source_pipeline import NOW, module, pipeline_env
+from test_wiki_source_pipeline import NOW, module
 
 
 def _rejected_targets_with_new_page(pipeline_env):

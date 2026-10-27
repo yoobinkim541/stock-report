@@ -20,7 +20,16 @@ import time
 
 _SALT_PATH = os.path.expanduser("~/.cache/dashboard_auth_salt")
 COOKIE_NAME = "tn_auth"
-TOKEN_TTL_S = 30 * 86400          # 30일 — 개인 서버·읽기전용 대시보드 기준
+# 세션 수명 — 기본 30일(개인 서버·읽기전용 대시보드). DASHBOARD_SESSION_DAYS 로 조정.
+# 강제 로그아웃 = salt 파일(~/.cache/dashboard_auth_salt) 삭제 또는 비밀번호 변경.
+def _session_days() -> int:
+    try:
+        return max(1, int(os.getenv("DASHBOARD_SESSION_DAYS", "30")))
+    except ValueError:
+        return 30
+
+
+TOKEN_TTL_S = _session_days() * 86400
 
 
 def verify_password(supplied: str, secret: str | None) -> bool:
@@ -84,10 +93,13 @@ def verify_token(token: str, secret: str | None, salt: str,
 
 
 def _set_cookie_html(token: str, ttl_s: int = TOKEN_TTL_S) -> str:
-    """로그인 성공 → 부모 문서에 인증 쿠키 주입 (srcdoc iframe = same-origin)."""
-    return (f"<script>window.parent.document.cookie = "
-            f"'{COOKIE_NAME}={token}; path=/; max-age={int(ttl_s)}; SameSite=Lax';"
-            f"</script>")
+    """로그인 성공 → 부모 문서에 인증 쿠키 주입 (srcdoc iframe = same-origin).
+
+    HttpOnly 는 JS 로 쓰는 쿠키라 불가(Streamlit 이 서버측 Set-Cookie 를 제공하지 않음).
+    https 로 서비스될 때는 Secure 를 붙여 평문 전송을 막는다."""
+    return (f"<script>(function(){{var s='{COOKIE_NAME}={token}; path=/; max-age={int(ttl_s)}; SameSite=Lax';"
+            f"if(window.parent.location.protocol==='https:')s+='; Secure';"
+            f"window.parent.document.cookie=s;}})();</script>")
 
 
 def password_gate() -> bool:

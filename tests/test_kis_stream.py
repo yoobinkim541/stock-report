@@ -347,3 +347,86 @@ def test_module_has_no_order_path():
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+def test_main_async_retries_initial_approval_and_resets_backoff_after_stable_session(monkeypatch):
+    """approval 최초 발급 실패는 재시도(종전 즉시 종료), 60초 이상 유지된 세션이 끊기면
+    백오프가 1초로 리셋된다(종전엔 누적돼 최대 60초 대기)."""
+    import asyncio
+    import kis_stream as ks
+
+    keys = iter([None, None, "KEY"])
+    monkeypatch.setattr(ks, "_get_approval_key", lambda: next(keys, "KEY"))
+    sleeps: list[float] = []
+
+    async def _sleep(s):
+        sleeps.append(s)
+    monkeypatch.setattr(ks.asyncio, "sleep", _sleep)
+
+    clock = {"t": 0.0}
+    monkeypatch.setattr(ks.time, "time", lambda: clock["t"])
+
+    calls = {"n": 0}
+
+    async def _session(approval):
+        assert approval == "KEY"
+        calls["n"] += 1
+        if calls["n"] == 1:
+            clock["t"] += 10            # 짧은 세션 → 백오프 증가
+            raise RuntimeError("boom")
+        if calls["n"] == 2:
+            clock["t"] += 120           # 안정 세션 → 백오프 리셋
+            raise RuntimeError("boom")
+        raise asyncio.CancelledError    # 루프 종료
+    monkeypatch.setattr(ks, "_session", _session)
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(ks.main_async())
+    # [approval 재시도 1, 2] + [세션1 실패 1.0] + [세션2(안정) 실패 → 리셋 1.0]
+    assert sleeps == [1.0, 2.0, 1.0, 1.0]
+
+
+def test_session_survives_empty_and_malformed_frames(monkeypatch):
+    """빈 프레임(종전 raw[0] IndexError)·파싱 실패 프레임은 그 프레임만 버리고 세션은 계속
+    다음 프레임을 받는다 — 세션 예외로 번지면 재접속+백오프가 걸렸다."""
+    import asyncio
+    import sys
+    import types
+    import kis_stream as ks
+
+    frames = ["", "BAD|frame", "0|H0STCNT0|001|GOOD"]
+
+    class _WS:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def send(self, _msg):
+            pass
+
+        async def recv(self):
+            if frames:
+                return frames.pop(0)
+            raise ConnectionError("closed")
+
+    fake = types.SimpleNamespace(connect=lambda *a, **k: _WS())
+    monkeypatch.setitem(sys.modules, "websockets", fake)
+    monkeypatch.setattr(ks, "_assert_ws_url", lambda url: None)
+    monkeypatch.setattr(ks, "compute_watchlist", lambda: ({"KR": ["005930"], "US": []}, {"KR": [], "US": []}))
+    monkeypatch.setattr(ks, "us_enabled", lambda: False)
+    monkeypatch.setattr(ks, "fills_enabled", lambda: False)
+    monkeypatch.setattr(ks, "handle_pingpong", lambda raw: None)
+    seen = []
+
+    def _parse(raw):
+        if raw.startswith("BAD"):
+            raise ValueError("malformed")
+        seen.append(raw)
+        return []
+    monkeypatch.setattr(ks, "parse_realtime_frame", _parse)
+
+    with pytest.raises(ConnectionError):
+        asyncio.run(ks._session("KEY"))
+    assert seen == ["0|H0STCNT0|001|GOOD"]      # 빈·불량 프레임 뒤에도 정상 프레임 처리

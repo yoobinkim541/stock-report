@@ -7,7 +7,12 @@ import pytest
 
 from scripts import run_public_wiki_rollout as runner
 from test_wiki_source_notes import NOW, encoded
-from test_wiki_topic_v3 import api, add_target, evidence, payload, propose, store
+from test_wiki_topic_v3 import api, add_target, payload, propose
+
+
+@pytest.fixture
+def evidence(source_note_evidence):
+    return source_note_evidence
 
 
 def envelope(evidence):

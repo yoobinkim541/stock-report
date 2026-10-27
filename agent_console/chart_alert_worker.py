@@ -4,10 +4,9 @@ import argparse
 import inspect
 import json
 import os
-from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, Callable
 
 import pandas as pd
 
@@ -41,14 +40,12 @@ def _lock_target() -> str:
     return _LOCK_TARGET
 
 
-@contextmanager
-def alert_cycle_lock() -> Iterator[None]:
-    """One evaluate→deliver pass at a time (worker cron and server batch share it).
+def cycle_lock(timeout: float = 0.0):
+    """One evaluate→deliver pass at a time — 워커 크론·배치 API 가 공유하는 단일 직렬화 지점.
 
-    Raises ``safe_io.LockTimeout`` immediately when another pass holds the lock.
+    ``timeout`` 안에 못 잡으면 ``safe_io.LockTimeout`` (기본 0 = 즉시).
     """
-    with safe_io.file_write_lock(_lock_target(), timeout=0):
-        yield
+    return safe_io.file_write_lock(_lock_target(), timeout=timeout)
 
 
 def run_chart_alert_cycle(
@@ -69,7 +66,7 @@ def run_chart_alert_cycle(
     이번 호출은 통째로 스킵(룰 조회도 시작 안 함).
     """
     try:
-        with alert_cycle_lock():
+        with cycle_lock(timeout=0):
             return _run_chart_alert_cycle_locked(
                 workspace_id=workspace_id, symbols=symbols, notify=notify,
                 load_bars_fn=load_bars_fn, send_fn=send_fn, limit=limit,
@@ -163,7 +160,7 @@ def evaluate_and_deliver(
 ) -> dict[str, Any]:
     """Evaluate rules, persist pending events before sending, then deliver with per-event acks.
 
-    Caller must hold :func:`alert_cycle_lock`.
+    Caller must hold :func:`cycle_lock`.
 
     - notify=False 는 평가 전용이다. 평가 감사(matched/trace)는 저장하지만 이벤트를
       기록하지 않고 once 완료·repeating 무장·pending 을 바꾸지 않는다. 다음 notify 사이클이

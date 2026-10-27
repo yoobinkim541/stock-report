@@ -6,7 +6,7 @@ import pytest
 
 from agent_console import wiki
 from reports.wiki_source_journal import Journal
-from test_wiki_source_pipeline import pipeline_env, module, NOW
+from test_wiki_source_pipeline import module, NOW
 
 
 def test_crash_after_data_write_recovers_without_duplicates(pipeline_env, monkeypatch):

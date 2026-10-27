@@ -12,8 +12,13 @@ from agent_console import shared_memory, wiki, wiki_publication as publication
 from reports import wiki_publication_effects as effects, wiki_topic_transaction_v3 as transaction
 from reports import wiki_public_budget
 from reports.wiki_source_notes import materialize_source_note
-from test_wiki_source_notes import NOW, store
-from test_wiki_topic_v3 import evidence, propose
+from test_wiki_source_notes import NOW
+from test_wiki_topic_v3 import propose
+
+
+@pytest.fixture
+def evidence(source_note_evidence):
+    return source_note_evidence
 
 
 def forbidden(*args, **kwargs):

@@ -41,8 +41,9 @@ def test_send_telegram_posts_each_part(monkeypatch):
     calls = []
 
     class _Resp:
-        def raise_for_status(self):
-            return None
+        ok = True
+        status_code = 200
+        text = ""
 
     def fake_post(url, json=None, timeout=None, **kw):
         calls.append((url, json))
@@ -54,3 +55,37 @@ def test_send_telegram_posts_each_part(monkeypatch):
     assert len(calls) == 2
     assert all("/botT/sendMessage" in u for u, _ in calls)
     assert all(j["chat_id"] == "C" for _, j in calls)
+
+
+def _resp(status, body=None):
+    class _R:
+        ok = 200 <= status < 300
+        status_code = status
+        text = ""
+
+        def json(self):
+            return body or {}
+    return _R()
+
+
+def test_send_telegram_retries_on_429_with_retry_after(monkeypatch):
+    """429 는 retry_after 만큼 쉬고 재시도, 4xx(400) 는 즉시 실패·재시도 없음."""
+    seq = [_resp(429, {"parameters": {"retry_after": 2}}), _resp(200)]
+    sleeps = []
+    monkeypatch.setattr(notify.time, "sleep", lambda s: sleeps.append(s))
+    monkeypatch.setattr(notify.requests, "post", lambda *a, **k: seq.pop(0))
+    assert notify.send_telegram("x", token="T", chat_id="C") is True
+    assert sleeps == [2.0]
+
+    calls = []
+    monkeypatch.setattr(notify.requests, "post", lambda *a, **k: calls.append(1) or _resp(400))
+    assert notify.send_telegram("x", token="T", chat_id="C") is False
+    assert len(calls) == 1
+
+
+def test_send_telegram_gives_up_after_attempts_on_5xx(monkeypatch):
+    monkeypatch.setattr(notify.time, "sleep", lambda s: None)
+    calls = []
+    monkeypatch.setattr(notify.requests, "post", lambda *a, **k: calls.append(1) or _resp(502))
+    assert notify.send_telegram("x", token="T", chat_id="C") is False
+    assert len(calls) == 3

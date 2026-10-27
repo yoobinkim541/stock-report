@@ -9,8 +9,13 @@ from reports.wiki_source_journal import _encoded
 from reports.wiki_source_notes import materialize_source_note
 from reports import wiki_topic_transaction_v3 as transaction
 from scripts import run_public_wiki_pilot as public
-from test_wiki_source_notes import NOW, store
-from test_wiki_topic_v3 import evidence, propose, payload, validate
+from test_wiki_source_notes import NOW
+from test_wiki_topic_v3 import propose, payload, validate
+
+
+@pytest.fixture
+def evidence(source_note_evidence):
+    return source_note_evidence
 
 
 @pytest.fixture

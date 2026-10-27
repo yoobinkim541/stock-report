@@ -32,6 +32,7 @@ os.environ.setdefault("WORLD_MEMORY_DB", os.path.join(_TMPDIR, "shared-memory", 
 # AI 콘솔 SQLite/파일 캐시도 tmp 격리 — Streamlit AppTest 가 실제 홈 DB 를 열지 않게 한다.
 os.environ.setdefault("AGENT_CONSOLE_DB", os.path.join(_TMPDIR, "agent_console.sqlite3"))
 os.environ.setdefault("AGENT_CONSOLE_REPORTS_DIR", os.path.join(_TMPDIR, "reports"))
+os.environ["ARTICLE_CACHE_DIR"] = os.path.join(_TMPDIR, "reports", "article-cache")
 os.environ.setdefault("AGENT_CONSOLE_SOURCE_CACHE_DIR", os.path.join(_TMPDIR, "reports", "source-cache"))
 os.environ.setdefault("AGENT_CONSOLE_ML_DATA_DIR", os.path.join(_TMPDIR, "reports", "ml-data"))
 os.environ.setdefault("AGENT_CONSOLE_SHARED_MEMORY_DIR", os.path.join(_TMPDIR, "shared-memory"))
@@ -67,3 +68,50 @@ def _isolate_ohlc_cache():
     if ohlc_dir and os.path.isdir(ohlc_dir):
         shutil.rmtree(ohlc_dir, ignore_errors=True)
     yield
+
+
+# ── 여러 테스트 모듈이 공유하는 wiki 픽스처 ─────────────────────────────
+# 픽스처는 여기서만 등록한다(테스트 모듈끼리 픽스처 이름을 import 해 공유하지 않는다).
+# 구현은 데이터·상수(NOW 등)를 소유한 테스트 모듈의 build_* 함수에 두고, 수집 전
+# import 를 피하려 픽스처 실행 시점에 가져온다. `evidence` 는 v2 topic 증거이며,
+# v3 source-note 증거가 필요한 모듈은 `source_note_evidence` 로 `evidence` 를 덮어쓴다.
+@pytest.fixture
+def store(tmp_path, monkeypatch):
+    from test_wiki_source_notes import build_store
+
+    return build_store(tmp_path, monkeypatch)
+
+
+@pytest.fixture
+def evidence(tmp_path, monkeypatch):
+    from test_wiki_topic_integration import build_evidence
+
+    return build_evidence(tmp_path, monkeypatch)
+
+
+@pytest.fixture
+def transaction(evidence, tmp_path, monkeypatch):
+    from test_wiki_topic_transaction import build_transaction
+
+    return build_transaction(evidence, tmp_path, monkeypatch)
+
+
+@pytest.fixture
+def source_note_evidence(store, monkeypatch):
+    from test_wiki_topic_v3 import build_source_note_evidence
+
+    return build_source_note_evidence(store, monkeypatch)
+
+
+@pytest.fixture
+def pipeline_env(tmp_path, monkeypatch):
+    from test_wiki_source_pipeline import build_pipeline_env
+
+    return build_pipeline_env(tmp_path, monkeypatch)
+
+
+@pytest.fixture
+def archived_event(monkeypatch, tmp_path):
+    from test_wiki_source_revision import build_archived_event
+
+    return build_archived_event(monkeypatch, tmp_path)

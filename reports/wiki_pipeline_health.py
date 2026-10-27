@@ -13,7 +13,7 @@ from typing import Any
 
 from agent_console import evidence_usage, wiki
 from providers import news_labels
-from reports import raw_archive, source_collector
+from reports import raw_archive, source_collector, wiki_article_backfill
 
 STALE_WIKI_AGE_DAYS = 14
 UNUSED_WIKI_DAYS = 30
@@ -606,6 +606,7 @@ def _recommendations(
     curation_section: dict[str, Any],
     news_label_section: dict[str, Any] | None = None,
     source_pipeline_section: dict[str, Any] | None = None,
+    article_coverage: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     recs: list[dict[str, Any]] = []
     if (news_label_section or {}).get("attention"):
@@ -680,6 +681,23 @@ def _recommendations(
             "action": "증류 크론이 대기 source_digest를 검토하도록 두고, 기존 judgment 링크는 보존·복구하세요.",
         })
 
+    coverage = article_coverage or {}
+    unresolved = int(coverage.get("unresolved_count") or 0)
+    if unresolved:
+        status_counts = coverage.get("status_counts") or {}
+        detail = " · ".join(
+            f"{key} {int(status_counts.get(key) or 0)}개"
+            for key in ("missing", "pending", "retry", "ready_missing_body", "failed", "needs_browser")
+            if int(status_counts.get(key) or 0)
+        )
+        recs.append({
+            "priority": 2,
+            "category": "article_backfill",
+            "title": "위키 근거 원문 수집 잔여 작업",
+            "detail": f"미해결 URL {unresolved}개" + (f" · {detail}" if detail else ""),
+            "action": "큐의 재시도·본문 누락 URL을 처리하고, 접근 제한은 blocked/unavailable 대체 근거로 남기세요.",
+        })
+
     stale_count = int(wiki_section.get("stale_count") or 0)
     unused_actionable_count = int(
         wiki_section.get("unused_actionable_count", wiki_section.get("unused_count") or 0) or 0
@@ -733,6 +751,7 @@ def build_pipeline_health_report(*, dry_run: bool = False) -> dict[str, Any]:
     lint_data = wiki.lint_pages(pages)
     stale_pages = wiki.list_stale_pages(max_age_days=STALE_WIKI_AGE_DAYS)
     unused_pages = wiki.list_unused_pages(days=UNUSED_WIKI_DAYS)
+    article_coverage = wiki_article_backfill.reference_coverage(pages)
     source_section = _summarize_source_health(source_health, stale_rows, recent_events)
     source_section["recent"]["sampled"] = bool(dry_run)
     source_section["recent"]["sample_limit"] = RECENT_EVENT_SAMPLE_LIMIT if dry_run else None
@@ -741,7 +760,12 @@ def build_pipeline_health_report(*, dry_run: bool = False) -> dict[str, Any]:
     news_label_section = _summarize_news_label_health()
     source_pipeline_section = _summarize_source_pipeline_health()
     recommendations = _recommendations(
-        source_section, wiki_section, curation_section, news_label_section, source_pipeline_section
+        source_section,
+        wiki_section,
+        curation_section,
+        news_label_section,
+        source_pipeline_section,
+        article_coverage,
     )
     overall_status = "attention" if any(
         int(rec.get("priority") or 0) > 0 for rec in recommendations
@@ -756,6 +780,7 @@ def build_pipeline_health_report(*, dry_run: bool = False) -> dict[str, Any]:
         "source_health": source_section,
         "wiki_health": wiki_section,
         "curation_health": curation_section,
+        "article_coverage": article_coverage,
         "news_label_health": news_label_section,
         "source_pipeline_health": source_pipeline_section,
         "overall": {
@@ -772,6 +797,7 @@ def format_pipeline_health_report(report: dict[str, Any]) -> str:
     source_section = report.get("source_health") or {}
     wiki_section = report.get("wiki_health") or {}
     curation_section = report.get("curation_health") or {}
+    article_coverage = report.get("article_coverage") or {}
     overall = source_section.get("overall") or {}
     pipeline_overall = report.get("overall") or {}
     news_labels_section = report.get("news_label_health") or pipeline_overall.get("news_labels") or {}
@@ -798,6 +824,13 @@ def format_pipeline_health_report(report: dict[str, Any]) -> str:
         f"actionable {curation_section.get('actionable_unlinked_count', 0)} · "
         f"pending {curation_section.get('distillation_pending_count', 0)} · "
         f"intentional-skip {curation_section.get('intentional_skip_count', 0)}"
+    )
+    lines.append(
+        f"근거 원문: URL {article_coverage.get('url_count', 0)} · "
+        f"ready {article_coverage.get('ready_count', 0)} · "
+        f"blocked {article_coverage.get('blocked_count', 0)} · "
+        f"unavailable {article_coverage.get('unavailable_count', 0)} · "
+        f"미해결 {article_coverage.get('unresolved_count', 0)}"
     )
     lines.append(
         f"상태: reviewed {status_counts.get('reviewed', 0)} · stable {status_counts.get('stable', 0)} · "

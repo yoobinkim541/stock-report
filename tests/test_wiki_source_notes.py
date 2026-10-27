@@ -56,8 +56,7 @@ def compilation(source, *, count=2):
         "skip_reason": None}, source)
 
 
-@pytest.fixture
-def store(tmp_path, monkeypatch):
+def build_store(tmp_path, monkeypatch):
     monkeypatch.setenv("STOCK_REPORT_REPORTS_DIR", str(tmp_path / "reports"))
 
     def make(*, body="Capacity rose; demand is uncertain.\n", chunked=False,

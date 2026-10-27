@@ -348,7 +348,7 @@ def test_build_outcome_marks_target_success():
     assert "pivot_confirmed" in out["factor_tags"]
 
 
-def _training_row(i: int, *, confirmed: bool, bad_score: float = 0.75, label_days: int = 1) -> dict:
+def _training_row(i: int, *, confirmed: bool, bad_score: float = 0.68, label_days: int = 1) -> dict:
     """i일차(2026-01-01+i) 결정. 라벨은 label_days 뒤 exit·성숙(이용가능)."""
     day = pd.Timestamp("2026-01-01") + pd.Timedelta(days=i)
     available = (day + pd.Timedelta(days=label_days)).strftime("%Y-%m-%d")
@@ -358,6 +358,7 @@ def _training_row(i: int, *, confirmed: bool, bad_score: float = 0.75, label_day
         "date": f"{day:%Y-%m-%d}",
         "ticker": name,
         "signal": "enter",
+        # 실패 행은 보정 상한(TOTAL_ADJUST_CAP 0.08) 안에서 임계(0.62) 아래로 내려가야 챌린저가 거를 수 있다
         "score": 0.70 if confirmed else bad_score,
         "success": confirmed,
         "r_multiple": 1.5 if confirmed else -1.0,
@@ -389,7 +390,7 @@ def _validated_rows(days: int = 50, label_days: int = 1) -> list[dict]:
     """실패 그룹 점수 .68(보정 -0.08 이면 문턱 .62 아래). 성공 그룹 R 은 날마다 조금씩 달라 Sharpe 가 정의된다."""
     rows = []
     for i in range(days):
-        rows.append(_training_row(i, confirmed=False, bad_score=0.68, label_days=label_days))
+        rows.append(_training_row(i, confirmed=False, label_days=label_days))
         good = _training_row(i, confirmed=True, label_days=label_days)
         good["r_multiple"] = 1.5 + 0.1 * (i % 3)
         rows.append(good)
@@ -460,7 +461,7 @@ def test_learn_feedback_adjustments_holds_when_capped_adjustment_cannot_change_s
     """실패 그룹 .75 − 총보정 cap .08 = .67 ≥ .62 → 선택 불변 → 동률은 채택 거부(생산 규칙 유지)."""
     rows = []
     for i in range(20):
-        rows.append(_training_row(i, confirmed=False))
+        rows.append(_training_row(i, confirmed=False, bad_score=0.75))
         rows.append(_training_row(i, confirmed=True))
 
     model_path = tmp_path / "entry_feedback_adjustments.json"

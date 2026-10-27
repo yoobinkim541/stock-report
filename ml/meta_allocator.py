@@ -272,7 +272,7 @@ META_CACHE_TTL_S = 900   # 15분
 _RESULT_CACHE: dict[tuple, tuple[float, "MetaAllocation"]] = {}
 
 
-def _meta_cache_file(market_type: str, phase_key) -> "Path":
+def _meta_cache_file(market_type: str, phase_key):
     from pathlib import Path
     import os
     from ml._safe_cache import harden_cache_dir

@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from test_wiki_source_notes import (
-    NOW, encoded, inventory, rewrite_compilation, rewrite_receipt, store,
+    NOW, encoded, inventory, rewrite_compilation, rewrite_receipt,
 )
 from reports import wiki_source_notes
 

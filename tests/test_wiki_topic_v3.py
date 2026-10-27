@@ -10,7 +10,7 @@ import pytest
 from agent_console import wiki
 from reports.wiki_source_notes import materialize_source_note
 from reports.wiki_topic_snapshot_context import select_snapshot_context
-from test_wiki_source_notes import NOW, encoded, inventory, rewrite_receipt, store
+from test_wiki_source_notes import NOW, encoded, inventory, rewrite_receipt
 
 
 def api():
@@ -19,7 +19,11 @@ def api():
 
 
 @pytest.fixture
-def evidence(store, monkeypatch):
+def evidence(source_note_evidence):
+    return source_note_evidence
+
+
+def build_source_note_evidence(store, monkeypatch):
     sources = [store(url=f"https://t.me/public_channel/{i}", body=f"Capacity report {i}")
                for i in range(1, 4)]
     journal, source, compiled = sources[-1]

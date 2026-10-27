@@ -8,7 +8,7 @@ from agent_console import shared_memory, wiki
 from reports import wiki_public_budget as quota
 from reports import wiki_topic_pilot_state as pilot
 from reports.wiki_source_notes import _bytes, _sha
-from test_wiki_topic_transaction import transaction, evidence, NOW
+from test_wiki_topic_transaction import NOW
 
 
 def api():

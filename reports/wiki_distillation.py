@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """reports/wiki_distillation.py — source_digest 더미를 playbook/risk/concept 판단 카드로 증류.
 
-문제: source_digest 는 reports/source_wiki_curator.py 가 규칙 기반으로 뉴스·데이터를
+문제: source_digest 는 (1e41655 에서 퇴역한) reports/source_wiki_curator.py 가 규칙 기반으로 뉴스·데이터를
 요약만 할 뿐 판단을 만들지 않는다. playbook/risk/decision/concept(재사용 가능한 판단)은
 오직 대화(agent_console.wiki.auto_curate_from_chat)에서만 생기는데, 대화가 없는 날은
 판단 카드가 전혀 안 쌓인다 — source_digest 만 83% 를 차지하는 편중의 원인.
 
-이 크론은 주기적으로 아직 판단 카드에 링크되지 않은 source_digest 를 검토해,
+이 모듈은 아직 판단 카드에 링크되지 않은 source_digest 를 검토해,
 승격할 만한 패턴이 있으면 draft 상태의 playbook/risk/concept 후보를 만들어 원본
 digest 에 링크한다 (source_digest 자체는 건드리지 않음 — 새 카드만 추가).
+무인 진입점(main, 크론)은 scripts.run_public_wiki_rollout 의 제한 워커에 위임하고,
+run() 은 --local-only 운영 복구와 테스트에서 쓴다. 근거 본문은 source-cache 보관 원문과
+article queue(reports.article_crawler)의 ready 본문을 함께 사용한다.
 확신 낮은 draft 라 후속 위키 헬스체크·사람 리뷰로 승격 여부가 갈린다.
 
 사용법:
@@ -40,6 +43,7 @@ load_dotenv()
 from agent_console import shared_memory, wiki
 from lib.structured_output import parse_object as _parse_structured_object
 import notify
+from reports import article_queue
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -92,8 +96,14 @@ def _has_archived_judgment_result(page: dict, pages_by_id: dict[str, dict] | Non
     return bool(result and result.get("kind") in _JUDGMENT_KINDS and result.get("status") == "archived")
 
 
-def select_distillation_candidates(pages: list[dict], *, limit: int = MAX_CANDIDATES_PER_RUN) -> list[dict]:
-    """판단 카드로 아직 안 이어진 source_digest 중 근거(evidence)가 많은 순 상위 N개."""
+def select_distillation_candidates(
+    pages: list[dict], *, limit: int = MAX_CANDIDATES_PER_RUN,
+    include_exhausted: bool = False,
+) -> list[dict]:
+    """판단 카드로 아직 안 이어진 source_digest 중 근거(evidence)가 많은 순 상위 N개.
+
+    ``include_exhausted`` is an operator-directed recovery switch: it revisits
+    failures whose external-LLM attempts are exhausted (local-only reruns)."""
     pages_by_id = {str(page.get("id")): page for page in pages if isinstance(page, dict) and page.get("id")}
     unlinked = []
     for page in pages:
@@ -109,7 +119,9 @@ def select_distillation_candidates(pages: list[dict], *, limit: int = MAX_CANDID
             or bool(page.get("evidence_ids") and not (page.get("distillation_state") or {}).get("status"))
         ):
             continue
-        if _distillation_is_eligible(page, orphaned=orphaned):
+        if _distillation_is_eligible(page, orphaned=orphaned) or (
+            include_exhausted and (page.get("distillation_state") or {}).get("status") == "failed"
+        ):
             unlinked.append(page)
     unlinked.sort(key=lambda p: (str((p.get("distillation_state") or {}).get("last_attempt_at") or ""),
                                 -len(p.get("evidence_ids") or [])))
@@ -119,9 +131,19 @@ def select_distillation_candidates(pages: list[dict], *, limit: int = MAX_CANDID
 def _evidence_fingerprint(page: dict) -> str:
     evidence = sorted(set(str(x) for x in page.get("evidence_ids") or []))
     conflicts = sorted(set(str(x) for x in page.get("conflicting_evidence_ids") or []))
+    # Ready article-queue bodies (content hashes) are evidence versions too.
+    versions = sorted(set(str(x) for x in page.get("_article_versions") or []))
+    if versions:
+        value = {"evidence_ids": evidence, "article_versions": versions}
+        if conflicts:
+            value["conflicting_evidence_ids"] = conflicts
+        return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
     # Keep legacy hashes for pages without counterevidence.
     payload = {"evidence_ids": evidence, "conflicting_evidence_ids": conflicts} if conflicts else evidence
     return hashlib.sha256(json.dumps(payload).encode()).hexdigest()
+
+
+_LEGACY_DATA_TAGS = {"institution_watch", "13f", "notable_investor", "macro", "macro_snapshot"}
 
 
 def _refresh_due(page: dict) -> bool:
@@ -168,6 +190,58 @@ def _distillation_is_eligible(page: dict, *, orphaned: bool = False) -> bool:
 
 def _distillation_id(source_page_id: str, kind: str) -> str:
     return "distill-" + hashlib.sha256(f"{source_page_id}|{kind}".encode("utf-8")).hexdigest()[:20]
+
+
+def _source_identity(page: dict) -> str:
+    """Return a stable ticker/topic token for guarding legacy result links."""
+    title = str(page.get("title") or "")
+    match = re.search(r"종목:([^·]+)", title)
+    if match:
+        return re.sub(r"[^0-9a-zA-Z가-힣]+", "-", match.group(1).strip().lower()).strip("-")
+    for tag in page.get("tags") or []:
+        value = str(tag).strip().lower()
+        if value.startswith("ticker:"):
+            return value.split(":", 1)[1].strip()
+    return ""
+
+
+def _previous_belongs_to_page(previous: dict | None, page: dict) -> bool:
+    """Reject a stale shared result ID from the pre-repair distillation runs."""
+    if not previous:
+        return False
+    source_id = str(page.get("id") or "").strip()
+    identity = _source_identity(page)
+    if identity:
+        previous_identity = _source_identity(previous)
+        if previous_identity:
+            return identity == previous_identity
+        return f"ticker:{identity}" in {
+            str(tag).strip().lower() for tag in previous.get("tags") or []
+        }
+    # Without a ticker identity, ownership is a back-reference or this source's
+    # own deterministic result ID (unique per source since the ID repair).
+    return bool(
+        source_id in {str(link) for link in previous.get("links") or []}
+        or f"wiki:{source_id}" in {str(ref) for ref in previous.get("source_refs") or []}
+        or (source_id and str(previous.get("id") or "")
+            == _distillation_id(source_id, str(previous.get("kind") or "").lower()))
+    )
+
+
+def _collision_safe_result_id(payload: dict, page: dict, existing: dict[str, dict]) -> str:
+    """Keep a generated result unique when a legacy ID is still occupied."""
+    candidate = str(payload.get("id") or "").strip()
+    occupant = existing.get(candidate)
+    if not candidate or occupant is None or _previous_belongs_to_page(occupant, page):
+        return candidate
+    seed = f"{candidate}|{page.get('id')}|{payload.get('title')}"
+    suffix = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:10]
+    repaired = f"{candidate}-r{suffix}"
+    counter = 1
+    while repaired in existing:
+        repaired = f"{candidate}-r{suffix}-{counter}"
+        counter += 1
+    return repaired
 
 
 def _token_set(text: object) -> set[str]:
@@ -324,8 +398,14 @@ def _append_source_article(page: dict, article: dict) -> None:
     })
 
 
-def _attach_article_context(candidates: list[dict], *, cache_dir=None, now=None) -> None:
-    """Read matching archived events once, retaining only bounded article text."""
+def _attach_article_context(candidates: list[dict], *, cache_dir=None, now=None,
+                            index: dict[str, dict] | None = None, article_root=None) -> None:
+    """Read matching archived events once, retaining only bounded article text.
+
+    ``cache_dir`` is the source-event cache. Ready article-queue bodies
+    (``reports.article_crawler``) selected by ``_attach_article_metadata`` are
+    loaded from ``article_root`` (or the given ``index`` snapshot) and supersede
+    an incomplete API preview of the same URL."""
     from reports import source_collector as collector
     from reports.evidence_cards import event_to_evidence_card
 
@@ -434,6 +514,16 @@ def _attach_article_context(candidates: list[dict], *, cache_dir=None, now=None)
                 _append_source_article(page, article)
                 if _full_body_source_class(article) == "community" and _article_is_eligible(article):
                     verified_archives.append(article)
+        queued_urls = set()
+        for queued in _queued_articles(page, index=index, root=article_root):
+            url = queued["url"]
+            if page.get("_source_text_error"):
+                break
+            if any(article_queue.canonicalize_url(existing.get("url")) == url
+                   for existing in page["_source_articles"]):
+                continue
+            queued_urls.add(url)
+            _append_source_article(page, queued)
         # Repaired public-message archives replace only the identical text/URL,
         # not the legacy DOM hash or its inferred evidence identity.
         for incomplete, event_url in incomplete_articles[id(page)]:
@@ -445,7 +535,93 @@ def _attach_article_context(candidates: list[dict], *, cache_dir=None, now=None)
                 for archive in verified_archives
             ):
                 continue
+            # A ready crawled body is the complete text behind this preview.
+            if article_queue.canonicalize_url(incomplete.get("url") or event_url) in queued_urls:
+                continue
             _append_source_article(page, incomplete)
+
+
+def _queued_articles(page: dict, *, index: dict[str, dict] | None, root) -> list[dict]:
+    """Ready article-queue bodies for the records matched by ``_attach_article_metadata``."""
+    evidence_ids = {str(value) for value in page.get("evidence_ids") or []}
+    conflicting = {str(value) for value in page.get("conflicting_evidence_ids") or []}
+    out = []
+    for url, record in page.get("_article_records") or []:
+        if record.get("status") != "ready":
+            continue
+        article = article_queue.get_article(url, root=root, index=index if index is not None else {url: record})
+        if not article:
+            continue
+        text = str(article.get("text") or "").strip()
+        title = str(article.get("title") or "").strip()
+        if not text or text == title or not title:
+            continue
+        matching_ids = [str(value) for value in record.get("evidence_ids") or []
+                        if str(value) in evidence_ids | conflicting]
+        evidence_id = matching_ids[0] if matching_ids else ""
+        out.append({
+            "evidence_id": evidence_id,
+            "title": title[:200],
+            "url": str(article.get("url") or url),
+            "published_at": str(article.get("published_at") or ""),
+            "text": text,
+            "text_complete": True,
+            "content_kind": "article",
+            "source_text_scope": "article_fulltext",
+            "provenance": str(article.get("source") or record.get("source") or "unknown"),
+            "raw_sha256": "",
+            "content_hash": str(article.get("content_hash") or ""),
+            "evidence_role": "conflicting" if evidence_id in conflicting else "supporting",
+        })
+    return out
+
+
+def _is_legacy_data_page(page: dict) -> bool:
+    tags = {str(tag).strip().lower() for tag in page.get("tags") or []}
+    return bool(
+        tags & _LEGACY_DATA_TAGS
+        or tags & {"source:13f", "source:fred", "source:worldgovernmentbonds"}
+    )
+
+
+def _attach_article_metadata(pages: list[dict], index: dict[str, dict]) -> None:
+    """Attach only metadata needed for eligibility and content fingerprints."""
+    indexed_source_tags = {"source:saveticker"}
+    for record in index.values():
+        source = str(record.get("source") or "").split(":", 1)[0].strip().lower()
+        if source:
+            indexed_source_tags.add(f"source:{source}")
+    for page in pages:
+        evidence_ids = {str(value) for value in page.get("evidence_ids") or []}
+        urls = {
+            canonical
+            for ref in page.get("source_refs") or []
+            if (canonical := article_queue.canonicalize_url(ref))
+        }
+        matches = []
+        for url, record in index.items():
+            record_evidence = {str(value) for value in record.get("evidence_ids") or []}
+            if evidence_ids.intersection(record_evidence) or url in urls:
+                matches.append((url, record))
+        tags = {str(tag).strip().lower() for tag in page.get("tags") or []}
+        page["_require_articles"] = bool(
+            not _is_legacy_data_page(page)
+            and (tags.intersection(indexed_source_tags) or matches)
+        )
+        page["_article_records"] = matches
+        page["_article_versions"] = sorted(
+            f"{url}|{record.get('content_hash')}"
+            for url, record in matches
+            if record.get("status") == "ready" and record.get("content_hash")
+        )
+
+
+def _has_rich_digest_fallback(page: dict) -> bool:
+    return bool(
+        len(str(page.get("body") or "").strip()) >= 300
+        and page.get("source_refs")
+        and page.get("evidence_ids")
+    )
 
 
 def _build_distillation_prompt(page: dict) -> str:
@@ -472,7 +648,11 @@ def _build_distillation_prompt(page: dict) -> str:
         f"제목: {page.get('title', '')}",
         f"요약: {page.get('summary', '')}",
         f"본문: {(page.get('body') or '')[:3000]}",
+        f"출처 참조: {json.dumps(page.get('source_refs') or [], ensure_ascii=False)}",
+        f"근거 ID: {json.dumps(page.get('evidence_ids') or [], ensure_ascii=False)}",
         "</source_digest>",
+        "현재 보관 원문이 없으므로 위 source_digest의 본문·출처 참조·근거 ID만 사용한다.",
+        "확인할 수 없는 세부 사실이나 인과관계는 만들지 않는다. 근거가 충분하지 않으면 skip 한다.",
     ])
     articles = page.get("_source_articles") or []
     previous = page.get("_previous_knowledge") or {}
@@ -616,7 +796,64 @@ def _resolve_article_citations(body: str, articles: list[dict], knowledge: list[
     return None if invalid or not current else (resolved, current)
 
 
-def _distill_one_with_status(page: dict, llm_fn) -> tuple[dict | None, str, str]:
+def _local_distillation_plan(page: dict) -> dict | None:
+    """Build a source-only draft when an external LLM is unavailable.
+
+    This path deliberately does not infer causality or an investment action. It
+    turns the cached digest/article evidence into a searchable draft card and
+    keeps the source-backed boundary visible to later review.
+    """
+    digest_body = re.sub(r"\s+", " ", str(page.get("body") or "")).strip()
+    summary = re.sub(r"\s+", " ", str(page.get("summary") or "")).strip()
+    articles = page.get("_source_articles") or []
+    if not digest_body and not summary and not articles:
+        return None
+    tags = {str(tag).strip().lower() for tag in page.get("tags") or []}
+    title_text = str(page.get("title") or "수집 소스")
+    risk_tokens = ("risk", "위험", "중동", "전쟁", "금리", "변동성", "mdd", "손실", "크레딧")
+    playbook_tokens = ("전략", "strategy", "매수", "매도", "포트폴리오", "레버리지", "대응")
+    lowered = f"{title_text} {summary} {digest_body}".lower()
+    if any(token in lowered for token in playbook_tokens):
+        kind = "playbook"
+    elif any(token in lowered for token in risk_tokens) or "risk" in tags:
+        kind = "risk"
+    else:
+        kind = "concept"
+
+    body_parts = ["## 관찰된 근거", summary or digest_body[:700]]
+    if digest_body and digest_body != summary:
+        body_parts.append(digest_body[:1800])
+    if articles:
+        body_parts.append("## 보관 원문 발췌")
+        for index, article in enumerate(articles[:MAX_SOURCE_ARTICLES_PER_PAGE], 1):
+            article_title = re.sub(r"\s+", " ", str(article.get("title") or "")).strip()
+            article_text = re.sub(r"\s+", " ", str(article.get("text") or "")).strip()
+            if not article_text:
+                continue
+            body_parts.append(f"- [S{index}] {article_title}: {article_text[:700]}")
+    body_parts.extend([
+        "## 해석 경계",
+        "이 카드는 수집된 원문과 다이제스트를 검색 가능한 위키 초안으로 정리한 것입니다. "
+        "원문에 없는 인과관계·매매 처방·미래 예측은 포함하지 않았으며, 가격·공식 자료·수급과의 교차확인이 필요합니다.",
+    ])
+    citation = "원문 캐시와 수집 소스 다이제스트의 관찰 요약이며 추가 교차확인이 필요함"
+    body_parts.append(f"> **{wiki.REPORT_CITATION_MARKER}**: {citation}")
+    return {
+        "action": "create",
+        "kind": kind,
+        "title": f"{title_text} · 근거 정리",
+        "summary": (summary or digest_body or title_text)[:600],
+        "body": "\n\n".join(part for part in body_parts if part).strip(),
+        "status": "draft",
+        "confidence": 0.35,
+        "report_citation": citation,
+        "reason": "local source-only fallback",
+    }
+
+
+def _distill_one_with_status(page: dict, llm_fn, *, local_only: bool = False) -> tuple[dict | None, str, str]:
+    """Distill one source digest. ``local_only`` builds a source-only draft without
+    calling the model (operator recovery when the external LLM is unavailable)."""
     articles = []
     for article in page.get("_source_articles") or []:
         if not isinstance(article, dict):
@@ -652,17 +889,23 @@ def _distill_one_with_status(page: dict, llm_fn) -> tuple[dict | None, str, str]
     prompt_page = {**page, "_source_articles": articles}
     if page.get("_require_articles") and page.get("_source_text_error"):
         return None, "failed", str(page["_source_text_error"])
-    if page.get("_require_articles") and (
-        not articles or not all(_article_is_eligible(article) for article in articles)
+    # A substantial stored digest (body + refs + evidence) may stand in for a
+    # missing archive; links or a thin digest alone never do.
+    if page.get("_require_articles") and not local_only and (
+        (not articles and not _has_rich_digest_fallback(page))
+        or not all(_article_is_eligible(article) for article in articles)
     ):
         return None, "failed", "article body and source citation unavailable"
-    prompt = _build_distillation_prompt(prompt_page)
-    try:
-        text = llm_fn(prompt)
-    except Exception as e:
-        logger.warning("증류 LLM 호출 실패 (%s): %s", page.get("id"), e)
-        return None, "failed", str(e)
-    plan = _parse_distillation_plan(text)
+    if local_only:
+        plan = _local_distillation_plan(prompt_page)
+    else:
+        prompt = _build_distillation_prompt(prompt_page)
+        try:
+            text = llm_fn(prompt)
+        except Exception as e:
+            logger.warning("증류 LLM 호출 실패 (%s): %s", page.get("id"), e)
+            return None, "failed", str(e)
+        plan = _parse_distillation_plan(text)
     if not plan:
         return None, "failed", "invalid curation JSON"
     if str(plan.get("action", "")).lower() == "skip":
@@ -787,7 +1030,9 @@ def _page_payload(page: dict, **changes) -> dict:
     return payload
 
 
-def _mark_distillation_attempt(page: dict, *, status: str, reason: str = "", result_id: str = "") -> dict:
+def _distillation_attempt_payload(
+    page: dict, *, status: str, reason: str = "", result_id: str = ""
+) -> dict:
     state = dict(page.get("distillation_state") or {})
     attempts = (0 if _refresh_due(page) else int(state.get("attempts") or 0)) + 1
     state.update({
@@ -799,7 +1044,14 @@ def _mark_distillation_attempt(page: dict, *, status: str, reason: str = "", res
         "evidence_fingerprint": _evidence_fingerprint(page),
         "protocol_version": _DISTILLATION_PROTOCOL_VERSION,
     })
-    return wiki.upsert_page(_page_payload(page, distillation_state=state))
+    return _page_payload(page, distillation_state=state)
+
+
+def _mark_distillation_attempt(page: dict, *, status: str, reason: str = "", result_id: str = "") -> dict:
+    """Persist one attempt for callers outside the batch runner."""
+    return wiki.upsert_page(_distillation_attempt_payload(
+        page, status=status, reason=reason, result_id=result_id
+    ))
 
 
 def _notification_state_path() -> Path:
@@ -947,30 +1199,48 @@ def _notify_created_pages(created: list[dict]) -> bool:
 
 
 def run(*, dry_run: bool = False, llm_fn=None, limit: int | None = None,
-        fulltext: bool | None = None, page_ids: list[str] | None = None) -> dict:
+        fulltext: bool | None = None, page_ids: list[str] | None = None,
+        article_cache_dir=None, local_only: bool = False,
+        rebuild_artifacts: bool = True) -> dict:
     if llm_fn is None:
         from agent_console.agent import _try_llm_prompt as llm_fn
 
-    pages = wiki._all_wiki_pages()
+    pages = [dict(page) for page in wiki._all_wiki_pages()]
     if os.getenv("WIKI_SOURCE_PIPELINE_ENABLED", "0") == "1":
         pages = [page for page in pages if page.get("kind") != "source_digest"]
     by_id = {page.get("id"): page for page in pages}
     # Use the configured provider for source-backed synthesis; allow opt-out.
     if fulltext is None:
         fulltext = os.getenv("WIKI_FULLTEXT_SYNTHESIS_ENABLED", "1") == "1"
+    if fulltext:
+        # Ready crawled bodies are evidence versions: attach before selection so
+        # the fingerprint reopens a digest once its article becomes ready.
+        _attach_article_metadata(pages, article_queue.load_index(root=article_cache_dir))
     batch_size = _distillation_batch_size() if limit is None else max(1, min(100, int(limit)))
     eligible_pages = pages if fulltext else [p for p in pages if _has_archived_judgment_result(p, by_id) or (not _refresh_due(p) and not _refresh_retry_due(p))]
     if page_ids is not None:
         selected = set(page_ids)
         eligible_pages = [p for p in eligible_pages if p.get("kind") != "source_digest" or p.get("id") in selected]
-    candidates = select_distillation_candidates(eligible_pages, limit=batch_size)
+    candidates = select_distillation_candidates(
+        eligible_pages,
+        limit=batch_size,
+        # Explicit page_ids are an operator-directed recovery action. The
+        # local-only path may safely revisit exhausted external-LLM failures.
+        include_exhausted=bool(local_only and page_ids),
+    )
     candidates = [dict(page) for page in candidates]
     if fulltext:
-        _attach_article_context(candidates)
+        if article_cache_dir is None:
+            _attach_article_context(candidates)
+        else:
+            _attach_article_context(candidates, article_root=article_cache_dir)
+    pending_upserts: list[dict] = []
     prepared = []
     reserved_ids = set(by_id)
     for page in candidates:
-        page["_require_articles"] = bool(fulltext and page.get("kind") == "source_digest")
+        page["_require_articles"] = bool(
+            fulltext and page.get("kind") == "source_digest" and not _is_legacy_data_page(page)
+        )
         page["_distillation_targets"] = {
             kind: by_id[target_id]
             for kind in _DISTILLABLE_KINDS
@@ -980,16 +1250,27 @@ def run(*, dry_run: bool = False, llm_fn=None, limit: int | None = None,
         page["_reserved_page_ids"] = reserved_ids
         previous_id = (page.get("distillation_state") or {}).get("last_result_id")
         previous = by_id.get(previous_id)
+        if previous and not _previous_belongs_to_page(previous, page):
+            # A historical collision can make a source page point at another
+            # ticker's card.  Ignore it and regenerate from this source's
+            # stable ID rather than copying the wrong document.
+            previous = None
         if fulltext and previous and previous.get("status") != "archived" and previous.get("kind") in _DISTILLABLE_KINDS:
             page["_previous_knowledge"] = previous
         elif previous and previous.get("status") == "archived":
+            if fulltext and not page.get("_source_articles") and not _has_rich_digest_fallback(page):
+                if not dry_run:
+                    pending_upserts.append(_distillation_attempt_payload(
+                        page, status="skipped", reason="previous knowledge archived; stored digest evidence insufficient"
+                    ))
+                continue
             # Do not resurrect an archived judgment page. Create a new version
             # while retaining the archived page as historical evidence.
             page["_distillation_version"] = max(2, int((page.get("distillation_state") or {}).get("attempts") or 0) + 1)
         prepared.append(page)
 
     def _distill_candidate(page: dict) -> tuple[dict | None, str, str]:
-        return _distill_one_with_status(page, llm_fn)
+        return _distill_one_with_status(page, llm_fn, local_only=local_only)
 
     workers = min(_distillation_workers(), len(prepared)) if prepared else 1
     if workers > 1:
@@ -999,11 +1280,15 @@ def run(*, dry_run: bool = False, llm_fn=None, limit: int | None = None,
         distilled = [_distill_candidate(page) for page in prepared]
 
     created = []
+    created_ids: list[str] = []
     for page, (payload, outcome, reason) in zip(prepared, distilled):
         if not payload:
             if not dry_run:
-                _mark_distillation_attempt(page, status=outcome, reason=reason)
+                pending_upserts.append(_distillation_attempt_payload(
+                    page, status=outcome, reason=reason
+                ))
             continue
+        payload["id"] = _collision_safe_result_id(payload, page, by_id)
         duplicate = _semantic_duplicate(payload, pages)
         if duplicate:
             # Keep independently cited knowledge; lexical similarity is only a link.
@@ -1012,39 +1297,71 @@ def run(*, dry_run: bool = False, llm_fn=None, limit: int | None = None,
         if dry_run:
             created.append(payload)
         else:
-            saved = wiki.upsert_page(payload)
-            created.append(saved)
+            pending_upserts.append(payload)
+            created_ids.append(str(payload.get("id") or ""))
             if duplicate:
-                wiki.upsert_page(_page_payload(duplicate, links=wiki._clean_links(
-                    [*(duplicate.get("links") or []), page["id"], saved["id"]], self_id=duplicate["id"])))
+                pending_upserts.append(_page_payload(duplicate, links=wiki._clean_links(
+                    [*(duplicate.get("links") or []), page["id"], payload["id"]], self_id=duplicate["id"])))
             linked = _page_payload(
                 page,
-                links=wiki._clean_links([*(page.get("links") or []), saved["id"]], self_id=page["id"]),
+                links=wiki._clean_links([*(page.get("links") or []), payload["id"]], self_id=page["id"]),
                 distillation_state={
                     "status": "created",
                     "attempts": int((page.get("distillation_state") or {}).get("attempts") or 0) + 1,
                     "last_attempt_at": wiki._now(),
-                    "last_result_id": saved["id"],
+                    "last_result_id": payload["id"],
                     "reason": "distillation created",
                     "evidence_fingerprint": _evidence_fingerprint(page),
                     "protocol_version": _DISTILLATION_PROTOCOL_VERSION,
                 },
             )
-            wiki.upsert_page(linked)
-            pages.append(saved)
-    if created and not dry_run:
+            pending_upserts.append(linked)
+            pages.append(payload)
+    if pending_upserts and not dry_run:
+        saved_pages = wiki.batch_upsert_pages(pending_upserts)
+        saved_by_id = {str(page.get("id") or ""): page for page in saved_pages}
+        created = [saved_by_id[page_id] for page_id in created_ids if page_id in saved_by_id]
+    if created and not dry_run and rebuild_artifacts:
         wiki.rebuild_artifacts()
         qmd = wiki.sync_qmd()
     else:
-        qmd = {"ok": True, "skipped": "dry_run_or_no_creation"}
-    return {"dry_run": dry_run, "candidates_considered": len(candidates), "created": created, "qmd": qmd}
+        qmd = {"ok": True, "skipped": "deferred_or_dry_run_or_no_creation"}
+    return {
+        "dry_run": dry_run,
+        "local_only": local_only,
+        "candidates_considered": len(candidates),
+        "created": created,
+        "qmd": qmd,
+    }
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--local-only", action="store_true", help="외부 LLM 없이 원문 근거만으로 draft 카드 생성")
+    parser.add_argument("--defer-artifacts", action="store_true",
+                        help="--local-only 배치 중 위키/QMD 산출물 재생성을 미룸")
     parser.add_argument("--limit", type=int, default=None, help="이번 실행에서 증류할 최대 페이지 수")
     args = parser.parse_args()
+
+    if args.local_only:
+        # Operator-directed recovery without an external LLM: an attended run of
+        # the legacy distiller, not the unattended entrypoint below.
+        result = run(
+            dry_run=args.dry_run,
+            limit=args.limit,
+            local_only=True,
+            rebuild_artifacts=not args.defer_artifacts,
+        )
+        logger.info(
+            "위키 증류 완료: 후보 %d건 검토, %d건 생성 (dry_run=%s)",
+            result["candidates_considered"], len(result["created"]), result["dry_run"],
+        )
+        for page in result["created"]:
+            logger.info("  + [%s] %s", page.get("kind"), page.get("title"))
+        if result["created"] and not args.dry_run:
+            _notify_created_pages(result["created"])
+        return 0
 
     # The old catalog/template generator is no longer an unattended entrypoint.
     # Both cron and the timer share the bounded worker's lock and daily budget.

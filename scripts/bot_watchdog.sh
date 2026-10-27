@@ -31,7 +31,7 @@ is_running() {
     kill -0 "$pid" 2>/dev/null
 }
 
-UV="/home/ubuntu/.local/bin/uv"
+UV="${UV_BIN:-$(command -v uv 2>/dev/null || echo /home/ubuntu/.local/bin/uv)}"
 
 restart_bot() {
     local reason="$1" pid="$2"

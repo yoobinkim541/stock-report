@@ -8,15 +8,14 @@ from pathlib import Path
 import pytest
 
 from agent_console import shared_memory, wiki
-from test_wiki_topic_integration import evidence, proposal, validate, NOW
+from test_wiki_topic_integration import proposal, validate, NOW
 
 
 def api():
     return importlib.import_module("reports.wiki_topic_transaction")
 
 
-@pytest.fixture
-def transaction(evidence, tmp_path, monkeypatch):
+def build_transaction(evidence, tmp_path, monkeypatch):
     data, journal, rows = evidence
     # Task 2's minimal public-allowlist fixtures are not full v1 receipts.
     for path in (journal.root / "operations").glob("*.json"):

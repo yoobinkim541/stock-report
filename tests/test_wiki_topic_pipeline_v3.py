@@ -10,8 +10,13 @@ from reports import wiki_source_pipeline as pipeline, wiki_topic_transaction_v3 
 from reports.wiki_source_notes import materialize_source_note
 from reports.wiki_topic_snapshot_context import select_snapshot_context
 from scripts import run_public_wiki_rollout as rollout
-from test_wiki_source_notes import NOW, encoded, inventory, store
-from test_wiki_topic_v3 import evidence, payload, propose
+from test_wiki_source_notes import NOW, encoded, inventory
+from test_wiki_topic_v3 import payload, propose
+
+
+@pytest.fixture
+def evidence(source_note_evidence):
+    return source_note_evidence
 
 
 @pytest.fixture

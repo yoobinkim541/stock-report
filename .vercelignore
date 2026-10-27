@@ -1,0 +1,13 @@
+# Only the public Next.js frontend belongs in the Vercel build context.
+**
+!src
+!src/**
+!public
+!public/**
+!package.json
+!package-lock.json
+!next.config.mjs
+!next-env.d.ts
+!tsconfig.json
+!vercel.json
+!.gitignore

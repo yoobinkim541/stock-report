@@ -220,16 +220,42 @@ def test_label_events_uses_read_only_ephemeral_codex_with_provenance():
     assert all(label["label_error_category"] == "" for label in labels)
 
 
-def test_codex_news_labels_do_not_inherit_general_agent_model(monkeypatch):
-    """뉴스 라벨은 ChatGPT 계정에서 지원되지 않는 공용 agent 모델을 상속하면 안 된다."""
-    previous = NL.NEWS_LLM_CODEX_MODEL
+def test_codex_command_omits_chatgpt_unsupported_56_model(monkeypatch):
+    monkeypatch.setattr(NL, "NEWS_LLM_CODEX_MODEL", "gpt-5.6-luna-900k")
+
+    cmd, output_path = NL._codex_command("Return {}")
+
+    try:
+        assert "--model" not in cmd
+    finally:
+        os.unlink(output_path)
+
+
+def test_codex_command_does_not_inherit_general_agent_model(monkeypatch):
     monkeypatch.delenv("NEWS_LLM_LABELS_CODEX_MODEL", raising=False)
     monkeypatch.setenv("AGENT_CONSOLE_CODEX_MODEL", "gpt-5.6-luna-900k")
+    monkeypatch.setattr(NL, "NEWS_LLM_CODEX_MODEL", "")
+
+    cmd, output_path = NL._codex_command("Return {}")
+
+    try:
+        assert "--model" not in cmd
+    finally:
+        os.unlink(output_path)
+
+
+def test_codex_news_labels_do_not_inherit_general_agent_model(monkeypatch):
+    """뉴스 라벨은 ChatGPT 계정에서 지원되지 않는 공용 agent 모델을 상속하면 안 된다.
+
+    gpt-5.6 alias 필터와 별개로 검증하려고 필터에 걸리지 않는 모델명을 쓴다."""
+    previous = NL.NEWS_LLM_CODEX_MODEL
+    monkeypatch.delenv("NEWS_LLM_LABELS_CODEX_MODEL", raising=False)
+    monkeypatch.setenv("AGENT_CONSOLE_CODEX_MODEL", "agent-only-internal-model")
     importlib.reload(NL)
     try:
         command, output_path = NL._codex_command("test")
         assert "--model" not in command
-        assert "gpt-5.6-luna-900k" not in command
+        assert "agent-only-internal-model" not in command
     finally:
         NL.NEWS_LLM_CODEX_MODEL = previous
         os.unlink(output_path)

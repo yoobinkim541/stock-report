@@ -5,7 +5,7 @@ import pytest
 
 from reports.wiki_topic_integration import propose_topic_integration
 from scripts import run_public_wiki_rollout as runner
-from test_wiki_topic_integration import evidence, NOW
+from test_wiki_topic_integration import NOW
 
 
 def envelope(evidence):

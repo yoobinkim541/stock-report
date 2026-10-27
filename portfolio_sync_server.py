@@ -108,15 +108,16 @@ def _update_portfolio(data: dict) -> str:
     import safe_io
 
     # 교차 프로세스 쓰기 락 + atomic write — kiwoom_sync_rest·holding_manager 와 동시 쓰기 시
-    # lost update / torn read 방지 (read-modify-write 전체를 락 안에서 수행)
+    # lost update / torn read 방지 (read-modify-write 전체를 락 안에서 수행).
+    # store 그림자도 락 안에서 — 락 해제 뒤 호출하면 늦게 끝난 writer 가 낡은 snap 으로
+    # 그림자를 덮어 파일(권위)과 store 가 어긋난다 (holding_manager._save_locked 와 동일 순서).
     with safe_io.file_write_lock(PORTFOLIO_PATH):
         shutil.copy2(PORTFOLIO_PATH, PORTFOLIO_PATH + ".bak")
         with open(PORTFOLIO_PATH, encoding="utf-8") as f:
             snap = json.load(f)
         summary = _apply_portfolio_update(snap, data)
         safe_io.atomic_write_json(PORTFOLIO_PATH, snap)
-
-    _shadow_to_store(snap)
+        _shadow_to_store(snap)
     return summary
 
 

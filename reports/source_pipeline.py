@@ -19,7 +19,7 @@ import requests
 from dotenv import load_dotenv          # crons/*.py 관례 — uv run 은 .env 를 자동 주입 안 함
 load_dotenv()
 
-from reports import source_collector
+from reports import article_queue, source_collector
 from reports.source_runs import record_source_run
 
 
@@ -295,6 +295,47 @@ def _select_specs(
     return selected
 
 
+def _empty_article_queue_stats() -> dict:
+    return {
+        "enqueued": 0,
+        "updated": 0,
+        "invalid": 0,
+        "capacity_rejected": 0,
+        "errors": [],
+    }
+
+
+def _eligible_article_events(events: list[dict]) -> list[dict]:
+    # Seed and live ingress intentionally share one eligibility/host policy.
+    from reports.article_crawler import _eligible_seed_events
+
+    return _eligible_seed_events(events)
+
+
+def _queue_article_events(events: list[dict], *, now: datetime) -> dict:
+    stats = _empty_article_queue_stats()
+    eligible = _eligible_article_events(events)
+    if not eligible:
+        return stats
+    try:
+        queued = article_queue.enqueue_events(eligible, now=now)
+    except Exception as exc:
+        stats["errors"] = [f"{type(exc).__name__}: {exc}"[:500]]
+        return stats
+    for key in ("enqueued", "updated", "invalid", "capacity_rejected"):
+        stats[key] = max(0, int(queued.get(key) or 0))
+    return stats
+
+
+def _merge_article_queue_stats(target: dict, incoming: dict) -> None:
+    for key in ("enqueued", "updated", "invalid", "capacity_rejected"):
+        target[key] += max(0, int(incoming.get(key) or 0))
+    for error in incoming.get("errors") or []:
+        if len(target["errors"]) >= 10:
+            break
+        target["errors"].append(str(error)[:500])
+
+
 def run_providers(
     *,
     registry: list[ProviderSpec] | None = None,
@@ -321,17 +362,22 @@ def run_providers(
     all_events: list[dict] = []
     attempted_sources: list[str] = []
     health_stats: dict[str, dict] = {}
+    queue_totals = _empty_article_queue_stats()
     for spec in specs:
         result = results[spec.name]
         events = result.pop("events")
         all_events.extend(events)
         attempted_sources.extend(spec.sources)
         total_persisted = 0
+        provider_queue = _empty_article_queue_stats()
         provider_availabilities: list[str] = []
         provider_errors: list[str] = []
         for source in spec.sources:
             source_events = [row for row in events if str(row.get("source") or "") == source]
             persisted = source_collector.append_events(source_events, cache_dir=cache_dir, now=now) if source_events else 0
+            queue_stats = _queue_article_events(source_events, now=now) if source_events else _empty_article_queue_stats()
+            _merge_article_queue_stats(provider_queue, queue_stats)
+            _merge_article_queue_stats(queue_totals, queue_stats)
             total_persisted += persisted
             source_availability = source_collector._SOURCE_AVAILABILITY.get(source) or source_collector._SOURCE_AVAILABILITY.get(source.split(":", 1)[0]) or {}
             source_error = (
@@ -358,6 +404,7 @@ def run_providers(
                 "error": source_error,
                 "transport": result["transport"],
                 "status_code": result["status_code"],
+                "article_queue": queue_stats,
             }
         if provider_availabilities:
             if any(value == "available" for value in provider_availabilities):
@@ -376,6 +423,7 @@ def run_providers(
         if len(transports) == 1:
             result["transport"] = transports.pop()
         result["persisted"] = total_persisted
+        result["article_queue"] = provider_queue
         record_source_run(cache_dir, result)
 
     health = source_collector.update_source_health(
@@ -398,6 +446,7 @@ def run_providers(
         "selected": [spec.name for spec in specs],
         "providers": {spec.name: results[spec.name] for spec in specs},
         "health": {source: health[source] for source in attempted_sources if source in health},
+        "article_queue": queue_totals,
         "fetched": sum(result.get("fetched", 0) for result in results.values()),
         "persisted": sum(result.get("persisted", 0) for result in results.values()),
     }

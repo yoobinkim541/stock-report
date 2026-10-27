@@ -157,6 +157,23 @@ def create_app() -> Flask:
             return jsonify({"ok": False, "error": "page object required"}), 400
         return jsonify({"ok": True, "page": wiki.upsert_page(payload)})
 
+    @app.get("/api/wiki/curation/pending")
+    def wiki_curation_pending():
+        return jsonify({"ok": True, "proposals": wiki.list_pending_curation()})
+
+    @app.post("/api/wiki/curation/<proposal_id>/apply")
+    def wiki_curation_apply(proposal_id: str):
+        result = wiki.apply_pending_curation(proposal_id)
+        if result is None:
+            return jsonify({"ok": False, "error": "proposal not found or not applicable"}), 404
+        return jsonify({"ok": True, "result": result})
+
+    @app.post("/api/wiki/curation/<proposal_id>/reject")
+    def wiki_curation_reject(proposal_id: str):
+        if not wiki.reject_pending_curation(proposal_id):
+            return jsonify({"ok": False, "error": "proposal not found"}), 404
+        return jsonify({"ok": True})
+
     @app.post("/api/wiki/capture")
     def wiki_capture():
         payload = request.get_json(force=True)
@@ -563,8 +580,10 @@ def create_app() -> Flask:
         symbol = str(payload.get("symbol") or "").strip().upper() or None
         bars = payload.get("bars") if isinstance(payload.get("bars"), dict) else {}
         as_of = str(payload.get("as_of") or "").strip() or datetime.now(timezone.utc).isoformat(timespec="seconds")
+        # 워커(run_chart_alert_cycle)와 같은 락 — 같은 once 룰을 동시에 평가·발송하는 중복 전송을
+        # 막는다. 짧게 기다렸다 못 잡으면 409.
         try:
-            with chart_alert_worker.alert_cycle_lock():
+            with chart_alert_worker.cycle_lock(timeout=5.0):
                 rules = storage.list_chart_alert_rules(
                     workspace_id=workspace_id,
                     symbol=symbol,
@@ -577,7 +596,10 @@ def create_app() -> Flask:
                     fundamentals_by_symbol=fundamentals,
                 )
         except safe_io.LockTimeout:
-            return jsonify({"ok": False, "error": "chart alert evaluation already running"}), 409
+            return jsonify({
+                "ok": False, "reason": "already_running",
+                "error": "chart alert evaluation already running",
+            }), 409
         return jsonify({"ok": True, "as_of": as_of, "missing_fundamentals": missing_fundamentals, **outcome})
 
     @app.get("/api/chart-replay/sessions")

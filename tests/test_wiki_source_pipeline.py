@@ -34,8 +34,7 @@ def no_live_structured_provider(monkeypatch):
     monkeypatch.setattr(llm_direct, "direct_chat", blocked)
 
 
-@pytest.fixture
-def pipeline_env(tmp_path, monkeypatch):
+def build_pipeline_env(tmp_path, monkeypatch):
     monkeypatch.setenv("AGENT_CONSOLE_SHARED_MEMORY_DIR", str(tmp_path / "memory"))
     monkeypatch.setenv("STOCK_REPORT_REPORTS_DIR", str(tmp_path / "reports"))
     monkeypatch.setenv("AGENT_CONSOLE_QMD_ENABLED", "0")

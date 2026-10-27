@@ -8,7 +8,7 @@ STREAM_SCRIPT="$PROJECT_DIR/kis_stream.py"
 PID_FILE="${KIS_WATCHDOG_PID_FILE:-$HOME/.local/state/stock-report/kis_stream.pid}"
 LOG_FILE="${KIS_WATCHDOG_LOG:-/tmp/kis_stream.log}"
 WATCHDOG_LOCK="${KIS_WATCHDOG_LOCK:-/tmp/kis_stream_watchdog.lock}"
-UV="${KIS_WATCHDOG_UV:-/home/ubuntu/.local/bin/uv}"
+UV="${KIS_WATCHDOG_UV:-${UV_BIN:-$(command -v uv 2>/dev/null || echo /home/ubuntu/.local/bin/uv)}}"
 
 mkdir -p "$(dirname "$PID_FILE")"
 

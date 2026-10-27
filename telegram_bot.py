@@ -23,6 +23,7 @@ import os
 import re
 import sys
 import time
+import uuid
 import fcntl
 import logging
 import queue
@@ -168,10 +169,15 @@ def _load_persisted_offset() -> int | None:
     """직전 실행이 마지막으로 처리한 update_id+1 을 디스크에서 복원.
 
     없으면(최초 실행) None — Telegram 기본 동작(대기 중인 가장 오래된 업데이트부터).
+    손상·권한 오류는 경고 로그 후 None (최초 실행과 구분해 운영자가 알 수 있게).
     """
+    path = Path(_offset_file_path())
     try:
-        return int(Path(_offset_file_path()).read_text().strip())
-    except Exception:
+        return int(path.read_text().strip())
+    except FileNotFoundError:
+        return None
+    except Exception as e:
+        logger.warning("offset 파일 복원 실패 (%s): %s — 미확인 업데이트부터 재개", path, e)
         return None
 
 
@@ -966,6 +972,19 @@ def cmd_sim(chat_id: str, args: list):
     send(chat_id, build_simulation_report(mode))
 
 
+def _prune_attachments(directory, *, max_age_s: float) -> None:
+    try:
+        cutoff = time.time() - max_age_s
+        for p in Path(directory).iterdir():
+            try:
+                if p.is_file() and p.stat().st_mtime < cutoff:
+                    p.unlink()
+            except OSError:
+                continue
+    except OSError:
+        pass
+
+
 def download_telegram_file(file_id: str, filename: str) -> str | None:
     """텔레그램 파일을 로컬(ATTACH_DIR)에 저장하고 경로 반환."""
     _ensure_attach_dir()
@@ -991,7 +1010,10 @@ def download_telegram_file(file_id: str, filename: str) -> str | None:
                         return None
                 except ValueError:
                     pass  # 헤더가 비정상이면 무시하고 본문 누적 검사로 방어
-            local_path = str(ATTACH_DIR / filename)
+            # 고유 저장명 — 같은 이름(photo_<id>.jpg·'잔고.pdf')이 재전송되면 덮어쓰던 문제.
+            # 보관 7일 — 디렉터리가 무한히 자라지 않게 다운로드 시점에 오래된 첨부 정리.
+            _prune_attachments(ATTACH_DIR, max_age_s=7 * 86400)
+            local_path = str(ATTACH_DIR / f"{int(time.time())}_{uuid.uuid4().hex[:8]}_{filename}")
             written = 0
             with open(local_path, "wb") as f:
                 # 청크로 읽으며 누적 크기가 임계를 넘으면 중단 (헤더 누락/위조 방어)
@@ -2097,7 +2119,7 @@ def _handle_save_recovery_callback(update):
          text='복구 확인을 요청합니다.' if allowed else '소유자만 확인할 수 있습니다.')
     if allowed:
         action='check' if data.startswith('savecheck:') else 'open'
-        _DISPATCH_Q.put(('/save '+action+' '+data.split(':',1)[1],chat_id,'owner'))
+        _enqueue_command('/save '+action+' '+data.split(':',1)[1],chat_id,'owner')
     return True
 
 
@@ -2203,16 +2225,38 @@ def _run_periodic(name: str, fn) -> None:
 # 명령 dispatch 단일 워커 — 무거운 명령(/signals 200s·/ask·/portfolio 등)이 메인 폴링 루프
 # (getUpdates 재폴링·주기작업 스케줄 체크)를 막지 않도록 큐로 오프로드. **단일 워커**라 명령은
 # 여전히 1건씩 순차 처리(새 동시성 없음·현행 의미 보존). 주기 데몬과의 동시성은 기존 수준 그대로.
-_DISPATCH_Q: "queue.Queue" = queue.Queue()
+_DISPATCH_Q: "queue.Queue" = queue.Queue(maxsize=200)
+
+# 느린 명령 전용 레인 — /signals(최대 ~200s)·/ask(LLM)·/evolve 가 단일 워커를 잡으면 뒤의
+# /status 같은 즉답 명령까지 분 단위로 밀렸다. 느린 명령은 별도 워커로 보내 서로 간섭 안 하게.
+_SLOW_COMMANDS = {"/signals", "/ask", "/evolve", "/portfolio", "/risk"}
+_SLOW_Q: "queue.Queue" = queue.Queue(maxsize=50)
+
+
+def _is_slow_command(text: str) -> bool:
+    head = (text or "").strip().split(maxsplit=1)[0].lower() if (text or "").strip() else ""
+    head = BOT_COMMAND_ALIASES.get(head, head)
+    return head.split(maxsplit=1)[0] in _SLOW_COMMANDS
+
+
+def _enqueue_command(text: str, chat_id: str, role: str) -> None:
+    """큐 포화(maxsize) 시 블로킹 대신 즉시 안내 — 폴링 루프가 멈추면 전체 봇이 멈춘다."""
+    q = _SLOW_Q if _is_slow_command(text) else _DISPATCH_Q
+    try:
+        q.put_nowait((text, chat_id, role))
+    except queue.Full:
+        logger.warning("명령 큐 포화(%s) — 드롭: %r", "slow" if q is _SLOW_Q else "fast", text)
+        _api("sendMessage", chat_id=chat_id, text="⏳ 처리 대기 중인 명령이 많습니다. 잠시 후 다시 시도해 주세요.")
 
 # 첨부(OCR/PDF) 처리 전용 워커 — tesseract OCR 은 페이지당 최대 60초까지 걸릴 수 있어
 # dispatch 큐와 별도로 분리(느린 첨부 처리 중에도 일반 명령이 밀리지 않게).
 _ATTACHMENT_Q: "queue.Queue" = queue.Queue()
 
 
-def _dispatch_worker():
+def _dispatch_worker(q: "queue.Queue | None" = None):
+    q = q if q is not None else _DISPATCH_Q
     while True:
-        item = _DISPATCH_Q.get()
+        item = q.get()
         try:
             text, chat_id, role = item
             dispatch(text, chat_id, role)
@@ -2223,7 +2267,7 @@ def _dispatch_worker():
             except Exception:
                 pass
         finally:
-            _DISPATCH_Q.task_done()
+            q.task_done()
 
 
 def _attachment_worker():
@@ -2240,6 +2284,43 @@ def _attachment_worker():
                 pass
         finally:
             _ATTACHMENT_Q.task_done()
+
+
+def _ingest_update(upd: dict) -> None:
+    """업데이트 1건 분류 — 권한 확인 후 첨부/일반 텍스트/명령을 워커 큐로 넘긴다 (폴링 비차단)."""
+    if _handle_save_recovery_callback(upd):
+        return
+    msg     = upd.get("message", {})
+    chat_id = str(msg.get("chat", {}).get("id", ""))
+    text    = msg.get("text", "")
+
+    has_attachment = "photo" in msg or "document" in msg
+    if not has_attachment and not text.strip():
+        return
+    role = _role_for(chat_id)
+    if role is None:
+        logger.warning(f"차단: chat_id {chat_id}")
+        _api("sendMessage", chat_id=chat_id, text="🔒 권한 없음")
+        return
+
+    if has_attachment:
+        # 첨부(스냅샷/매도내역 파싱)는 포트폴리오 수정 → 소유자 전용
+        if role != "owner":
+            _api("sendMessage", chat_id=chat_id, text="🔒 첨부 파일은 소유자 전용입니다.")
+            return
+        kind = "photo" if "photo" in msg else "document"
+        logger.info(f"첨부 수신: {kind}")
+        _ATTACHMENT_Q.put((msg, chat_id))   # 워커 스레드로 오프로드(OCR 최대 60초·폴링 비차단)
+        return
+
+    # 일반 텍스트(스냅샷/매도내역) 처리는 포트폴리오 수정 → 소유자 전용
+    if role == "owner" and not text.startswith("/") and handle_plain_text(text, chat_id):
+        logger.info("일반 텍스트를 스냅샷/매도내역으로 처리")
+        return
+
+    text = _normalize_message_text(text)
+    logger.info(f"수신: {text!r}")
+    _enqueue_command(text, chat_id, role)    # 워커 스레드로 오프로드(폴링·주기작업 비차단)
 
 
 def run():
@@ -2267,6 +2348,7 @@ def run():
 
     # dispatch 오프로드 워커 기동 (무거운 명령이 폴링·주기알림을 막지 않게)
     threading.Thread(target=_dispatch_worker, daemon=True, name="dispatch-worker").start()
+    threading.Thread(target=_dispatch_worker, args=(_SLOW_Q,), daemon=True, name="dispatch-slow-worker").start()
     threading.Thread(target=_attachment_worker, daemon=True, name="attachment-worker").start()
 
     while True:
@@ -2290,41 +2372,9 @@ def run():
 
             consecutive_409 = 0
             for upd in updates:
-                offset  = upd["update_id"] + 1
-                _persist_offset(offset)
-                if _handle_save_recovery_callback(upd):
-                    continue
-                msg     = upd.get("message", {})
-                chat_id = str(msg.get("chat", {}).get("id", ""))
-                text    = msg.get("text", "")
-
-                has_attachment = "photo" in msg or "document" in msg
-                if not has_attachment and not text.strip():
-                    continue
-                role = _role_for(chat_id)
-                if role is None:
-                    logger.warning(f"차단: chat_id {chat_id}")
-                    _api("sendMessage", chat_id=chat_id, text="🔒 권한 없음")
-                    continue
-
-                if has_attachment:
-                    # 첨부(스냅샷/매도내역 파싱)는 포트폴리오 수정 → 소유자 전용
-                    if role != "owner":
-                        _api("sendMessage", chat_id=chat_id, text="🔒 첨부 파일은 소유자 전용입니다.")
-                        continue
-                    kind = "photo" if "photo" in msg else "document"
-                    logger.info(f"첨부 수신: {kind}")
-                    _ATTACHMENT_Q.put((msg, chat_id))   # 워커 스레드로 오프로드(OCR 최대 60초·폴링 비차단)
-                    continue
-
-                # 일반 텍스트(스냅샷/매도내역) 처리는 포트폴리오 수정 → 소유자 전용
-                if role == "owner" and not text.startswith("/") and handle_plain_text(text, chat_id):
-                    logger.info("일반 텍스트를 스냅샷/매도내역으로 처리")
-                    continue
-
-                text = _normalize_message_text(text)
-                logger.info(f"수신: {text!r}")
-                _DISPATCH_Q.put((text, chat_id, role))   # 워커 스레드로 오프로드(폴링·주기작업 비차단)
+                offset = upd["update_id"] + 1
+                _ingest_update(upd)
+                _persist_offset(offset)   # 큐잉/처리 뒤 영속화 — 큐잉 전 크래시로 명령이 유실되지 않게
 
             # 주기 작업 — 백그라운드 스레드로 실행해 명령어 응답 차단 방지
             now = time.time()

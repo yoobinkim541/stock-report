@@ -457,3 +457,34 @@ def test_C_fix2_failed_event_expires_instead_of_sending_once_its_bar_is_stale(is
     assert later["notification"]["attempted"] == 0 and len(sent) == 1
     assert _event_statuses() == ["expired"]
     assert storage.get_chart_alert_rule("r1")["last_state"]["triggered"] is False
+
+
+def test_once_rule_retries_delivery_after_send_failure_then_stops(isolated):
+    """once 룰(다종목·다주기 조건): 알림 전송 실패 → 이벤트는 failed 로 남고 once 미완료 →
+    다음 사이클이 같은 이벤트를 재전송 → 성공 후엔 더 이상 이벤트를 내지 않는다
+    (master b550863 회귀: 종전엔 trigger 만 저장돼 영구 미전달)."""
+    rule = _rule("once1")
+    storage.save_chart_alert_rule({
+        **{key: rule[key] for key in ("id", "workspace_id", "symbol", "timeframe", "name", "condition")},
+        "store_key": "cw:w1:AAPL:1d:lin", "frequency": "once", "message": "once1 fired",
+    })
+    loader = lambda symbol, timeframe: _bars([99, 101], "1D") if timeframe == "1d" else _bars([501, 502], "1h")
+    sent: list[str] = []
+
+    def cycle(send_fn):
+        return chart_alert_worker.run_chart_alert_cycle(
+            load_bars_fn=loader, notify=True, send_fn=send_fn, as_of=FIRST_AS_OF,
+        )
+
+    r1 = cycle(lambda t: False)
+    assert r1["event_count"] == 1 and r1["notification"]["failed"] == 1
+    state = storage.get_chart_alert_rule("once1")["last_state"]
+    assert state["triggered"] is False and state["delivery"] == "failed"
+
+    r2 = cycle(lambda t: sent.append(t) or True)
+    assert r2["event_count"] == 1 and r2["notification"]["delivered"] == 1
+    assert len(sent) == 1 and storage.get_chart_alert_rule("once1")["last_state"]["triggered"] is True
+
+    r3 = cycle(lambda t: sent.append(t) or True)
+    assert r3["event_count"] == 0 and r3["evaluations"][0]["reason"] == "already_triggered"
+    assert r3["notification"]["attempted"] == 0 and len(sent) == 1

@@ -3,7 +3,7 @@ import copy
 
 from agent_console import shared_memory
 from scripts.run_public_wiki_pilot import public_target_ids
-from test_wiki_topic_transaction import transaction, evidence, prepare, recover
+from test_wiki_topic_transaction import prepare, recover
 
 
 def test_committed_topic_is_eligible_only_with_all_public_revisions(transaction):

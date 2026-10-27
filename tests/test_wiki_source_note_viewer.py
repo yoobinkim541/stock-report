@@ -14,7 +14,7 @@ import pytest
 from agent_console import shared_memory, wiki, wiki_publication as publication
 from dashboard import wiki_browser
 from reports.wiki_source_notes import materialize_source_note, pin_source_note
-from test_wiki_source_notes import NOW, digest, encoded, rewrite_compilation, store
+from test_wiki_source_notes import NOW, digest, encoded, rewrite_compilation
 
 
 @pytest.fixture

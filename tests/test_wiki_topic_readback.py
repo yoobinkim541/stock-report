@@ -7,7 +7,7 @@ from streamlit.testing.v1 import AppTest
 from agent_console import qmd_search, shared_memory, wiki
 from dashboard import wiki_browser
 from reports.wiki_topic_transaction import prepare_topic_batch, recover_topic_operation
-from test_wiki_topic_transaction import transaction, evidence, proposal, validate, NOW
+from test_wiki_topic_transaction import proposal, validate, NOW
 
 
 def test_split_topic_retains_evidence_and_child_is_readable(transaction):

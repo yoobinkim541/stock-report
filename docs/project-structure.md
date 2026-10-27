@@ -20,7 +20,7 @@
 | 폴더 | 무엇이 있나 | 대표 하위 그룹 |
 |---|---|---|
 | `crons/` | 예약 실행 스크립트 — `deploy/crontab.stock-report`에서 개별 호출 | 모의투자 추적/학습, 스냅샷 수집, 리포트 아카이브, 리마인더 |
-| `dashboard/` | Streamlit 퀀트 터미널(8페이지) | `dashboard/pages/*.py`(화면 단위) + `chart_*.py`(차트 엔진 다수) |
+| `dashboard/` | Streamlit 퀀트 터미널(11페이지) | `dashboard/pages/*.py`(화면 단위) + `chart_*.py`(차트 엔진 다수) |
 | `providers/` | 외부 데이터 소스 어댑터(가격·펀더멘털·뉴스·브로커 API) | KIS/키움 연동, 국내/해외 데이터, 실시간 시세 |
 | `ml/` | 랭킹·백테스트·리스크 모델 | `ml/adaptive/`(적응학습 OOS 게이트 — ledger·reward·learner·champion_challenger) |
 | `lib/` | 여러 곳에서 재사용하는 공용 헬퍼 | 관심종목, 캐시, 트랑셰, 모의 LLM 실행 |
@@ -32,7 +32,7 @@
 | `deploy/` | 배포 산출물 | `crontab.stock-report`(크론 단일 진실원), `polymarket_relay/`(Vercel) |
 | `data/` | 저장 데이터(시드·백업·공유 메모리) | `shared-memory/`, `backups/` |
 | `config/` | 설정 스키마 | `shared-memory.schema.json` |
-| `tests/` | pytest (전체 스위트 2700+, 무네트워크 위주) | 소스 파일명과 1:1 대응 (`test_<module>.py`) |
+| `tests/` | pytest (전체 3,200+ 테스트 · 275 파일, 무네트워크 위주; `network`/`slow` 마커는 CI 제외) | 소스 파일명과 1:1 대응 (`test_<module>.py`), `agent_console` 은 책임별 `test_agent_console_*.py` |
 | `docs/` | 설계 문서·디버그 노트 | `docs/superpowers/`(계획·감사 문서), `docs/plans/` |
 | `kiwoom_sync/` | 키움 Windows→Ubuntu 동기화 하위 모듈 | `kiwoom_sync.py` |
 

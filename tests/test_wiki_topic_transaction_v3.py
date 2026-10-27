@@ -5,10 +5,14 @@ from threading import Barrier
 
 import pytest
 from agent_console import shared_memory
-from test_wiki_topic_v3 import evidence as evidence_fixture, propose, add_target, payload, update_payload, validate
-from test_wiki_source_notes import store
+from test_wiki_topic_v3 import propose, add_target, payload, update_payload, validate
 
 from reports.wiki_source_journal import Journal, _encoded
+
+
+@pytest.fixture
+def evidence_fixture(source_note_evidence):
+    return source_note_evidence
 
 
 @pytest.mark.parametrize("prepared_at", ["2026-10-21T00:00:00+00:00", "2026-10-20T00:00:00", "not-a-time"])

@@ -10,8 +10,13 @@ from reports.wiki_source_note_viewer import frozen_source_note_citation
 from reports.wiki_topic_snapshot_context import select_snapshot_context
 from reports.wiki_topic_v3 import propose_topic_integration_v3
 from reports import wiki_topic_transaction_v3 as transaction
-from test_wiki_source_notes import NOW, encoded, store
-from test_wiki_topic_v3 import evidence, payload, propose
+from test_wiki_source_notes import NOW, encoded
+from test_wiki_topic_v3 import payload, propose
+
+
+@pytest.fixture
+def evidence(source_note_evidence):
+    return source_note_evidence
 
 
 @pytest.mark.parametrize("stage", ["prepared", "committed"])

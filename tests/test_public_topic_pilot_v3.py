@@ -15,7 +15,7 @@ import pytest
 from agent_console import shared_memory, wiki
 from reports import wiki_public_budget as quota
 from reports.wiki_source_notes import materialize_source_note
-from test_wiki_source_notes import NOW, encoded, inventory, store
+from test_wiki_source_notes import NOW, encoded, inventory
 
 
 def api():

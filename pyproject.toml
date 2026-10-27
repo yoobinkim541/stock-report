@@ -1,2 +1,26 @@
+[project]
+name = "stock-report"
+version = "0.0.0"
+requires-python = ">=3.12"
+
 [tool.vercel]
 entrypoint = "portfolio_sync_server:app"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+extend-exclude = [".venv", "node_modules", ".next", "data", "docs"]
+
+[tool.ruff.lint]
+# 현재 코드가 0 위반으로 통과하는 "실제 버그" 규칙만 — 문법 오류·미정의 이름·지역변수
+# 참조 전 할당(F823: 실제 UnboundLocalError 버그를 잡았음)·잘못된 비교. 스타일 규칙(F401 미사용
+# import 등)은 157곳이 남아 있어 CI 를 막지 않도록 뺀다. 넓히려면 먼저 위반을 0 으로.
+select = ["E9", "F63", "F7", "F82", "F821", "F811", "E711", "E722"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-p no:cacheprovider"
+markers = [
+    "network: 실제 소켓/HTTP 를 쓰는 테스트 (CI 기본 제외)",
+    "slow: 실제 대기(sleep)·수십 초 소요 테스트 (CI 기본 제외)",
+]

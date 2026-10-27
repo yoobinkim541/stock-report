@@ -219,5 +219,7 @@ try:
         _tape_freshness = _tape_meta.get("freshness") or "미상"
         _tape_asof = _tape_meta.get("asof") or "기준 시각 미상"
         st.caption(f"시장 마퀴 · source={_tape_source} · freshness={_tape_freshness} · {_tape_asof}")
-except Exception:
-    pass
+except Exception as _tape_err:
+    import logging as _logging
+    _logging.getLogger(__name__).warning("시장 마퀴 렌더 실패: %s", _tape_err)
+    st.caption("시장 마퀴를 불러오지 못했습니다 (데이터 소스 일시 장애)")

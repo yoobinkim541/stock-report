@@ -10,6 +10,7 @@ from __future__ import annotations
 from copy import deepcopy
 from datetime import datetime
 import json
+from typing import TYPE_CHECKING
 
 from agent_console import wiki
 from reports.wiki_source_compiler import addition_grounding_violation
@@ -22,6 +23,9 @@ from reports.wiki_topic_integration import (
 from reports.wiki_topic_snapshot_context import (
     _same, revalidate_snapshot_context, snapshot_context_model_input,
 )
+
+if TYPE_CHECKING:
+    from reports.wiki_source_journal import Journal
 
 
 CONTEXT_MODE = "source_note_snapshot"

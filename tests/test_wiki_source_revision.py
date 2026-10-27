@@ -13,8 +13,7 @@ from reports.evidence_cards import event_to_evidence_card
 NOW = datetime(2026, 10, 9, 3, tzinfo=timezone.utc)
 
 
-@pytest.fixture
-def archived_event(monkeypatch, tmp_path):
+def build_archived_event(monkeypatch, tmp_path):
     monkeypatch.setenv("STOCK_REPORT_REPORTS_DIR", str(tmp_path / "reports"))
 
     def make(*, body="Demand improved, but orders remain uncertain.\n", raw=None,

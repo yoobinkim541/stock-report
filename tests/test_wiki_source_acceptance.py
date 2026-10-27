@@ -7,8 +7,7 @@ import pytest
 
 from agent_console import shared_memory, wiki
 from reports import wiki_source_pipeline, wiki_source_revision
-from test_wiki_source_pipeline import pipeline_env, NOW
-from test_wiki_source_revision import archived_event
+from test_wiki_source_pipeline import NOW
 from test_wiki_source_chunks import response as chunk_response
 
 REAL_DISCOVERY = wiki_source_revision.discover_revisions

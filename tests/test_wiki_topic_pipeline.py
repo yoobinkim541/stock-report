@@ -5,7 +5,7 @@ import pytest
 
 from agent_console import shared_memory
 from reports import wiki_source_pipeline as pipeline, wiki_topic_integration
-from test_wiki_topic_transaction import transaction, evidence, NOW
+from test_wiki_topic_transaction import NOW
 
 
 def test_topic_stage_default_off_does_not_read_store(monkeypatch):

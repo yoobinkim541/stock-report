@@ -34,8 +34,7 @@ def api():
     return importlib.import_module("reports.wiki_topic_integration")
 
 
-@pytest.fixture
-def evidence(tmp_path, monkeypatch):
+def build_evidence(tmp_path, monkeypatch):
     monkeypatch.setenv("STOCK_REPORT_REPORTS_DIR", str(tmp_path / "reports"))
     journal = Journal(tmp_path / "journal")
     rows, pairs = [], []
