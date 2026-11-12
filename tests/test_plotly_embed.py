@@ -204,7 +204,9 @@ def test_embed_no_unreplaced_tokens():
 def test_embed_cdn_failure_notice():
     fig = charts.price_chart(_hist(), "T")
     html = plotly_embed.pannable_chart_html(fig, _hist())
-    assert "CDN 로드 실패" in html                              # 폴백 안내 문구 포함
+    assert "차트를 불러오지 못했습니다" in html
+    assert "구형 렌더러를 켜세요" in html
+    assert "plotly.js CDN" not in html
 
 
 def test_embed_reserves_chart_height():

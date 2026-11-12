@@ -16,12 +16,12 @@ from dashboard import theme  # noqa: E402
 
 def test_ticker_hero_up_color():
     h = theme.ticker_hero_html("AAPL", "Apple", 100.0, 1.5, 1.52)
-    assert theme.GREEN in h and "▲" in h and "tn-hero" in h
+    assert theme.UP in h and "▲" in h and "tn-hero" in h
 
 
 def test_ticker_hero_down_color():
     h = theme.ticker_hero_html("AAPL", "Apple", 100.0, -1.5, -1.52)
-    assert theme.RED in h and "▼" in h
+    assert theme.DOWN in h and "▼" in h
 
 
 def test_ticker_hero_none_price_graceful():
@@ -32,6 +32,14 @@ def test_ticker_hero_none_price_graceful():
 def test_ticker_hero_strips_ks_suffix_in_badge():
     h = theme.ticker_hero_html("005930.KS", "삼성전자", 70000, 100, 0.14)
     assert ">0059<" in h  # .KS 제거 후 4자
+    assert "₩70,000" in h and "▲ +₩100" in h
+    assert "70,000.00" not in h and "KRW" not in h
+
+
+def test_ticker_hero_usd_keeps_cents():
+    h = theme.ticker_hero_html("AAPL", "Apple", 190.5, -1.25, -0.65, currency="USD")
+    assert "$190.50" in h and "▼ -$1.25" in h
+    assert "USD" not in h
 
 
 def _needle_x(svg):
@@ -73,8 +81,8 @@ def test_rating_gauge_five_zones():
 
 
 def test_sparkline_up_down_empty():
-    assert theme.GREEN in theme.sparkline_svg([1, 2, 3])
-    assert theme.RED in theme.sparkline_svg([3, 2, 1])
+    assert theme.UP in theme.sparkline_svg([1, 2, 3])
+    assert theme.DOWN in theme.sparkline_svg([3, 2, 1])
     assert "polyline" not in theme.sparkline_svg([1])     # 부족 → 빈 svg
 
 
@@ -105,7 +113,7 @@ def test_gauge_svg_zones_and_needle():
 
 def test_watchlist_html():
     w = theme.watchlist_html([{"symbol": "MSFT", "last": 430.1, "chg_pct": 1.2}])
-    assert "MSFT" in w and "tn-wl-row" in w and theme.GREEN in w
+    assert "MSFT" in w and "tn-wl-row" in w and theme.UP in w
 
 
 def test_section_label():
@@ -153,6 +161,41 @@ def test_watchlist_3col_no_sparkline():
     assert "tn-wl-sym" in row and "tn-wl-last" in row and "tn-wl-chg" in row
 
 
+def test_watchlist_row_links_and_escapes():
+    row = theme.watchlist_row_html('BRK"B', last=410, chg_pct=-0.4, name="<A>")
+    assert 'href="?tk=BRK%22B"' in row
+    assert 'target="_self"' in row
+    assert "<A>" not in row and "&lt;A&gt;" in row
+    plain = theme.watchlist_row_html("?", link=False)
+    assert plain.startswith('<div class="tn-wl-row">')
+    assert "href=" not in plain
+
+
+def test_holding_watch_rows_split_currency_and_normalize_kr_codes():
+    us, kr = theme.holding_watch_rows([
+        {"ticker": "MSFT", "name": "Microsoft", "value": 1200.5, "ret": 1.2},
+        {"ticker": "0167A0", "name": "SOL AI", "value": 395255, "ret": -0.4},
+        {"ticker": "005930", "value": 70000, "ret": 0.2},
+    ])
+    assert [r["symbol"] for r in us] == ["MSFT"]
+    assert [r["symbol"] for r in kr] == ["0167A0.KS", "005930.KS"]
+    html = theme.watchlist_html(kr, title="보유 · 국내 · 평가액·수익률", money="₩", decimals=0)
+    assert "₩395,255" in html and "₩70,000" in html
+    assert "$" not in html
+    assert 'href="?tk=0167A0.KS"' in html
+    us_html = theme.watchlist_html(us, money="$")
+    assert "$1,200.50" in us_html
+
+
+def test_sidebar_holding_rails_include_domestic_book():
+    us, kr = theme.sidebar_holding_rails(
+        [{"ticker": "MSFT", "value": 10, "ret": 1}],
+        [{"ticker": "0167A0", "name": "SOL", "value": 395255, "ret": -16.9}],
+    )
+    assert [r["symbol"] for r in us] == ["MSFT"]
+    assert kr[0]["symbol"] == "0167A0.KS"
+    assert kr[0]["last"] == 395255
+
 def test_css_restores_material_icon_font():
     """광역 span override 로부터 Streamlit 머티리얼 아이콘 폰트 복원 (_arrow_right 방지)."""
     css = theme._CSS
@@ -169,7 +212,7 @@ def test_paper_rail_html_rows_and_compact_money():
     assert "모의투자" in html and "🇰🇷 국내" in html
     assert "₩1,050만" in html and "$100,000" in html               # 압축 금액
     assert "+5.00%" in html and "-1.20%" in html
-    assert theme.GREEN in html and theme.RED in html               # 부호 색
+    assert theme.UP in html and theme.DOWN in html               # 부호 색
     assert "전일 +0.50%" in html and "기록 12일" in html            # 툴팁
 
 
@@ -273,8 +316,8 @@ def test_macro_cards_html():
     assert "max-width: 600px" in grid and "repeat(2," in grid   # 반응형 2열
     assert "금" in grid and "달러/원 환율" in grid
     # 상승=초록·하락=빨강
-    assert theme.GREEN in theme.macro_card_html(up)
-    assert theme.RED in theme.macro_card_html(dn)
+    assert theme.UP in theme.macro_card_html(up)
+    assert theme.DOWN in theme.macro_card_html(dn)
     # 통화기호 접두(₩) vs 단위 접미($/oz)
     assert "₩1,505.05" in theme.macro_card_html(dn)
     assert "$/oz" in theme.macro_card_html(up)
@@ -349,7 +392,7 @@ def test_market_temp_and_valuation_strip():
     v = {"per_reported": 32.28, "per": 29.6, "per_pctile_all": 97.8,
          "per_pctile_20y": 91.7, "fper": 20.7, "eps_growth_pct": 43.3, "peg": 0.68}
     strip = theme.valuation_strip_html(v)
-    assert "32.3" in strip and "98%ile" in strip and "20.7" in strip
+    assert "32.3" in strip and "98백분위" in strip and "20.7" in strip
     assert "+43.3%" in strip and "0.68" in strip
     assert theme.valuation_strip_html({}) == ""
 
@@ -367,9 +410,9 @@ def test_light_dark_surface_vars():
     """표면 CSS 변수 — 모드별 값 주입·plotly 중립 그레이 분리 (라이트모드 W)."""
     dark = theme._surface_vars(False)
     light = theme._surface_vars(True)
-    assert "--tn-bg:#0a0e17" in dark and "--tn-panel:#131722" in dark
-    assert "--tn-bg:#f7f8fa" in light and "--tn-panel:#ffffff" in light
-    assert "--tn-text:#1a2233" in light
+    assert "--tn-bg:#191f28" in dark and "--tn-panel:#222b36" in dark
+    assert "--tn-bg:#f2f4f6" in light and "--tn-panel:#ffffff" in light
+    assert "--tn-text:#191f28" in light
     # 표면 상수는 var 참조 (HTML 자동 전환) — plotly 는 별도 중립 hex
     assert theme.PANEL == "var(--tn-panel)" and theme.TEXT == "var(--tn-text)"
     assert theme.AXIS_GRID.startswith("rgba") and theme.AXIS_TEXT.startswith("#")
