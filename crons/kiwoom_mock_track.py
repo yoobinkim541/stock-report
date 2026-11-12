@@ -84,7 +84,7 @@ def _bool_env(name: str, default: bool = False) -> bool:
 
 UNIVERSE   = _int_env("KR_MOCK_UNIVERSE", 20)
 MAX_POS    = _int_env("KR_MOCK_MAX_POS", 5)
-INVEST     = _float_env("KR_MOCK_INVEST", 0.9)
+INVEST     = _float_env("KR_MOCK_INVEST", 0.9)      # 장점 북이 있으면 북의 현금이 우선
 SEED_KRW   = _float_env("KIWOOM_MOCK_SEED", 10_000_000)
 SLIPPAGE   = _float_env("KR_MOCK_SLIPPAGE", 0.01)   # 매수 사이징 슬리피지 버퍼(+1%)
 REBAL_BAND = _float_env("KR_MOCK_REBAL_BAND", 0.25)  # 무거래 밴드(목표比 ±25% 벗어날 때만 조정·회전율↓)
@@ -344,13 +344,100 @@ def _held_days(positions: dict) -> dict:
 
 # ── 리밸런스 (순수 함수 — 테스트 핵심) ────────────────────────────────────────
 
+def _plan_weighted(signals: list[dict], positions: dict, budget_krw: float,
+                   target_weights: dict, *, cash_krw: float | None,
+                   slippage: float, quote_fn, rebal_band: float,
+                   min_hold_days: int, held_days: dict | None,
+                   stub_frac: float) -> list[dict]:
+    """주어진 종목 비중으로 주문. 합이 1 미만이면 나머지는 현금으로 둔다.
+
+    비중은 호출자가 고른다. 점수 랭킹·exit_buffer·tranches 는 쓰지 않는다.
+    최소보유는 호출자가 0 으로 넘긴다. 가격이 없는 미보유 종목은 건너뛴다.
+    """
+    orders: list[dict] = []
+    held_days = held_days or {}
+    price_of: dict[str, float] = {}
+    for s in signals:
+        code = s.get("code")
+        px = float(s.get("price") or 0)
+        if code and px > 0:
+            price_of[str(code)] = px
+    weights: dict[str, float] = {}
+    for code, raw in (target_weights or {}).items():
+        w = float(raw or 0.0)
+        if w <= 0.0:
+            continue
+        code = str(code)
+        px = price_of.get(code) or float(positions.get(code, {}).get("cur_price") or 0)
+        if px <= 0:
+            continue
+        price_of[code] = px
+        weights[code] = w
+    total = sum(weights.values())
+    if total > 1.0:
+        weights = {c: w / total for c, w in weights.items()}
+    keep = set(weights)
+    for code, p in positions.items():
+        sh = int(p.get("shares", 0) or 0)
+        if sh > 0 and code not in keep:
+            held = held_days.get(code)
+            if min_hold_days > 0 and (held is None or held < min_hold_days):
+                logger.info("최소보유 %d일 미달 — 매도 보류: %s", min_hold_days, code)
+                continue
+            orders.append({"code": code, "side": "sell", "qty": sh,
+                           "reason": "타깃이탈", "stub": False})
+    if budget_krw <= 0:
+        return orders
+    remaining = cash_krw
+    for code, w in weights.items():
+        price = price_of[code]
+        per_sym = budget_krw * w
+        if per_sym <= 0 or price <= 0:
+            continue
+        cur = int(positions.get(code, {}).get("shares", 0) or 0)
+        eff_price = price * (1.0 + max(0.0, slippage))
+        if quote_fn:
+            try:
+                q = quote_fn(code, "buy")
+            except Exception:
+                q = None
+            if q and q > 0:
+                eff_price = q
+        if rebal_band > 0 and cur > 0 and abs(cur * eff_price - per_sym) <= rebal_band * per_sym:
+            continue
+        target = int(per_sym // eff_price)
+        if remaining is not None:
+            target = min(target, cur + int(remaining // eff_price))
+        delta = max(0, target) - cur
+        if delta > 0:
+            if remaining is not None and remaining <= 0:
+                logger.info("가용현금 소진 — 이후 매수 생략")
+                break
+            orders.append({"code": code, "side": "buy", "qty": delta,
+                           "reason": "장점앙상블", "stub": False})
+            if remaining is not None:
+                remaining -= delta * eff_price
+        elif delta < 0:
+            held = held_days.get(code)
+            if min_hold_days > 0 and (held is None or held < min_hold_days):
+                logger.info("최소보유 %d일 미달 — 비중축소 보류: %s", min_hold_days, code)
+                continue
+            sell_qty = -delta
+            if stub_frac > 0 and cur > 0 and sell_qty / cur < stub_frac:
+                continue
+            orders.append({"code": code, "side": "sell", "qty": sell_qty,
+                           "reason": "비중축소", "stub": False})
+    return orders
+
+
 def plan_rebalance(signals: list[dict], positions: dict, budget_krw: float,
                    max_positions: int, cash_krw: float | None = None,
                    slippage: float = 0.0, quote_fn=None,
                    rebal_band: float = 0.0, exit_buffer: int = 0,
                    min_hold_days: int = 0, held_days: dict | None = None,
                    stub_frac: float = 0.0,
-                   target_multipliers: dict[str, float] | None = None) -> list[dict]:
+                   target_multipliers: dict[str, float] | None = None,
+                   target_weights: dict[str, float] | None = None) -> list[dict]:
     """목표 바스켓 vs 현재 보유 → 시장가 주문계획.
 
     signals:   [{code, action, score, price, is_buy, is_sell}, ...]
@@ -376,6 +463,13 @@ def plan_rebalance(signals: list[dict], positions: dict, budget_krw: float,
     """
     orders: list[dict] = []
     held_days = held_days or {}
+    if target_weights is not None:
+        return _plan_weighted(
+            signals, positions, budget_krw, target_weights,
+            cash_krw=cash_krw, slippage=slippage, quote_fn=quote_fn,
+            rebal_band=rebal_band, min_hold_days=min_hold_days,
+            held_days=held_days, stub_frac=stub_frac,
+        )
     # 랭킹 = 학습된 정책 점수(policy_score) 우선, 없으면 펀더멘털 score 폴백
     ranked = sorted(
         [s for s in signals if s.get("is_buy") and s.get("price", 0) > 0],
@@ -762,6 +856,41 @@ def _notify(nav: float | None, results: list[dict], signals: list[dict],
 
 # ── 진입점 ────────────────────────────────────────────────────────────────────
 
+def advantage_book() -> dict:
+    """장점 앙상블 북. KR_MOCK_ADVANTAGE=0 이면 옛 랭커로 되돌린다."""
+    if not _bool_env("KR_MOCK_ADVANTAGE", True):
+        return {"ok": False, "error": "KR_MOCK_ADVANTAGE=0"}
+    from ml.kr_advantage import current_book
+    return current_book()
+
+
+def _merge_advantage(signals: list[dict], book: dict) -> list[dict]:
+    """북에만 있는 종목을 시그널에 붙인다. 주문 사유와 가격 조회용이다."""
+    by = {str(s.get("code")): s for s in signals if s.get("code")}
+    for code, px in (book.get("prices") or {}).items():
+        w = float((book.get("weights") or {}).get(code, 0.0) or 0.0)
+        row = by.get(str(code))
+        if row is None:
+            row = {
+                "ticker": f"{code}.KS",
+                "code": str(code),
+                "action": "장점앙상블",
+                "score": 0,
+                "price": float(px or 0),
+                "is_buy": w > 0,
+                "is_sell": False,
+                "selection_score": w,
+                "policy_score": None,
+                "rationale": {"one_line_reason": "장점 앙상블"},
+            }
+            signals.append(row)
+            by[str(code)] = row
+        elif not row.get("price") and px:
+            row["price"] = float(px)
+        row["ensemble_weight"] = w
+    return signals
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     dry = "--dry-run" in argv
@@ -786,36 +915,53 @@ def main(argv: list[str] | None = None) -> int:
     cash = bal["cash_krw"]
     nav = float(bal["nav"])
 
-    signals = compute_kr_signals(UNIVERSE)
-    if not signals:
+    signals = compute_kr_signals(UNIVERSE) or []
+    book = advantage_book()
+    if not signals and not book.get("ok"):
         logger.warning("신호 0건 — 종료")
         return 0
 
-    budget = nav * INVEST
-    held_days = _held_days(positions) if MIN_HOLD_DAYS > 0 else {}
+    min_hold = MIN_HOLD_DAYS
+    tranches = TRANCHES
+    target_weights = None
     pos_n = MAX_POS
-    if os.getenv("MOCK_SWEET_SPOT", "1") != "0":
-        from ml.mock_sweet_spot import apply_kr_signals
-        signals, sweet_n = apply_kr_signals(signals)
-        if sweet_n:
-            pos_n = sweet_n
-            logger.info("스위트스팟 KR: mom12+lowvol 50%% + lowvol+hi52 50%%, 목표 %d종목", sweet_n)
+    if book.get("ok"):
+        signals = _merge_advantage(signals, book)
+        target_weights = book.get("weights") or {}
+        min_hold = 0
+        tranches = 1
+        logger.info(
+            "장점 앙상블 적용 asof=%s 종목 %d 현금 %.0f%% 슬리브 %s",
+            book.get("asof"), len(target_weights), 100 * float(book.get("cash") or 0),
+            book.get("sleeves"),
+        )
+    else:
+        logger.info("장점 앙상블 미적용 — 기존 정책 유지: %s", book.get("error"))
+        if os.getenv("MOCK_SWEET_SPOT", "1") != "0":
+            from ml.mock_sweet_spot import apply_kr_signals
+            signals, sweet_n = apply_kr_signals(signals)
+            if sweet_n:
+                pos_n = sweet_n
+                logger.info("스위트스팟 KR: mom12+lowvol 50%% + lowvol+hi52 50%%, 목표 %d종목", sweet_n)
+    budget = nav if target_weights is not None else nav * INVEST
+    held_days = _held_days(positions) if min_hold > 0 else {}
     plan = plan_rebalance(signals, positions, budget, pos_n, cash_krw=cash,
                           slippage=SLIPPAGE, quote_fn=_rt_best,
                           rebal_band=REBAL_BAND, exit_buffer=EXIT_BUFFER,
-                          min_hold_days=MIN_HOLD_DAYS, held_days=held_days,
-                          stub_frac=STUB_EXEMPT_FRAC)
+                          min_hold_days=min_hold, held_days=held_days,
+                          stub_frac=STUB_EXEMPT_FRAC,
+                          target_weights=target_weights)
     # ★분할매수/매도: 각 주문을 회당 목표의 1/N 로 상한 (N회에 평균 진입·청산)
-    if TRANCHES > 1 and plan:
+    if tranches > 1 and plan:
         from lib.tranche import plan_tranches
         _px = {s["code"]: s.get("price") for s in signals if s.get("code")}
         for c, p in positions.items():
             _px.setdefault(c, p.get("cur_price"))
-        plan = plan_tranches(plan, budget / max(pos_n, 1), lambda c: _px.get(c), TRANCHES,
+        plan = plan_tranches(plan, budget / max(pos_n, 1), lambda c: _px.get(c), tranches,
                              id_key="code")
     logger.info("리밸런스 계획 %d건 (예산 ₩%s, 현금 %s, 목표 %d종목, %d분할)",
                 len(plan), f"{budget:,.0f}",
-                f"₩{cash:,.0f}" if cash is not None else "미확인", pos_n, TRANCHES)
+                f"₩{cash:,.0f}" if cash is not None else "미확인", pos_n, tranches)
 
     if dry:
         logger.info("[DRY-RUN] 주문 미집행 — 계획만 출력:")
