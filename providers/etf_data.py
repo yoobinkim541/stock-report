@@ -18,9 +18,28 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
-# pykrx 는 KRX 빈 응답을 logger.error("%s", exc) 가 아니라 % 포맷이 깨진 호출로 남긴다.
-# 그 TypeError 가 Streamlit 스크립트 스레드의 로깅까지 터뜨린다.
-logging.getLogger("pykrx").setLevel(logging.CRITICAL)
+
+
+class _PykrxLogFilter(logging.Filter):
+    """Keep pykrx's root-logger diagnostics visible despite its malformed arguments."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if (
+            record.pathname.endswith("pykrx/website/comm/util.py")
+            and not isinstance(record.msg, str)
+            and record.args
+        ):
+            record.msg = f"pykrx call: {record.msg!r}; context: {record.args!r}"
+            record.args = ()
+        return True
+
+
+# pykrx uses logging.info(args, kwargs), not its named logger. Normalize only
+# those records into one string; the original KRX exception remains untouched.
+_root_logger = logging.getLogger()
+if not any(f.name == "stock_report_pykrx" for f in _root_logger.filters):
+    _root_logger.addFilter(_PykrxLogFilter("stock_report_pykrx"))
+
 CACHE_DIR = Path(os.path.expanduser("~/reports/ml-cache"))
 CACHE_TTL_S = 12 * 3600
 

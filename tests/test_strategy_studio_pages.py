@@ -99,7 +99,9 @@ strategy_studio.render_strategy_lab("lab", pack, mode="research", catalog=catalo
     assert not at.exception, str(at.exception)
 
     period_select = at.selectbox(key="strategy_studio::research::lab::period")
-    assert list(period_select.options) == ["1mo", "3mo", "6mo", "1y", "2y", "5y", "60d", "30d"]
+    assert period_select.value == "1y"
+    assert list(period_select.options) == ["1개월", "3개월", "6개월", "1년", "2년", "5년", "60일", "30일"]
+    assert [period_select.format_func(code) for code in ("1mo", "3mo", "6mo", "1y", "2y", "5y", "60d", "30d")] == list(period_select.options)
 
 
 def test_strategy_lab_preview_button_does_not_raise_session_state_error(monkeypatch):
@@ -242,15 +244,26 @@ strategy_studio.render_strategy_lab("diagnostics", {{"strategy_studio": {{"ok": 
     at = AppTest.from_string(script, default_timeout=30)
     at.run()
     assert not at.exception, str(at.exception)
-    body = " ".join(str(item.value) for item in list(at.markdown) + list(at.caption))
-    assert "실행 프로필" in body
-    assert "승격" in body
-    assert "데이터 품질" in body
-    assert "진단" in body
-    assert any("net_excess" in str(frame.value) for frame in at.dataframe)
+    visible = " ".join(
+        str(item.value)
+        for item in list(at.markdown) + list(at.caption) + list(at.info) + list(at.warning)
+    )
+    frames = " ".join(str(frame.value) for frame in at.dataframe)
+    shown = f"{visible} {frames}"
+    assert "실행 프로필" in shown
+    assert "승격" in shown
+    assert "데이터 품질" in shown
+    assert "진단" in shown
+    assert "비용 차감 초과수익이 없습니다" in shown
+    assert "회전율 한도를 넘었습니다" in shown
+    assert "글로벌 스윙" in shown
+    assert "net_excess" not in shown
+    assert "turnover limit exceeded" not in shown
+    assert "yahoo" not in shown
     assert any(select.key.endswith("data_profile") for select in at.selectbox)
     assert any(select.key.endswith("execution_profile") for select in at.selectbox)
     assert any(select.key.endswith("validation_mode") for select in at.selectbox)
+    assert any(select.value == "global_swing" for select in at.selectbox if select.key.endswith("data_profile"))
 
 
 def test_strategy_lab_disables_live_activation_without_strict_capability_gate():
@@ -345,8 +358,9 @@ strategy_studio.render_strategy_lab("evidence", {{"strategy_studio": {{"ok": Tru
     at.run()
     assert not at.exception, str(at.exception)
     body = " ".join(str(item.value) for item in list(at.markdown) + list(at.caption) + list(at.info) + list(at.warning))
-    for label in ("드래프트", "sandbox", "실거래", "검증 폴드", "데이터 품질", "원천", "비용", "회전율", "진단"):
+    for label in ("초안", "검증용", "실거래", "검증 폴드", "데이터 품질", "출처", "비용", "회전율", "진단"):
         assert label in body
+    assert "sandbox" not in body and "equity" not in body
 
 
 def test_strategy_lab_keeps_live_disabled_when_cpcv_chronology_proof_is_incomplete():
@@ -378,7 +392,7 @@ strategy_studio.render_strategy_lab("cpcv", {{"strategy_studio": {{"ok": True}}}
     live_buttons = [button for button in at.button if button.key.endswith("activate_live")]
     assert live_buttons and live_buttons[0].disabled is True
     body = " ".join(str(item.value) for item in list(at.markdown) + list(at.caption) + list(at.warning))
-    assert "chronology" in body or "시간 순서" in body
+    assert "시간순" in body
     assert "실거래 활성화 가능" not in body
 
 

@@ -35,3 +35,27 @@ st.write("renderer=" + out["renderer"]["preferred"])
     renderer.set_value("canvas")
     at.run()
     assert any("renderer=canvas" in str(item.value) for item in at.markdown)
+
+
+def test_condition_builder_does_not_register_the_default_until_clicked():
+    script = f"""
+import sys
+sys.path.insert(0, {ROOT!r})
+import streamlit as st
+from dashboard import chart_document, chart_workbench_ui
+
+condition = chart_workbench_ui.render_condition_builder(
+    chart_document.default_chart_document("AAPL"), key_prefix="gate",
+)
+st.session_state["registered"] = condition is not None
+st.write("registered=" + str(condition is not None))
+"""
+    at = AppTest.from_string(script, default_timeout=30)
+    at.run()
+    assert not at.exception, str(at.exception)
+    assert any("registered=False" in str(item.value) for item in at.markdown)
+
+    at.button(key="gate_condition_register").click()
+    at.run()
+    assert not at.exception, str(at.exception)
+    assert any("registered=True" in str(item.value) for item in at.markdown)

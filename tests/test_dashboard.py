@@ -101,6 +101,27 @@ def test_holding_position_merges_general_and_fractional_lots(tmp_path):
     assert abs(p["value"] - 500.0) < 1e-6
 
 
+def test_holding_position_reads_domestic_won_book(tmp_path):
+    """국내 보유는 종목 분석에서 미보유로 사라지지 않는다. 평단은 원이다."""
+    snap = tmp_path / "portfolio_snapshot.json"
+    snap.write_text(json.dumps({"domestic": {"holdings": [
+        {"ticker": "005930", "shares": 10, "avg_price": 70000,
+         "current_price": 72000, "return_pct": 2.86},
+    ]}}), encoding="utf-8")
+    pos = data.holding_position("005930.KS", str(snap))
+    assert pos is not None
+    assert pos["currency"] == "KRW"
+    assert pos["shares"] == 10
+    assert pos["avg_price_usd"] == 70000
+    assert pos["value"] == 720000
+    assert data.holding_position("A005930", str(snap))["shares"] == 10
+    assert data.holding_position("NVDA", str(snap)) is None
+
+def test_user_message_hides_exception_text():
+    from dashboard import ui_actions
+    assert ui_actions.user_message("File \"/home/a.py\", line 1, ValueError", "다시 시도하세요.") == "다시 시도하세요."
+    assert ui_actions.user_message("데이터 부족", "다시 시도하세요.") == "데이터 부족"
+
 def test_trade_events_reads_ledger(tmp_path, monkeypatch):
     monkeypatch.setenv("STOCK_REPORT_DB", str(tmp_path / "stock_report.db"))
     import store
@@ -151,8 +172,12 @@ def test_phase_badge(tmp_path):
                   encoding="utf-8")
     b = data.phase_badge(str(sp))
     assert b["dca"] == 1.5
-    assert "조정" in b["label"]
+    assert b["label"] == "조정"
     assert abs(b["drawdown"] + 5.2) < 1e-9
+    missing = tmp_path / "unknown-phase.json"
+    missing.write_text(json.dumps({"market_type": "bull", "phase_key": "nope"}), encoding="utf-8")
+    unknown = data.phase_badge(str(missing))
+    assert unknown["label"] == "알 수 없음"
 
 
 def test_phase_badge_missing_file_graceful():
@@ -660,7 +685,7 @@ def test_institution_watch_summary_calls_llm_when_requested(monkeypatch):
 
 def test_views_risk_no_weights():
     from dashboard import views
-    assert "보유 데이터 없음" in views.risk_report_text({})
+    assert "보유 데이터가 없습니다" in views.risk_report_text({})
 
 
 def test_views_screener_assembles(monkeypatch):
@@ -1819,7 +1844,7 @@ def test_screener_drivers():
                                       "close_vs_52w_high": 10}, top=3)
     parts = s.split(" · ")
     assert len(parts) == 3
-    assert parts[0].startswith("6M 모멘텀 +42%")        # 중요도 1위 규칙 먼저
+    assert parts[0].startswith("6개월 모멘텀 +42%")        # 중요도 1위 규칙 먼저
     assert "RSI 75 과열" in s
     assert data.screener_drivers({}, {}) == "—"
     assert data.screener_drivers({"cmf_21": 0.0}, None) == "—"   # 규칙 미발동
@@ -2021,7 +2046,7 @@ def test_rank_badge_and_move():
     assert data.rank_move(2, 5) == "▲3"                # 5위 → 2위 상승
     assert data.rank_move(6, 4) == "▼2"
     assert data.rank_move(3, 3) == "〓"
-    assert data.rank_move(1, None) == "NEW"
+    assert data.rank_move(1, None) == "신규"
 
 
 def test_entry_levels():
@@ -2049,6 +2074,25 @@ def test_entry_levels():
     assert z0["n"] == 3 and z0["lo"] == 95.0 and z0["hi"] == 95.8
     assert "MA200" in z0["labels"] and "매물대(HVN)" in z0["labels"]
     assert lv2["zones"][1]["n"] == 1                       # 52주 저점은 별도 존
+
+def test_entry_levels_prefers_reacted_zone():
+    """10% 안에서는 반복 반응한 존이 가까운 단독 이동평균보다 앞선다."""
+    lv = data.entry_levels(
+        100.0,
+        supports=[("MA60", 98.0, 0.7), ("스윙 저점·4회", 93.0, 3.5)],
+        resistances=[], fairs=[])
+    assert lv["entries"][0][0].startswith("스윙")
+    assert lv["zones"][0]["score"] == pytest.approx(3.5)
+
+
+def test_reaction_count_and_swing_pivots():
+    close = [100, 100, 96, 96, 101, 95, 102, 102]
+    assert data.reaction_count(close, 96, 1.0) == 2
+    low = [10, 9, 8, 7, 6, 5, 6, 7, 8, 9, 8, 7]
+    high = [v + 1 for v in low]
+    lows, highs = data.swing_pivots(low, high, left=2, right=2)
+    assert 5.0 in lows
+    assert not highs or max(highs) <= 11
 
 
 def test_twr_series_deposit_not_gain():
@@ -2367,8 +2411,8 @@ def test_valuation_score_kr_trailing_gauge():
     kr = {"market_type": "kr", "per": 12.0, "pbr": 1.0, "roe": 0.15,
           "forward_pe": None, "peg": None, "eps_ttm": 5000, "eps_fwd": None}
     got = data.valuation_score(60000, kr, {}, {})
-    assert got is not None and got["n"] >= 2            # PER + P/B·ROE → 게이지 표시
-    assert "PER" in got["sub"] and "P/B" in got["sub"]
+    assert got is not None and got["n"] >= 2            # PER + PBR·ROE → 게이지 표시
+    assert "PER" in got["sub"] and "PBR" in got["sub"]
     # 저평가 방향: PER 12(이익수익률 8.3%)·PBR 1.0 vs 정당 P/B(ROE15%→2.0) → 저평가(+)
     assert got["score"] > 0
     # KR yfinance 목표가(신뢰불가)는 게이지에 반영 안 됨 — target 만으론 채점 불가

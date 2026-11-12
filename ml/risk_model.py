@@ -232,7 +232,7 @@ def leverage_recommendation(growth, dd_cap_info, current: float = 1.0):
         "recommend": cap,
         "current": current,
         "budget": dd_cap_info.get("budget", DEFAULT_BUDGET),
-        "note": "μ가정에 따라 Kelly 가변 — 낙폭예산 상한(dd_cap)이 robust 구속",
+        "note": "수익률 가정에 따라 Kelly 가변 — 낙폭예산 상한(dd_cap)이 견고 구속",
     }
 
 
@@ -458,8 +458,8 @@ def format_risk_report(summary, now: str | None = None) -> str:
         rec_s = f"{lev['recommend']:.1f}x"
         L += ["",
               f"⚙ 성장최적 레버리지 (낙폭예산 {lev['budget']*100:.0f}%)",
-              f"  낙폭예산 상한  {lev['dd_cap']:.1f}x   (robust·μ불필요)",
-              f"  half-Kelly     {lo:.1f}~{hi:.1f}x   (μ가정에 가변)",
+              f"  낙폭예산 상한  {lev['dd_cap']:.1f}x   (견고·수익률 가정 불필요)",
+              f"  ½Kelly         {lo:.1f}~{hi:.1f}x   (수익률 가정에 가변)",
               f"  현재 / 권고    {lev.get('current',1.0):.2f}x → {fmt.b(rec_s)}"]
         ru = ruin_metrics(1.5, summary.get("mdd_est"), budget=lev["budget"])
         if ru:

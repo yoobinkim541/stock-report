@@ -28,7 +28,7 @@ const workflow = [
 export default function HomePage() {
   return <LandingExperience>
     <a className="skip-link" href="#main">본문으로 건너뛰기</a>
-    <header className="site-header"><div className="header-inner"><Brand /><nav aria-label="메인 메뉴"><a href="#platform">플랫폼</a><a href="#intelligence">인텔리전스</a><a href="#workflow">워크플로우</a></nav><AppLink className="nav-cta">앱 시작하기</AppLink></div></header>
+    <header className="site-header"><div className="header-inner"><Brand /><nav className="site-nav" aria-label="메인 메뉴"><a href="#platform">플랫폼</a><a href="#intelligence">인텔리전스</a><a href="#workflow">워크플로우</a></nav><AppLink className="nav-cta">앱 시작하기</AppLink><details className="nav-menu"><summary>메뉴</summary><nav aria-label="좁은 화면 메뉴"><a href="#platform">플랫폼</a><a href="#intelligence">인텔리전스</a><a href="#workflow">워크플로우</a></nav></details></div></header>
     <main id="main">
       <section className="hero section-shell" aria-labelledby="hero-title">
         <div className="hero-grid-background" aria-hidden="true" /><div className="hero-orbit orbit-one" aria-hidden="true" /><div className="hero-orbit orbit-two" aria-hidden="true" />

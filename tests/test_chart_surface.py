@@ -30,7 +30,7 @@ def test_prepare_surface_builds_canvas_html_for_dense_auto_chart():
     assert prepared.html is not None
     assert "lightweight-charts@5.1.0" in prepared.html
     assert prepared.component_height == 480
-    assert "고성능 Canvas · 준비" in prepared.status
+    assert "고성능 차트 · 준비" in prepared.status
 
 
 def test_prepare_surface_returns_plotly_without_building_canvas_when_incompatible():
@@ -41,7 +41,7 @@ def test_prepare_surface_returns_plotly_without_building_canvas_when_incompatibl
     assert prepared.decision.backend == "plotly"
     assert prepared.decision.reasons == ("comparison",)
     assert prepared.html is None
-    assert "분석 Plotly" in prepared.status
+    assert "분석 차트" in prepared.status
 
 
 def test_force_plotly_supports_legacy_runtime_without_mutating_document():
@@ -83,7 +83,7 @@ def test_canvas_prepare_error_falls_back_to_plotly_and_records_telemetry(monkeyp
     assert prepared.html is None
     assert prepared.payload is None
     assert prepared.prepare_ms >= 0
-    assert "Canvas 준비 실패" in prepared.status
+    assert "고성능 준비 실패" in prepared.status
     assert events[-1]["error"] == "ValueError"
 
 

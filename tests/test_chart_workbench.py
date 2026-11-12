@@ -140,6 +140,13 @@ def test_workbench_chart_groups_cover_every_document_chart_type_once():
     assert len(flattened) == len(set(flattened))
 
 
+def test_workbench_quality_labels_are_korean():
+    assert chart_workbench_ui._quality_label("kis_ws") == "KIS 실시간"
+    assert chart_workbench_ui._quality_label("realtime") == "실시간"
+    assert chart_workbench_ui._quality_label("unknown") == "미상"
+    assert chart_workbench_ui._quality_label("") == "미상"
+
+
 def test_condition_draft_builds_valid_canonical_tree():
     condition = chart_workbench_ui.condition_from_draft(
         symbol="msft",
@@ -318,8 +325,8 @@ chart_workbench_ui.render_analysis_rail({_VISION_SNAPSHOT}, hist=hist)
     assert not at.exception, str(at.exception)
     body = " ".join(str(item.value) for item in at.markdown)
     body += " " + " ".join(str(item.value) for item in at.caption)
-    assert "triangle_convergence" in body
-    assert "삼각수렴 진행 중" in body
+    assert "삼각수렴" in body
+    assert "triangle_convergence" not in body
     assert "변동성 축소 후 방향성 돌파 대기" in body
 
 
@@ -347,7 +354,8 @@ chart_workbench_ui.render_analysis_rail({_VISION_SNAPSHOT}, hist=hist)
     at.button[0].click().run()
 
     assert not at.exception, str(at.exception)
-    assert any("invalid_llm_response" in str(w.value) for w in at.warning)
+    assert any("분석 결과를 읽지 못했습니다" in str(w.value) for w in at.warning)
+    assert not any("invalid_llm_response" in str(w.value) for w in at.warning)
 
 
 def test_orderflow_empty_state_message_is_reason_specific():
@@ -360,3 +368,10 @@ def test_orderflow_empty_state_message_is_reason_specific():
         "capture_empty"
     )
     assert "리플레이" in chart_workbench_ui._orderflow_empty_message("replay_isolated")
+
+
+def test_vision_failure_hides_engine_and_exception_text():
+    from dashboard.chart_workbench_ui import _vision_failure
+    assert "다시 시도" in _vision_failure("invalid_llm_response")
+    assert "invalid_llm_response" not in _vision_failure("invalid_llm_response")
+    assert "llm unavailable" not in _vision_failure("llm unavailable")

@@ -618,7 +618,8 @@ def test_nav_curve_line_and_baseline():
            {"date": "2026-06-02", "nav": 10_500_000.0}]
     fig = charts.nav_curve(pts, "₩")
     assert _is_fig(fig)
-    tr = next(t for t in fig.data if t.name == "NAV")
+    tr = next(t for t in fig.data if t.name == "순자산")
+    assert "NAV" not in (tr.hovertemplate or "")
     assert list(tr.x) == ["2026-06-01", "2026-06-02"]
     assert list(tr.y) == [10_000_000.0, 10_500_000.0]
 
@@ -1191,8 +1192,7 @@ def test_price_chart_event_markers_and_zones():
         for x_, y_ in zip(tr.x, tr.y):
             low = float(hist["Low"].asof(x_))
             assert abs(y_ - low * 0.985) < 1e-9
-    rects = [s for s in fig.layout.shapes if s.type == "rect"
-             and (s.fillcolor or "").startswith("rgba(41,98,255")]
+    rects = [s for s in fig.layout.shapes if s.type == "rect" and s.fillcolor]
     assert len(rects) == 2
     thin = min(rects, key=lambda s: s.y1 - s.y0)
     assert thin.y1 > thin.y0                                     # 점 존도 밴드화
@@ -1212,7 +1212,7 @@ def test_price_chart_events_log_scale_zones_converted():
                                       "color": "#26a69a", "hover": "h"}],
                              zones=[{"lo": 120.0, "hi": 124.0, "label": "🎯 존"}])
     zr = [s for s in fig.layout.shapes if s.type == "rect"
-          and (s.fillcolor or "").startswith("rgba(41,98,255")]
+          and (s.fillcolor or "").startswith("rgba(49,130,246")]
     assert zr and abs(zr[0].y0 - math.log10(120.0)) < 1e-9
     ev = [tr for tr in fig.data if (tr.name or "").startswith("이벤트")][0]
     assert 90 < float(ev.y[0]) < 210                             # 트레이스 raw

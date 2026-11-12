@@ -34,11 +34,11 @@ def _iframe_has_trace(src: str, name: str) -> bool:
 
 @pytest.fixture(scope="module", autouse=True)
 def _restore_dashboard_modules():
-    """_STUBS 가 AppTest 인프로세스로 dashboard.data/cached 모듈 속성을 직접 덮어씀 —
-    같은 pytest 세션의 후속 테스트(test_dashboard.py 등)가 가짜 보유종목을 보지 않도록
+    """_STUBS 가 AppTest 인프로세스로 dashboard.data/cached/charts 속성을 직접 덮어씀 —
+    같은 pytest 세션의 후속 테스트가 가짜 보유종목·빈 차트를 보지 않도록
     원본 속성을 스냅샷하고 모듈 종료 시 복원."""
-    from dashboard import cached, data
-    saved = [(mod, dict(vars(mod))) for mod in (data, cached)]
+    from dashboard import cached, charts, data
+    saved = [(mod, dict(vars(mod))) for mod in (data, cached, charts)]
     saved.extend(_AGENT_MODULE_SNAPSHOTS)
     yield
     for mod, snap in saved:
@@ -108,7 +108,7 @@ cached.macro_assets = lambda: [
     {"symbol": "BTC-USD", "label": "비트코인", "emoji": "₿", "unit": "$", "ticker": "BTC-USD",
      "price": 64162, "chg": 980, "pct": 1.55, "spark": [63000, 63800, 64162]}]
 cached.portfolio_flows = lambda: {}
-cached.social_sentiment = lambda: {"summary": {"title": "미국 레딧 게시물 분석",
+cached.social_sentiment = lambda hours=72: {"summary": {"title": "미국 레딧 게시물 분석",
     "published_at": "2026-07-05T10:00:00+09:00", "url": "https://t.me/insidertracking/1",
     "top_tickers": ["MU", "SNDK", "NVDA"],
     "mood_bullets": ["메모리가 압도적인 주인공", "YOLO 콜옵션 심리 강함"],
@@ -502,8 +502,8 @@ def test_ticker_analysis_context_collects_kr_deep_signals(monkeypatch):
     assert ctx["is_kr"] is True
     assert ctx["band"]["median"] is not None
     assert ctx["band"]["n"] >= 2
-    assert any("DART" in c for c in ctx["summary"]["checks"])
-    assert any("Naver" in c for c in ctx["summary"]["checks"])
+    assert any("전자공시" in c for c in ctx["summary"]["checks"])
+    assert any("네이버" in c for c in ctx["summary"]["checks"])
     assert any("목표가" in p for p in ctx["summary"]["positives"])
     assert any("매집" in p for p in ctx["summary"]["positives"])
 
@@ -531,8 +531,8 @@ def test_ai_console_rail_status_items_show_realtime_quotes(monkeypatch):
         },
     )
 
-    assert {"label": "quotes", "value": "2개"} in items
-    assert {"label": "실시간", "value": "partial"} in items
+    assert {"label": "시세", "value": "2개"} in items
+    assert {"label": "실시간", "value": "일부"} in items
 
 
 def test_ai_console_rail_status_items_show_engine_detail_and_capped_counts(monkeypatch):
@@ -556,10 +556,27 @@ def test_ai_console_rail_status_items_show_engine_detail_and_capped_counts(monke
     assert items[0] == {"label": "맥락", "value": "시장"}
     assert {"label": "세부", "value": "한국증시"} in items
     assert {"label": "엔진", "value": "codex"} in items
-    assert {"label": "events", "value": "40개+"} in items
-    assert {"label": "memory", "value": "50개+"} in items
-    assert {"label": "models", "value": "4개"} in items
+    assert {"label": "이벤트", "value": "40개+"} in items
+    assert {"label": "기억", "value": "50개+"} in items
+    assert {"label": "모델", "value": "4개"} in items
 
+
+def test_trade_detail_money_uses_account_currency():
+    from dashboard.pages import ticker
+
+    assert ticker._trade_money("KRW", 70200) == "₩70,200"
+    assert ticker._trade_money("USD", 190.5) == "$190.50"
+    assert ticker._trade_money("EUR", 12.5) == "12.50 EUR"
+
+
+
+def test_home_map_status_labels_are_korean():
+    from dashboard.pages import home
+
+    assert home._map_status_label("stale") == "오래됨"
+    assert home._map_status_label("snapshot") == "스냅샷"
+    assert home._map_status_label("unavailable", "없음") == "없음"
+    assert home._map_status_label("") == "미상"
 
 def test_ai_console_chat_state_is_surface_scoped(monkeypatch):
     from dashboard.pages import ai_console
@@ -593,7 +610,8 @@ def test_ai_console_run_agent_question_marks_context_fallback(monkeypatch):
 
     msgs = fake_state[ai_console._chat_key("portfolio")]
     assert msgs[-1]["content"] == "fallback answer"
-    assert "context fallback" in msgs[-1]["meta"]
+    assert "일부 맥락 대체" in msgs[-1]["meta"]
+    assert "context fallback" not in msgs[-1]["meta"]
 
 
 def test_ai_console_run_agent_question_uses_fast_progress_path(monkeypatch):
@@ -640,7 +658,8 @@ def test_ai_console_run_agent_question_uses_fast_progress_path(monkeypatch):
     assert seen["async_postprocess"] is True
     assert len(set(updates)) >= 4
     assert any("LLM" in label for label in updates)
-    assert "후처리 queued" in msgs[-1]["meta"]
+    assert "후처리 대기" in msgs[-1]["meta"]
+    assert "queued" not in msgs[-1]["meta"]
 
 
 def test_ai_console_status_only_completes_after_message_is_appended(monkeypatch):
@@ -918,7 +937,7 @@ def test_ticker_position_management_renders():
     assert "매일" in seg and "매주" in seg and "매월" in seg
     assert any("적립 1회 기록" in str(b.label) for b in at.button)
     # 안전 라벨(실주문 아님) 노출
-    assert any("실주문 아님" in str(c.value) or "기록 전용" in str(c.value) for c in at.caption)
+    assert any("실계좌 주문은 없고" in str(c.value) for c in at.caption)
 
 
 def test_ticker_page_kr_institutional_shows_flow_not_13f():
@@ -1046,7 +1065,7 @@ def test_ticker_page_per_self_band_fetch_failure_shows_error():
     at.run()
     assert not at.exception, str(at.exception)
     assert any("자체 역사 PER 밴드" in str(e.value) for e in at.error)
-    assert "band fetch failed" in " ".join(str(e.value) for e in at.error)
+    assert "band fetch failed" not in " ".join(str(e.value) for e in at.error)
     assert not any("자체 역사 PER 밴드" in str(e.label) for e in at.expander)
 
 
@@ -1081,7 +1100,7 @@ def test_ticker_page_peer_comparables_hidden_for_kr_without_dart_key():
     assert not at.exception, str(at.exception)
     assert not any("동종업계 비교" in str(e.label) for e in at.expander)
     info_body = " ".join(str(getattr(item, "value", "")) for item in at.info)
-    assert "동종업계 비교는 DART 기반 국내 밸류에이션이 준비되면 표시됩니다." in info_body
+    assert "동종업계 비교는 전자공시 기반 국내 밸류에이션이 준비되면 표시됩니다." in info_body
 
 
 def test_ticker_page_per_band_and_peer_sections_are_visible():
@@ -1137,8 +1156,127 @@ def test_paper_kpis_and_decisions():
     for col in ("선택점수", "모멘텀점수", "틸트", "배수", "상태", "오버레이", "레짐"):
         assert col in decision_df.columns
     assert any("판단 근거" in str(m.value) for m in at.markdown)
+    pos = next(item.value for item in at.dataframe if "평단" in item.value.columns)
+    assert "₩70,000" in set(pos["평단"])
+    assert "₩75,000" in set(pos["현재가"])
     assert any("실거래 아님" in str(c.value) for c in at.caption)   # 안전 라벨
 
+
+
+def test_paper_intraday_kr_ledger_uses_won():
+    """국내 모의 단기 원장은 7만 원 체결을 달러 소수점으로 보이지 않는다."""
+    script = _STUBS + '''
+import pandas as pd
+import plotly.graph_objects as go
+from dashboard import cached, charts
+cached.intraday_overview = lambda mkt: {
+    "summary": {"currency": "₩", "shadow": True, "today_n": 1, "wins": 1,
+                "net_today": 12000, "cum": 12000, "halt": False},
+    "dates": ["2026-08-03"],
+}
+cached.intraday_day = lambda mkt, date: {
+    "symbols": ["005930.KS"],
+    "rows": [{"id": "d1", "ticker": "005930.KS", "qty": 1, "price": 70200,
+              "score": 0.8, "exit_reason": "target", "realized_r": 1.2,
+              "net_pnl": 12000, "shadow": False}],
+}
+idx = pd.date_range("2026-08-03 09:00", periods=1, freq="min")
+bars = pd.DataFrame({"Open": [70000.0], "High": [70300.0], "Low": [69900.0],
+                     "Close": [70200.0], "Volume": [1.0]}, index=idx)
+cached.intraday_chart = lambda sym, mkt, date, interval: {
+    "bars": bars, "trades": [], "src": "store", "bar_count": 1,
+}
+charts.intraday_candle = lambda *a, **k: go.Figure()
+from dashboard.pages import paper
+paper.render()
+'''
+    at = AppTest.from_string(script, default_timeout=30)
+    at.run()
+    assert not at.exception, str(at.exception)
+    ledger = next(item.value for item in at.dataframe if "진입" in getattr(item.value, "columns", []))
+    assert ledger.iloc[0]["진입"] == "₩70,200"
+    assert ledger.iloc[0]["손익"] == "+₩12,000"
+
+
+def test_paper_position_symbol_normalizes_bare_kr_code():
+    """국내 모의 잔고 코드 005930 은 종목 분석에 005930.KS 로 넘어간다."""
+    from dashboard.pages.paper import _analysis_symbol
+    assert _analysis_symbol("005930") == "005930.KS"
+    assert _analysis_symbol("A005930") == "005930.KS"
+    assert _analysis_symbol("0167A0") == "0167A0.KS"
+    assert _analysis_symbol("MSFT") == "MSFT"
+
+
+def test_ticker_view_normalizes_alphanumeric_kr_code():
+    from dashboard.pages import ticker
+    assert ticker._view_ticker("0167A0") == "0167A0.KS"
+    assert ticker._view_ticker("005930") == "005930.KS"
+    assert ticker._view_ticker("005930.KS") == "005930.KS"
+    assert ticker._view_ticker("MSFT") == "MSFT"
+
+
+def test_ticker_issue_importance_is_korean():
+    from dashboard.pages import ticker
+    assert ticker._issue_importance("high") == "높음"
+    assert ticker._issue_importance("medium") == "보통"
+    assert ticker._issue_importance("실적") == "실적"
+
+
+def test_watchlist_price_uses_won_for_alphanumeric_kr_code():
+    from dashboard.pages.watchlist import _fmt_price
+    assert _fmt_price("0167A0", {"price": 17185}) == "₩17,185"
+    assert _fmt_price("AAPL", {"price": 190.5}) == "$190.50"
+
+
+def test_ticker_trade_history_price_uses_account_currency():
+    """국내 거래 이력은 원, 미국은 달러다."""
+    from dashboard.pages import ticker
+    assert ticker._fmt_trade_price("005930.KS", 70200) == "₩70,200"
+    assert ticker._fmt_trade_price("005930.KQ", 1505.5) == "₩1,505.50"
+    assert ticker._fmt_trade_price("MSFT", 190.5) == "$190.50"
+    assert ticker._fmt_trade_price("005930.KS", None) == "—"
+
+
+def test_ticker_kr_empty_trade_history_does_not_offer_usd_ledger():
+    """국내 종목 이력이 없으면 달러 적립 안내를 하지 않는다."""
+    script = _STUBS + '''
+st.session_state["ticker"] = "005930.KS"
+from dashboard.pages import ticker
+ticker.render()
+'''
+    at = AppTest.from_string(script, default_timeout=30).run()
+    assert not at.exception, str(at.exception)
+    body = " ".join(str(getattr(c, "value", "")) for c in at.caption)
+    assert "국내 종목은 달러 장부에 기록하지 않습니다" in body
+    assert "좌측 적립/추가/축소" not in body
+
+
+def test_portfolio_empty_holdings_says_so():
+    """보유 스냅샷이 비면 표가 조용히 사라지지 않는다."""
+    script = _STUBS + '''
+data.load_holdings = lambda *a, **k: []
+from dashboard.pages import portfolio
+portfolio.render()
+'''
+    at = AppTest.from_string(script, default_timeout=30)
+    at.run()
+    assert not at.exception, str(at.exception)
+    assert any("보유 데이터가 없습니다" in str(item.value) for item in at.info)
+
+
+def test_kr_etf_non_domestic_offers_ticker_page():
+    """국내 ETF가 아닌 데이터는 종목 분석으로 가는 버튼을 준다."""
+    stub = '''
+st.session_state["ticker"] = "069500.KS"
+cached.etf = lambda t: {"is_etf": True, "market_type": "us", "ticker": t}
+'''
+    at = AppTest.from_string(
+        _STUBS + stub + "\nfrom dashboard.pages import kr_etf\nkr_etf.render()\n",
+        default_timeout=30,
+    )
+    at.run()
+    assert not at.exception, str(at.exception)
+    assert any(button.label == "종목 분석으로 이동" for button in at.button)
 
 def test_paper_empty_graceful():
     """모의투자: 데이터 전무(크론 미실행) 시 안내만 — 무예외 (P1 graceful)."""
@@ -1151,7 +1289,7 @@ def test_paper_empty_graceful():
     at = AppTest.from_string(script, default_timeout=30)
     at.run()
     assert not at.exception, str(at.exception)
-    assert any("계좌 데이터 없음" in str(i.value) for i in at.info)
+    assert any("모의 계좌 기록이 아직 없습니다" in str(i.value) for i in at.info)
 
 
 def test_research_axes_gate_section():
@@ -1162,8 +1300,8 @@ def test_research_axes_gate_section():
     at.run()
     assert not at.exception, str(at.exception)
     assert any("가격축 ★게이트" in str(s.value) for s in at.subheader)
-    assert any("OBSERVE" in str(m.value) for m in at.markdown)          # KR verdict
-    assert any("hi52" in str(m.value) for m in at.markdown)             # 권고 축
+    assert any("관찰" in str(m.value) for m in at.markdown)            # KR verdict
+    assert any("52주고점" in str(m.value) for m in at.markdown)       # 권고 축
     assert len(at.metric) >= 4                                          # 순초과·MDD·DSR·PBO
     assert any("반영 중" in str(c.value) for c in at.caption)           # shadow applied
     assert any("검증 결과 없음" in str(i.value) for i in at.info)        # US 미생성 안내
@@ -1171,8 +1309,28 @@ def test_research_axes_gate_section():
     exp = " ".join(str(e.label) for e in at.expander)
     assert "레짐 방어 오버레이" in exp and "비용·회전율 최적화" in exp
     caps = " ".join(str(c.value) for c in at.caption)
-    assert "OOS 검증" in caps and "최소 보유 60일" in caps          # 비용 OOS verdict + 라이브 권고
+    assert "최소 보유 60일" in caps
 
+
+
+def test_research_coverage_caption_hides_go_code():
+    script = _STUBS + """
+from dashboard.pages import research
+cached.axes_gate = lambda: {
+    "kr": {"available": False},
+    "us": {"available": True, "coverage": 0.82,
+           "verdict": {"label": "통과", "net_excess_cagr": 0.01, "dsr": 0.1, "pbo": 0.2,
+                       "oos": {"mdd": 0.2}, "bench": {"mdd": 0.3}}},
+}
+research.render()
+"""
+    at = AppTest.from_string(script, default_timeout=30)
+    at.session_state["research_section"] = "축 게이트"
+    at.run()
+    assert not at.exception, str(at.exception)
+    caps = " ".join(str(c.value) for c in at.caption)
+    assert "82%" in caps and "통과가 관찰로 내려갑니다" in caps
+    assert "GO 자동" not in caps
 
 def test_paper_us_sleeve_badge_and_axes_columns():
     """모의투자 US — 🏗️ 슬리브 배지 + '축 피처 보기' 토글 시 원장에 축 열 (P2)."""
@@ -1182,10 +1340,10 @@ def test_paper_us_sleeve_badge_and_axes_columns():
     at.session_state["paper_axes_us_mock"] = True          # 토글 on 시뮬
     at.run()
     assert not at.exception, str(at.exception)
-    assert any("구조레버 슬리브" in str(m.value) and "GO ×1.30" in str(m.value)
+    assert any("구조레버 슬리브" in str(m.value) and "통과 ×1.30" in str(m.value)
                for m in at.markdown)
     df = at.dataframe[-1].value                            # 마지막 표 = 결정 원장
-    assert "mom12" in df.columns and "pead" in df.columns
+    assert "12개월" in df.columns and "실적" in df.columns
 
 
 def test_home_shows_gate_signal_line():
@@ -1195,7 +1353,7 @@ def test_home_shows_gate_signal_line():
     at.run()
     assert not at.exception, str(at.exception)
     caps = " ".join(str(c.value) for c in at.caption)
-    assert "ML 게이트" in caps and "GO ×1.30" in caps and "OBSERVE·hi52" in caps
+    assert "모델 게이트" in caps and "통과 ×1.30" in caps and "관찰·52주고점" in caps
 
 
 def test_portfolio_shows_tier3_gate():
@@ -1205,7 +1363,7 @@ def test_portfolio_shows_tier3_gate():
     at.run()
     assert not at.exception, str(at.exception)
     caps = " ".join(str(c.value) for c in at.caption)
-    assert "Tier3 구조적 레버리지 게이트" in caps and "슬리브 ✅ ON" in caps
+    assert "구조 레버 게이트" in caps and "슬리브 ✅ 켜짐" in caps
 
 
 def test_portfolio_shows_kr_section_with_cash(monkeypatch):
@@ -1227,6 +1385,12 @@ portfolio.render()
     assert "토스 동기화" in body
     metrics = {m.label: m.value for m in at.metric}
     assert metrics.get("예수금") == "₩41,011"
+    kr_df = next(item.value for item in at.dataframe
+                 if "평단" in getattr(item.value, "columns", [])
+                 and "SOL AI반도체TOP2플러스" in set(item.value["종목"]))
+    assert kr_df.iloc[0]["평단"] == "₩20,681"
+    assert kr_df.iloc[0]["현재가"] == "₩17,185"
+    assert kr_df.iloc[0]["평가액"] == "₩395,255"
 
 
 def test_home_has_donut_and_holdings():
@@ -1235,9 +1399,11 @@ def test_home_has_donut_and_holdings():
                              default_timeout=30)
     at.run()
     assert not at.exception
-    assert len(at.metric) >= 3               # Phase·낙폭·DCA (총액은 히어로 HTML)
+    assert len(at.metric) >= 3               # 국면·낙폭·DCA (총액은 히어로 HTML)
+    labels = [m.label for m in at.metric]
+    assert "국면" in labels and "Phase" not in labels
     assert len(at.dataframe) >= 1            # 보유표
-    assert any("국면" in str(i.value) for i in at.info)  # Phase 행동 박스
+    assert any("국면" in str(i.value) for i in at.info)  # 국면 행동 박스
 
 
 def test_home_shows_kr_donut_and_holdings_with_cash():
@@ -1262,6 +1428,7 @@ home.render()
     kr_df = at.dataframe[-1].value
     # 종목 열엔 코스피200 아닌 종목은 이름만(코드 안 보임) — display 필드 사용(2026-07-29)
     assert "SOL AI반도체TOP2플러스" in kr_df["종목"].values
+    assert kr_df.iloc[0]["평가액(₩)"] == "₩395,255"
     assert "0167A0" not in kr_df["종목"].values
 
 
@@ -1368,9 +1535,30 @@ cached.etf = lambda t: {"ticker": "0167A0.KS", "stock_code": "0167A0", "is_etf":
     assert not at.exception, at.exception
     body = (" ".join(str(x) for x in at.markdown)
             + " ".join(m.label for m in at.metric)
-            + " ".join(str(x.value) for x in at.subheader))
+            + " ".join(str(x.value) for x in at.subheader)
+            + " ".join(str(x.value) for x in at.caption)
+            + " ".join(str(x.value) for x in at.title))
     assert "국내 ETF 전용" in body
     assert "추적오차" in body and "NAV" in body
+
+
+def test_kr_etf_page_keeps_unrelated_sidebar_ticker():
+    """국내 ETF 화면을 열어도, 고르기 전에는 개별주 세션 티커를 바꾸지 않는다."""
+    stub = '''
+st.session_state["ticker"] = "MSFT"
+cached.etf = lambda t: {"is_etf": False}
+'''
+    at = AppTest.from_string(_STUBS + stub + "\nfrom dashboard.pages import kr_etf\nkr_etf.render()\n",
+                             default_timeout=30)
+    at.run()
+    assert not at.exception, at.exception
+    box = next(widget for widget in at.selectbox if widget.label == "국내 ETF 선택")
+    assert at.session_state["ticker"] == "MSFT"
+    label = next(option for option in box.options if option != box.value)
+    box.set_value(label).run()
+    chosen = at.session_state["ticker"]
+    assert chosen != "MSFT"
+    assert chosen == label or f"({chosen})" in str(label)
 
 
 def test_ticker_page_kr_etf_view():
@@ -1571,6 +1759,24 @@ chart_full.render()
     assert "Microsoft" in body or "MSFT" in body      # 히어로 라벨
 
 
+def test_chart_full_korean_header_uses_won():
+    """풀뷰 헤더 등락은 원이고, 6자리 코드는 .KS 로 정규화한다."""
+    script = _STUBS + '''
+st.session_state["ticker"] = "005930"
+cached.realtime_quote = lambda t: None
+from dashboard.pages import chart_full
+chart_full.render()
+'''
+    at = AppTest.from_string(script, default_timeout=30)
+    at.run()
+    assert not at.exception, at.exception
+    assert at.session_state["ticker"] == "005930.KS"
+    body = " ".join(str(getattr(m, "value", "")) for m in at.markdown)
+    assert "₩169" in body
+    assert "+₩1" in body
+    assert "+1.00" not in body
+
+
 def test_ticker_chart_new_indicators_render():
     """V-series 지표(켈트너·KAMA·샹들리에·Aroon·%b·PVT) 전체 선택 렌더 — 무예외."""
     script = _STUBS + '''
@@ -1747,7 +1953,7 @@ ticker.render()
     assert "목표가 여력" in body
     assert "리비전 모멘텀" in body
     labels = [m.label for m in at.metric]
-    assert "PER" in labels and "Fwd PE" in labels
+    assert "PER" in labels and "선행 PER" in labels
     frames = [item.proto.srcdoc for item in at.get("iframe")]
     assert frames and any("bt-reg" in src for src in frames)
 
@@ -1782,7 +1988,7 @@ ticker.render()
     assert not at.exception, str(at.exception)
     assert not any("한국 종목 심화 컨텍스트" in str(e.label) for e in at.expander)
     assert any("한국 종목 심화 컨텍스트" in str(m.value) for m in at.markdown)
-    assert any("DART 키 설정 시 활성" in str(m.value) for m in at.markdown)
+    assert any("전자공시 키 설정 시 활성" in str(m.value) for m in at.markdown)
     info_body = " ".join(str(getattr(item, "value", "")) for item in at.info)
     assert "애널리스트 의견 데이터 없음" in info_body
     assert "목표가 팬 차트 표시 불가" in info_body
@@ -1910,6 +2116,30 @@ def test_watchlist_page_renders_rows_and_navigates_on_click():
     assert "AAPL" in df["티커"].values
     assert "Apple Inc" in df["종목"].values
 
+
+
+def test_watchlist_korean_price_uses_won():
+    """관심종목 국내 현재가는 원이고, 미국 현재가는 달러다."""
+    script = _STUBS + '''
+data.load_watchlist = lambda *a, **k: [
+    {"ticker": "005930.KS", "name": "삼성전자", "reason": "국내", "added_at": "2026-07-01T00:00:00"},
+    {"ticker": "AAPL", "name": "Apple Inc", "reason": "미국", "added_at": "2026-07-01T00:00:00"},
+]
+cached.watchlist_quotes = lambda tickers: {
+    "005930.KS": {"price": 70200, "chg_pct": 1.2},
+    "AAPL": {"price": 190.5, "chg_pct": -0.4},
+}
+from dashboard.pages import watchlist
+watchlist.render()
+'''
+    at = AppTest.from_string(script, default_timeout=30).run()
+    assert not at.exception, str(at.exception)
+    df = next(item.value for item in at.dataframe if "현재가" in item.value.columns)
+    prices = dict(zip(df["티커"], df["현재가"]))
+    assert prices["005930.KS"] == "₩70,200"
+    assert prices["AAPL"] == "$190.50"
+    body = " ".join(str(getattr(c, "value", "")) for c in at.caption)
+    assert "국내 티커는 미지원" not in body
 
 def test_watchlist_page_renders_institution_hub_and_rows():
     script = _STUBS + '''
@@ -2396,3 +2626,26 @@ ticker.render()
         at.run()
         assert not at.exception, f"live={live}: {at.exception}"
         assert len(at.markdown) > 0, f"live={live}: 페이지가 비어 렌더됨"
+
+
+def test_paper_reason_text_translates_factor_codes():
+    from dashboard.pages import paper
+    assert paper._reason_text("value 0.45·quality 0.02·mom 0.50") == "밸류 0.45·퀄리티 0.02·모멘텀 0.50"
+    assert paper._reason_text("mom12 0.20·mom 0.50") == "12개월 0.20·모멘텀 0.50"
+    assert paper._reason_text("슬리브 청산(게이트 미통과/stale)") == "슬리브 청산(게이트 미통과/오래됨)"
+    assert "안전 차단" in paper._reason_text("계좌# 미설정(fail-closed)")
+
+
+def test_ticker_source_and_confidence_labels_are_korean():
+    from dashboard.pages import ticker
+    assert ticker._source_label("DART+marcap") == "전자공시 · 시가총액"
+    assert ticker._source_label("SEC") == "미국 공시"
+    assert ticker._confidence_label("high") == "높음"
+    assert ticker._confidence_label("missing") == "없음"
+
+
+def test_market_source_label_hides_engine_keys():
+    from dashboard.pages import market
+    assert "polymarket" not in market._source_label("polymarket")
+    assert "예측시장" in market._source_label("polymarket")
+    assert "연준" in market._source_label("rss:fed")
