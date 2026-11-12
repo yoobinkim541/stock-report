@@ -196,7 +196,8 @@ _LOW_SIGNAL = (
 def _rule_score(event: dict) -> tuple[int, str]:
     """규칙 기반 중요도 점수 (1차 판정 — LLM off/실패 시 최종값)."""
     title   = (event.get("title") or "").lower()
-    tickers = {t.lstrip("$").upper() for t in (event.get("tags") or []) if t.startswith("$")}
+    from providers.news_labels import _event_tickers
+    tickers = _event_tickers(event)
 
     # 포트폴리오 종목 직접 언급
     if tickers & _PORTFOLIO:

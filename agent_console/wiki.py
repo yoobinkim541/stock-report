@@ -2725,6 +2725,53 @@ def _auto_tags(text: str, surface: str, kind: str) -> list[str]:
     return sorted(tags)
 
 
+_INDEX_OTHER = "기타 지식"
+_INDEX_PORTAL = "종합 위키 포털 (Overview Portals)"
+_INDEX_SOURCE = "원문 지식 요약 (Compiled Source Summaries)"
+_INDEX_PLAYBOOK = "종목전략·플레이북 (Single Stock Strategies)"
+_INDEX_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("정치·지정학 (Politics & Geopolitics)", ("지정학", "정치", "전쟁", "중동", "선거", "제재", "geopolitics", "sanction")),
+    ("금리·통화정책 (Monetary Policy & Rates)", ("금리", "통화정책", "연준", "fomc", "기준금리", "국채")),
+    ("거시경제·에너지 (Macro & Commodities)", ("거시", "유가", "에너지", "원자재", "달러", "인플레", "환율", "원유")),
+    ("기술·반도체·AI (Tech & AI)", ("반도체", "인공지능", "엔비디아", "nvidia", "gpu")),
+    ("기업실적·산업동향 (Earnings & Industry)", ("실적", "어닝", "earnings", "가이던스", "산업동향")),
+)
+
+
+def _index_category(node: dict | None) -> str:
+    """위키 그래프 노드를 테마 묶음 이름으로 분류한다.
+
+    dashboard.wiki_mesh.THEME_COLORS 키와 같아야 색·배치가 맞는다.
+    """
+    if not isinstance(node, dict):
+        return _INDEX_OTHER
+    kind = str(node.get("kind") or "").strip().lower()
+    surface = str(node.get("surface") or "").strip().lower()
+    tags = [str(tag).strip().lower() for tag in (node.get("tags") or []) if str(tag).strip()]
+    text = " ".join([
+        str(node.get("title") or ""),
+        str(node.get("summary") or ""),
+        " ".join(tags),
+    ]).lower()
+    if kind == "source_digest" or "source_digest" in tags:
+        return _INDEX_SOURCE
+    if any(token in text for token in ("포털", "overview portal", "위키 인덱스", "종합 위키")):
+        return _INDEX_PORTAL
+    if any(tag.startswith("ticker:") for tag in tags) or surface == "ticker":
+        return _INDEX_PLAYBOOK
+    best = _INDEX_OTHER
+    best_hits = 0
+    for label, words in _INDEX_RULES:
+        hits = sum(1 for word in words if word in text)
+        if hits > best_hits:
+            best, best_hits = label, hits
+    if best_hits:
+        return best
+    if kind == "playbook":
+        return _INDEX_PLAYBOOK
+    return _INDEX_OTHER
+
+
 def _num_or_default(value: object, default: float = 0.5) -> float:
     return _safe_confidence(value, default)
 

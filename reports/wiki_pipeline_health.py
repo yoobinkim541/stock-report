@@ -7,18 +7,28 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
+import json
+from pathlib import Path
 from typing import Any
 
 from agent_console import evidence_usage, wiki
 from providers import news_labels
-from reports import wiki_article_backfill
-from reports import source_collector
+from reports import raw_archive, source_collector
 
 STALE_WIKI_AGE_DAYS = 14
 UNUSED_WIKI_DAYS = 30
 RECENT_EVENT_HOURS = 24
 RECENT_EVENT_SAMPLE_LIMIT = 120
 NEWS_LABEL_FALLBACK_ALERT_RATIO = 0.5
+# Source/topic compilation journals (reports/wiki_source_journal.py) and the
+# unattended public runner summary (scripts/run_public_wiki_rollout.py).
+SOURCE_PIPELINE_JOURNALS = (("unrestricted", "wiki-source-v1"), ("public", "public-wiki-pilot-20261013"))
+AUTOMATIC_LATEST_NAME = "automatic-latest.json"
+# The systemd timer reruns 30 minutes after each run (<=90 minutes each).
+AUTOMATIC_RUN_STALE_HOURS = 6
+_AUTOMATIC_FAILURE_FIELDS = ("compile_failed", "routing_pending", "effects_pending", "stale_base", "topic_failed")
+_COMPILE_STATES = {"pending", "compiled", "skipped", "failed"}
+_EFFECT_KEYS = ("artifacts", "search", "log")
 
 
 def _now_iso() -> str:
@@ -39,6 +49,145 @@ def _health_bool(record: dict[str, Any], key: str, fallback: bool = False) -> bo
     if isinstance(value, str):
         return value.strip().lower() not in {"", "0", "false", "no", "none", "null"}
     return bool(value)
+
+
+def _read_json_object(path: Path) -> tuple[str, dict | None]:
+    """Distinguish an absent record from an unreadable or malformed one."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return "missing", None
+    except (OSError, UnicodeError):
+        return "corrupt", None
+    try:
+        value = json.loads(text)
+    except ValueError:
+        return "corrupt", None
+    return ("ok", value) if isinstance(value, dict) else ("corrupt", None)
+
+
+def _top_codes(counter: Counter, limit: int = 3) -> str:
+    return ", ".join(f"{code} {count}" for code, count in counter.most_common(limit))
+
+
+def _summarize_source_journal(root: Path) -> dict[str, Any]:
+    summary: dict[str, Any] = {
+        "present": root.is_dir(), "sources": 0, "compile_failed": 0, "compile_pending": 0,
+        "error_codes": {}, "operations_pending": 0, "operation_stages": {}, "corrupt_records": 0,
+    }
+    if not summary["present"]:
+        return summary
+    errors: Counter = Counter()
+    for path in sorted((root / "sources").glob("*.json")):
+        state, receipt = _read_json_object(path)
+        if (state != "ok" or not isinstance(receipt.get("compile_state"), str)
+                or receipt["compile_state"] not in _COMPILE_STATES):
+            summary["corrupt_records"] += 1
+            continue
+        summary["sources"] += 1
+        if receipt["compile_state"] == "failed":
+            summary["compile_failed"] += 1
+            errors[_clean(receipt.get("error_code") or "compile_failed", 80)] += 1
+        elif receipt["compile_state"] == "pending":
+            summary["compile_pending"] += 1
+    stages: Counter = Counter()
+    for directory in ("operations", "topic-operations", "topic-operations-v3"):
+        for path in sorted((root / directory).glob("*.json")):
+            state, receipt = _read_json_object(path)
+            if state != "ok" or not isinstance(receipt.get("stage"), str):
+                summary["corrupt_records"] += 1
+                continue
+            effects_done = all(receipt.get(key) == "done" for key in _EFFECT_KEYS)
+            if receipt["stage"] == "committed" and effects_done:
+                continue
+            summary["operations_pending"] += 1
+            stages["effects_pending" if receipt["stage"] == "committed" else _clean(receipt["stage"], 40)] += 1
+    summary["error_codes"] = dict(errors.most_common())
+    summary["operation_stages"] = dict(stages.most_common())
+    return summary
+
+
+def _summarize_automatic_latest(path: Path, now: datetime) -> dict[str, Any]:
+    state, summary = _read_json_object(path)
+    result: dict[str, Any] = {"state": state}
+    if state != "ok":
+        return result
+    try:
+        modified = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
+        results = summary.get("results") or []
+        recovery = summary.get("topic_recovery") or []
+        if not isinstance(results, list) or not isinstance(recovery, list):
+            raise TypeError("automatic summary lists invalid")
+        counts = {field: 0 for field in _AUTOMATIC_FAILURE_FIELDS}
+        reasons: Counter = Counter()
+        for item in results:
+            outcome = item["result"]
+            for field in _AUTOMATIC_FAILURE_FIELDS:
+                counts[field] += int(outcome.get(field) or 0)
+            for code, count in (outcome.get("reason_counts") or {}).items():
+                reasons[_clean(code, 80)] += int(count or 0)
+            topic = outcome.get("topic") or {}
+            if topic.get("stage") == "failed" and topic.get("reason"):
+                reasons[_clean(topic["reason"], 80)] += 1
+        recovery_pending = sum(
+            1 for item in recovery
+            if item.get("stage") != "committed"
+            or any(value != "done" for value in (item.get("effects") or {}).values()))
+        attempted = int(summary.get("attempted") or 0)
+    except (OSError, TypeError, ValueError, KeyError, AttributeError, OverflowError):
+        # Every field is parsed inside this guard: a damaged summary is reported, never raised.
+        return {"state": "corrupt"}
+    age_hours = round(max(0.0, (now - modified).total_seconds()) / 3600, 1)
+    result.update(
+        last_run_at=modified.isoformat(timespec="seconds"), age_hours=age_hours,
+        stale=age_hours > AUTOMATIC_RUN_STALE_HOURS, attempted=attempted,
+        recovery_pending=recovery_pending, reason_counts=dict(reasons.most_common()), **counts)
+    return result
+
+
+def _summarize_source_pipeline_health(now: datetime | None = None) -> dict[str, Any]:
+    """New source/topic compilation pipeline state; failures are never an empty queue."""
+    now = now or datetime.now(timezone.utc)
+    root = raw_archive.reports_root()
+    journals: dict[str, Any] = {}
+    reasons: list[str] = []
+    for name, directory in SOURCE_PIPELINE_JOURNALS:
+        journal = _summarize_source_journal(root / directory)
+        if name == "public" and journal["present"]:
+            journal["automatic_latest"] = _summarize_automatic_latest(root / directory / AUTOMATIC_LATEST_NAME, now)
+        journals[name] = journal
+        latest = journal.get("automatic_latest") or {}
+        runner_current = latest.get("state") == "ok" and not latest.get("stale")
+        # Failed receipts stay in the runner retry queue. Count them only when the runner is down.
+        if journal["compile_failed"] and not runner_current:
+            detail = _top_codes(Counter(journal["error_codes"]))
+            reasons.append(f"{name}: compile 실패 {journal['compile_failed']}건" + (f" ({detail})" if detail else ""))
+        if journal["operations_pending"]:
+            reasons.append(f"{name}: 복구·효과 대기 {journal['operations_pending']}건 "
+                           f"({_top_codes(Counter(journal['operation_stages']), 5)})")
+        if journal["corrupt_records"]:
+            reasons.append(f"{name}: journal 기록 손상 {journal['corrupt_records']}건")
+        latest = journal.get("automatic_latest")
+        if not latest or latest["state"] == "missing":
+            continue
+        if latest["state"] == "corrupt":
+            reasons.append(f"{name}: {AUTOMATIC_LATEST_NAME} 손상")
+            continue
+        if latest["stale"]:
+            reasons.append(f"{name}: 자동 실행 정체 — 마지막 {latest['last_run_at']} ({latest['age_hours']}h 전)")
+        failures = [f"{field} {latest[field]}" for field in _AUTOMATIC_FAILURE_FIELDS if latest[field]]
+        if failures:
+            detail = _top_codes(Counter(latest["reason_counts"]))
+            reasons.append(f"{name}: 마지막 자동 실행 {' · '.join(failures)}" + (f" ({detail})" if detail else ""))
+        if latest["recovery_pending"]:
+            reasons.append(f"{name}: 토픽 복구 대기 {latest['recovery_pending']}건")
+    present = any(journal["present"] for journal in journals.values())
+    return {
+        "status": "attention" if reasons else ("ok" if present else "no_data"),
+        "attention": bool(reasons),
+        "reasons": reasons,
+        "journals": journals,
+    }
 
 
 def _source_root(source: str) -> str:
@@ -80,8 +229,35 @@ def _page_source_refs(page: dict[str, Any]) -> list[str]:
     return [_clean(ref, 120) for ref in (page.get("source_refs") or []) if _clean(ref, 120)]
 
 
+def _evidence_fingerprint(page: dict[str, Any]) -> str:
+    from reports import wiki_distillation
+
+    return wiki_distillation._evidence_fingerprint(page)
+
+
 def _has_non_conversation_source_refs(page: dict[str, Any]) -> bool:
     return wiki.has_non_conversation_source_refs(page)
+
+
+def distillation_queue_health(pages: list[dict[str, Any]]) -> dict[str, Any]:
+    """Return selector-ordered queue IDs/counts for only the supplied corpus.
+
+    Pending includes linked refresh retries; refresh_due includes only eligible
+    fingerprint refreshes. Legacy selectors without a refresh predicate report
+    zero refreshes. No pages are loaded, changed, or distilled.
+    """
+    from reports import wiki_distillation
+
+    candidates = wiki_distillation.select_distillation_candidates(pages, limit=len(pages))
+    refresh_due = getattr(wiki_distillation, "_refresh_due", lambda page: False)
+    queue_ids = [page["id"] for page in candidates]
+    refresh_ids = [page["id"] for page in candidates if refresh_due(page)]
+    return {
+        "distillation_pending_count": len(queue_ids),
+        "distillation_queue_ids": queue_ids,
+        "refresh_due_count": len(refresh_ids),
+        "refresh_due_ids": refresh_ids,
+    }
 
 
 def _build_reverse_links(pages: list[dict[str, Any]]) -> dict[str, set[str]]:
@@ -137,6 +313,7 @@ def _build_source_rows(
         cardinality_drop_streak = int(record.get("cardinality_drop_streak") or 0)
         rows.append({
             "source": source,
+            "collection_mode": source_collector.source_collection_mode(source, record),
             "observed": source in source_health,
             "family": profile["family"],
             "kind": profile["kind"],
@@ -185,6 +362,13 @@ def _summarize_source_health(
     zero_event = [row for row in rows if row["observed"] and row["last_count"] == 0]
     blocked = [row for row in rows if row["availability"] in {"blocked", "disabled"}]
     failed = [row for row in rows if row["availability"] == "error"]
+    # 공백 = 오래 성공 못 함(stale) + 접근 차단(blocked) + 실패(error). stale 계산은 차단
+    # 소스를 의도적으로 제외하므로(stale_sources), 차단만으로 수집이 멈춘 소스가 "공백 0"으로
+    # 보이지 않게 따로 합산한다. 운영자가 끈(disabled) 소스는 공백이 아니다.
+    gap_rows = [
+        row for row in rows
+        if row["is_stale"] or row["availability"] in {"blocked", "error"}
+    ]
     zero_persist = [
         row for row in rows
         if row["observed"] and row["zero_persist_alert"]
@@ -195,6 +379,7 @@ def _summarize_source_health(
     healthy = [
         row for row in rows
         if row["observed"] and not row["is_stale"] and row["has_success"] and row["last_count"] > 0
+        and row["collection_mode"] == "scheduled"
         and row["availability"] == "available" and not row["zero_persist_alert"]
         and not row["cardinality_drop_alert"] and row["collision_count"] == 0
     ]
@@ -204,11 +389,14 @@ def _summarize_source_health(
             "tracked_sources": len(source_health),
             "expected_sources": len(source_collector.expected_sources()),
             "healthy_sources": len(healthy),
+            "on_demand_sources": sum(row["collection_mode"] == "on_demand" for row in rows),
             "stale_sources": len(stale_sources),
             "missing_success_sources": len(missing_success),
             "zero_event_sources": len(zero_event),
             "blocked_sources": len(blocked),
             "failed_sources": len(failed),
+            "gap_sources": len(gap_rows),
+            "gap_source_names": [row["source"] for row in gap_rows],
             "zero_persist_sources": len(zero_persist),
             "cardinality_drop_sources": len(cardinality_drops),
             "collision_sources": len(collisions),
@@ -300,6 +488,9 @@ def _source_digest_backlinks(
             "distillation_attempts": distillation_attempts,
             "distillation_result_id": _clean(state.get("last_result_id") or "", 100),
             "distillation_reason": _clean(state.get("reason") or "", 240),
+            "has_evidence": bool(page.get("evidence_ids") or page.get("conflicting_evidence_ids")),
+            "distillation_evidence_fingerprint": _clean(state.get("evidence_fingerprint") or "", 100),
+            "current_evidence_fingerprint": _evidence_fingerprint(page),
         })
     return rows
 
@@ -315,18 +506,31 @@ def _summarize_curation_health(pages: list[dict[str, Any]]) -> dict[str, Any]:
     ]
     distillation_states = Counter(page.get("distillation_status") or "pending" for page in source_digests)
     by_id = {_page_id(page): page for page in pages if _page_id(page)}
-    intentional_skips = [
-        page for page in unlinked if page["distillation_status"] == "skipped"
-    ]
     orphaned_judgments = [
         page for page in unlinked
-        if page["distillation_status"] == "created"
-        and page.get("distillation_result_id")
+        if page.get("distillation_result_id")
         and _page_status(by_id.get(page["distillation_result_id"], {})) == "archived"
+    ]
+    orphaned_ids = {page["id"] for page in orphaned_judgments}
+    refresh_due = [
+        page for page in unlinked
+        if page.get("has_evidence")
+        and (
+            page.get("distillation_evidence_fingerprint")
+            or page["distillation_status"] == "created"
+        )
+        and page.get("distillation_evidence_fingerprint") != page.get("current_evidence_fingerprint")
+    ]
+    refresh_due_ids = {page["id"] for page in refresh_due}
+    intentional_skips = [
+        page for page in unlinked
+        if page["distillation_status"] == "skipped"
+        and page["id"] not in refresh_due_ids
     ]
     actionable_unlinked = [
         page for page in unlinked
-        if page["distillation_status"] in {"pending", "created"}
+        if page["id"] in refresh_due_ids
+        or page["distillation_status"] in {"pending", "created"}
         or (page["distillation_status"] == "failed" and int(page.get("distillation_attempts") or 0) < 3)
     ]
     distillation_pending_count = sum(
@@ -335,6 +539,8 @@ def _summarize_curation_health(pages: list[dict[str, Any]]) -> dict[str, Any]:
         if not page["linked_to_judgment"]
         and (
             page["distillation_status"] == "pending"
+            or page["distillation_status"] == "created"
+            or page["id"] in refresh_due_ids
             or (
                 page["distillation_status"] == "failed"
                 and int(page.get("distillation_attempts") or 0) < 3
@@ -346,16 +552,18 @@ def _summarize_curation_health(pages: list[dict[str, Any]]) -> dict[str, Any]:
         "source_digest_linked_count": len(linked),
         "source_digest_unlinked_count": len(unlinked),
         "source_digest_unlinked_pages": unlinked,
-        "ready_for_promotion_count": len(ready_for_promotion),
         "actionable_unlinked_count": len(actionable_unlinked),
         "intentional_skip_count": len(intentional_skips),
         "orphaned_judgment_count": len(orphaned_judgments),
+        "refresh_due_count": len(refresh_due),
+        "ready_for_promotion_count": len(ready_for_promotion),
         "ready_for_promotion_pages": ready_for_promotion,
         "linked_source_digest_pages": linked,
         "distillation_pending_count": distillation_pending_count,
         "distillation_created_count": int(distillation_states.get("created", 0)),
         "distillation_skipped_count": int(distillation_states.get("skipped", 0)),
         "distillation_failed_count": int(distillation_states.get("failed", 0)),
+        **distillation_queue_health(pages),
     }
 
 
@@ -400,7 +608,7 @@ def _recommendations(
     wiki_section: dict[str, Any],
     curation_section: dict[str, Any],
     news_label_section: dict[str, Any] | None = None,
-    article_coverage: dict[str, Any] | None = None,
+    source_pipeline_section: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     recs: list[dict[str, Any]] = []
     if (news_label_section or {}).get("attention"):
@@ -419,12 +627,18 @@ def _recommendations(
         })
     stale_rows = list(source_section.get("stale_sources") or [])
     missing_success = [row for row in source_section.get("sources") or [] if row.get("observed") and not row.get("has_success")]
-    if stale_rows or missing_success:
-        top_sources = stale_rows or missing_success
+    blocked_sources = [
+        row for row in source_section.get("sources") or []
+        if row.get("availability") in {"blocked", "disabled", "error"}
+    ]
+    if stale_rows or missing_success or blocked_sources:
+        top_sources = stale_rows or blocked_sources or missing_success
         detail_bits = []
         for row in top_sources[:3]:
             source = row.get("source", "unknown")
-            if row.get("stale_hours") is not None:
+            if row.get("availability") in {"blocked", "disabled", "error"} and row.get("availability_reason"):
+                detail_bits.append(f"{source}: {row['availability_reason']}")
+            elif row.get("stale_hours") is not None:
                 detail_bits.append(f"{source} {row['stale_hours']}h/{row.get('stale_threshold')}h")
             elif row.get("last_error"):
                 detail_bits.append(f"{source}: {row['last_error']}")
@@ -436,6 +650,14 @@ def _recommendations(
             "title": "소스 수집 공백 점검",
             "detail": " · ".join(detail_bits),
             "action": "크론·인증·채널 상태를 먼저 복구해서 원문 유입을 다시 살리세요.",
+        })
+    if (source_pipeline_section or {}).get("attention"):
+        recs.append({
+            "priority": 1,
+            "category": "source_pipeline",
+            "title": "원문 컴파일·토픽 파이프라인 점검",
+            "detail": " · ".join(source_pipeline_section.get("reasons") or [])[:600],
+            "action": "journal의 실패 사유 코드와 복구 대기 operation을 확인하고, 자동 실행 로그·타이머를 복구하세요.",
         })
 
     unlinked = int(curation_section.get("actionable_unlinked_count") or 0)
@@ -459,23 +681,6 @@ def _recommendations(
             "title": "큐레이션 승격 경로 보강",
             "detail": " · ".join(detail_bits),
             "action": "증류 크론이 대기 source_digest를 검토하도록 두고, 기존 judgment 링크는 보존·복구하세요.",
-        })
-
-    coverage = article_coverage or {}
-    unresolved = int(coverage.get("unresolved_count") or 0)
-    if unresolved:
-        status_counts = coverage.get("status_counts") or {}
-        detail = " · ".join(
-            f"{key} {int(status_counts.get(key) or 0)}개"
-            for key in ("missing", "pending", "retry", "ready_missing_body", "failed", "needs_browser")
-            if int(status_counts.get(key) or 0)
-        )
-        recs.append({
-            "priority": 2,
-            "category": "article_backfill",
-            "title": "위키 근거 원문 수집 잔여 작업",
-            "detail": f"미해결 URL {unresolved}개" + (f" · {detail}" if detail else ""),
-            "action": "큐의 재시도·본문 누락 URL을 처리하고, 접근 제한은 blocked/unavailable 대체 근거로 남기세요.",
         })
 
     stale_count = int(wiki_section.get("stale_count") or 0)
@@ -531,19 +736,15 @@ def build_pipeline_health_report(*, dry_run: bool = False) -> dict[str, Any]:
     lint_data = wiki.lint_pages(pages)
     stale_pages = wiki.list_stale_pages(max_age_days=STALE_WIKI_AGE_DAYS)
     unused_pages = wiki.list_unused_pages(days=UNUSED_WIKI_DAYS)
-    article_coverage = wiki_article_backfill.reference_coverage(pages)
     source_section = _summarize_source_health(source_health, stale_rows, recent_events)
     source_section["recent"]["sampled"] = bool(dry_run)
     source_section["recent"]["sample_limit"] = RECENT_EVENT_SAMPLE_LIMIT if dry_run else None
     wiki_section = _summarize_wiki_health(pages, stats_data, lint_data, stale_pages, unused_pages)
     curation_section = _summarize_curation_health(pages)
     news_label_section = _summarize_news_label_health()
+    source_pipeline_section = _summarize_source_pipeline_health()
     recommendations = _recommendations(
-        source_section,
-        wiki_section,
-        curation_section,
-        news_label_section,
-        article_coverage,
+        source_section, wiki_section, curation_section, news_label_section, source_pipeline_section
     )
     overall_status = "attention" if any(
         int(rec.get("priority") or 0) > 0 for rec in recommendations
@@ -558,11 +759,12 @@ def build_pipeline_health_report(*, dry_run: bool = False) -> dict[str, Any]:
         "source_health": source_section,
         "wiki_health": wiki_section,
         "curation_health": curation_section,
-        "article_coverage": article_coverage,
         "news_label_health": news_label_section,
+        "source_pipeline_health": source_pipeline_section,
         "overall": {
             "status": overall_status,
             "news_labels": news_label_section,
+            "source_pipeline": source_pipeline_section["status"],
         },
         "evidence_usage": usage,
         "recommendations": recommendations,
@@ -573,7 +775,6 @@ def format_pipeline_health_report(report: dict[str, Any]) -> str:
     source_section = report.get("source_health") or {}
     wiki_section = report.get("wiki_health") or {}
     curation_section = report.get("curation_health") or {}
-    article_coverage = report.get("article_coverage") or {}
     overall = source_section.get("overall") or {}
     pipeline_overall = report.get("overall") or {}
     news_labels_section = report.get("news_label_health") or pipeline_overall.get("news_labels") or {}
@@ -596,14 +797,10 @@ def format_pipeline_health_report(report: dict[str, Any]) -> str:
     lines.append(
         f"큐레이션: source_digest {curation_section.get('source_digest_count', 0)} · "
         f"linked {curation_section.get('source_digest_linked_count', 0)} · "
-        f"unlinked {curation_section.get('source_digest_unlinked_count', 0)}"
-    )
-    lines.append(
-        f"근거 원문: URL {article_coverage.get('url_count', 0)} · "
-        f"ready {article_coverage.get('ready_count', 0)} · "
-        f"blocked {article_coverage.get('blocked_count', 0)} · "
-        f"unavailable {article_coverage.get('unavailable_count', 0)} · "
-        f"미해결 {article_coverage.get('unresolved_count', 0)}"
+        f"unlinked {curation_section.get('source_digest_unlinked_count', 0)} · "
+        f"actionable {curation_section.get('actionable_unlinked_count', 0)} · "
+        f"pending {curation_section.get('distillation_pending_count', 0)} · "
+        f"intentional-skip {curation_section.get('intentional_skip_count', 0)}"
     )
     lines.append(
         f"상태: reviewed {status_counts.get('reviewed', 0)} · stable {status_counts.get('stable', 0)} · "
@@ -618,6 +815,12 @@ def format_pipeline_health_report(report: dict[str, Any]) -> str:
         )
     else:
         lines.append("뉴스 LLM 라벨: no_data · 라벨 파일이 비어 있음")
+    pipeline_section = report.get("source_pipeline_health") or {}
+    if pipeline_section:
+        lines.append(
+            f"원문 파이프라인: {pipeline_section.get('status', 'unknown')}"
+            + "".join(f"\n- {reason}" for reason in (pipeline_section.get("reasons") or [])[:5])
+        )
     lines.append("")
     lines.append("권장 액션:")
     for rec in (report.get("recommendations") or [])[:5]:

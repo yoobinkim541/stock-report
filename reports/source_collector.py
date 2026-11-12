@@ -107,6 +107,16 @@ WORLD_GOV_BOND_COUNTRIES = {
 # 뉴스 텔레그램 채널 — env 로 교체 가능(죽은 채널 무배포 교체): STOCK_COLLECTOR_TG_CHANNELS=a,b
 TELEGRAM_NEWS_CHANNELS = [c.strip().lstrip("@") for c in os.getenv(
     "STOCK_COLLECTOR_TG_CHANNELS", "yuzukinaok1,insidertracking").split(",") if c.strip()]
+
+# 공개 RSS만. 로그인·페이월 우회 없음. 피드 하나가 죽어도 나머지는 수집한다.
+NEWS_RSS_FEEDS = (
+    ("fed", "https://www.federalreserve.gov/feeds/press_all.xml", "연준"),
+    ("cnbc", "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100003114", "CNBC"),
+    ("mk", "https://www.mk.co.kr/rss/30000001/", "매일경제"),
+    ("hankyung", "https://www.hankyung.com/feed/finance", "한국경제"),
+    ("yonhap", "https://www.yna.co.kr/rss/economy.xml", "연합뉴스"),
+    ("sec", "https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=8-K&company=&dateb=&owner=include&start=0&count=15&output=atom", "SEC 8-K"),
+)
 NEWS_THEME_KEYWORDS = {
     "중동/전쟁": ("이스라엘", "이란", "가자", "하마스", "우크라이나", "러시아", "전쟁", "군", "미사일", "핵"),
     "금리/채권": ("금리", "국채", "채권", "연준", "fed", "treasury", "yield"),
@@ -121,6 +131,7 @@ SOURCE_CLASSIFICATION = {
     "saveticker_report_pdf": {"family": "report", "kind": "report", "trust": "B", "horizon": "1w"},
     "arca": {"family": "community", "kind": "community_signal", "trust": "C", "horizon": "intraday"},
     "telegram": {"family": "community", "kind": "community_signal", "trust": "C", "horizon": "intraday"},
+    "rss": {"family": "news", "kind": "headline", "trust": "B", "horizon": "1d"},
     "polymarket": {"family": "prediction_market", "kind": "prediction_market", "trust": "B", "horizon": "intraday"},
     "kalshi": {"family": "prediction_market", "kind": "prediction_market", "trust": "B", "horizon": "intraday"},
     "economic_calendar": {"family": "macro_data", "kind": "economic_calendar", "trust": "B", "horizon": "1w"},
@@ -221,6 +232,8 @@ def _classify_event(event: dict) -> dict:
     if not topic:
         if root.startswith("telegram"):
             topic = "텔레그램"
+        elif root == "rss":
+            topic = labels[0] if labels else "뉴스"
         elif root == "arca":
             topic = category or "아카"
         elif root == "polymarket":
@@ -1163,6 +1176,102 @@ def fetch_telegram_channel_events(channels: list[str] = TELEGRAM_NEWS_CHANNELS) 
             })
     return [_classify_event(event) for event in events]
 
+
+def _xml_local(tag: str) -> str:
+    return str(tag or "").rsplit("}", 1)[-1]
+
+
+def _xml_child_text(node, names: set[str]) -> str:
+    for child in list(node):
+        if _xml_local(child.tag) not in names:
+            continue
+        href = child.get("href") if hasattr(child, "get") else None
+        if href:
+            return str(href).strip()
+        text = "".join(child.itertext()).strip()
+        if text:
+            return text
+    return ""
+
+
+def rss_items_from_xml(xml_text: str, *, limit: int = 12) -> list[dict]:
+    """RSS 2.0 item 과 Atom entry 를 {title, url, body, published_at} 로 푼다."""
+    import xml.etree.ElementTree as ET
+
+    text = (xml_text or "").lstrip("\ufeff")
+    if text.startswith("ï»¿"):
+        text = text[3:]
+    text = text.strip()
+    start = min((i for i in (text.find("<?xml"), text.find("<rss"), text.find("<feed")) if i >= 0), default=-1)
+    if start > 0:
+        text = text[start:]
+    if not text:
+        return []
+    root = ET.fromstring(text)
+    items = []
+    for node in root.iter():
+        kind = _xml_local(node.tag)
+        if kind not in {"item", "entry"}:
+            continue
+        title = html_mod.unescape(re.sub(r"<[^>]+>", " ", _xml_child_text(node, {"title"})))
+        title = " ".join(title.split())
+        if not title:
+            continue
+        url = _xml_child_text(node, {"link"})
+        body = html_mod.unescape(re.sub(
+            r"<[^>]+>", " ", _xml_child_text(node, {"description", "summary", "content"})))
+        body = " ".join(body.split())
+        published = _xml_child_text(node, {"pubDate", "published", "updated", "date"})
+        items.append({
+            "title": title[:180],
+            "url": url,
+            "body": (body or title)[:1500],
+            "published_at": published,
+        })
+        if len(items) >= limit:
+            break
+    return items
+
+
+def fetch_news_rss_events(feeds=NEWS_RSS_FEEDS) -> list[dict]:
+    """공개 통신·공시 RSS. 피드 실패는 그 피드만 남기고 나머지는 반환한다."""
+    events = []
+    errors = []
+    for key, url, label in feeds:
+        source = f"rss:{key}"
+        try:
+            resp = _bounded_get(url, timeout=8, headers=PLAIN_HEADERS)
+            payload = getattr(resp, "_content", None)
+            xml_text = payload.decode("utf-8-sig", errors="replace") if isinstance(payload, bytes) else resp.text
+            items = rss_items_from_xml(xml_text)
+        except Exception as exc:
+            errors.append(f"{source} {type(exc).__name__}")
+            _note_error(source, exc)
+            logger.warning("rss:%s 수집 실패: %s", key, exc)
+            continue
+        if not items:
+            errors.append(f"{source} empty")
+            _note_error(source, "RSS 항목 0건")
+            continue
+        _LAST_ERRORS.pop(source, None)
+        for item in items:
+            events.append({
+                "source": source,
+                "source_url": url,
+                "title": item["title"],
+                "url": item["url"],
+                "published_at": item["published_at"],
+                "body_raw": item["body"],
+                "body": item["body"],
+                "body_excerpt": item["body"][:500],
+                "tags": [label],
+                "tickers": _extract_tickers(f"{item['title']} {item['body']}"),
+            })
+    if errors and not events:
+        raise RuntimeError("RSS fetch failed: " + "; ".join(errors[:4]))
+    return [_classify_event(event) for event in events]
+
+
 def _pct(current: float | None, base: float | None) -> float | None:
     if current is None or base is None or base <= 0:
         return None
@@ -1733,6 +1842,9 @@ SOURCE_STALE_HOURS = {
     "saveticker": 3,
     "arca": 24,
     "telegram:*": 12,
+    "rss:fed": 96,
+    "rss:sec": 72,
+    "rss:*": 36,
     "yahoo_finance": 24,
     "fred": 72,
     "worldgovernmentbonds": 72,
@@ -1746,6 +1858,7 @@ def expected_sources() -> list[str]:
     """수집기가 시도해야 하는 소스 전체 (텔레그램은 채널별 분리 — 채널 단위 공백 감지)."""
     return (["saveticker", "arca"]
             + [f"telegram:{c}" for c in TELEGRAM_NEWS_CHANNELS]
+            + [f"rss:{key}" for key, _url, _label in NEWS_RSS_FEEDS]
             + ["yahoo_finance", "fred", "worldgovernmentbonds", "polymarket", "kalshi", "economic_calendar"])
 
 
@@ -1952,6 +2065,14 @@ def collect_once(cache_dir: Path | str = DEFAULT_CACHE_DIR, now: datetime | None
             tuple(f"telegram:{channel}" for channel in TELEGRAM_NEWS_CHANNELS),
             "news",
             fetch_telegram_channel_events,
+            retries=1,
+        ),
+        ProviderSpec(
+            "news_rss",
+            tuple(f"rss:{key}" for key, _url, _label in NEWS_RSS_FEEDS),
+            "news",
+            fetch_news_rss_events,
+            timeout_seconds=45,
             retries=1,
         ),
         ProviderSpec("yahoo_finance", ("yahoo_finance",), "market", fetch_market_snapshot_events, retries=1, mutable=True),
