@@ -9,7 +9,7 @@ import streamlit as st
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from dashboard import cached, charts, data, theme
+from dashboard import cached, charts, data, theme, ui_actions
 
 _NOBAR = {"displayModeBar": False}
 _FAC_LABEL = {"mkt": "시장β(QQQ)", "rate": "금리β(TLT)"}
@@ -17,7 +17,7 @@ _FAC_LABEL = {"mkt": "시장β(QQQ)", "rate": "금리β(TLT)"}
 
 def render():
     st.title("💼 포트폴리오")
-    st.caption("USD 해외북 · 표시 전용 · 배분 변경 아님 · 실계좌 주문 없음")
+    st.caption("달러 해외 장부 · 표시 전용 · 배분 변경 아님 · 실계좌 주문 없음")
 
     hist = cached.port_history()
     rows = cached.holdings()
@@ -33,7 +33,7 @@ def render():
 
     with st.expander("리스크 전체 리포트 (텍스트)"):
         st.code(cached.risk(), language=None)
-    st.caption("과거 실현 기반 · 미래 보장 아님 · 국내 제외(USD북)")
+    st.caption("과거 실현 기반 · 미래 보장 아님 · 국내 제외(달러 장부)")
 
 
 def _headline(hist, rows, summary=None):
@@ -80,7 +80,7 @@ def _risk_section():
         st.warning("리스크 분석 불가: 데이터 부족")
         return
     if s.get("error"):
-        st.warning(f"리스크 분석 불가: {s['error']}")
+        st.warning(ui_actions.user_message(s.get("error"), "리스크 분석 불가: 데이터 부족"))
         return
     lev = s.get("leverage") or {}
     rec = lev.get("recommend")
@@ -90,7 +90,7 @@ def _risk_section():
                 help=f"실보유 {s.get('n_assets', 0)} 중 분산 유효치(참여비 HHI 역수)")
     a[2].metric("추정 MDD", data.f_frac_pct(s.get("mdd_est")))
     a[3].metric("권장 레버리지", f"{rec:.2f}×" if rec else "—",
-                help="낙폭예산 상한(robust·μ가정 무관) · 표시 전용")
+                help="낙폭예산 상한(견고·수익률 가정 무관) · 표시 전용")
 
     col1, col2 = st.columns(2)
     contribs = s.get("contributions") or []
@@ -111,9 +111,11 @@ def _risk_section():
             _fig.update_layout(height=_h)                    # 좌측 기여도와 같은 높이
             st.plotly_chart(_fig, width="stretch", config=_NOBAR)
             _mkt = fn.get("mkt")
+            n_assets = int(s.get("n_assets") or 0)
+            holdings = f"개별 {n_assets}종목이어도 " if n_assets else ""
             st.caption(
                 f"β = 지난 1년 일수익률 회귀. **시장β {_mkt:+.2f}** = QQQ 가 1% 움직일 때 "
-                f"포트가 평균 {abs(_mkt):.1f}% 동행 — 개별 9종목이어도 시장 관점 실효 노출은 "
+                f"포트가 평균 {abs(_mkt):.1f}% 동행 — {holdings}시장 관점 실효 노출은 "
                 f"이 한 숫자로 요약 (1보다 낮음 = SGOV·QQQI 완충이 작동 중). "
                 f"**금리β {fn.get('rate', 0):+.2f}** ≈ 금리 변화에 사실상 중립. "
                 + (s.get("factor_caveat") or "과거 실현 기반 — 미래 보장 아님")
@@ -122,7 +124,7 @@ def _risk_section():
     kh = lev.get("kelly_half") or {}
     if kh:
         st.caption(
-            f"½Kelly 밴드 — 보수 {data.f_ratio(kh.get('conservative'), 2)}× · "
+            f"켈리 절반 밴드 — 보수 {data.f_ratio(kh.get('conservative'), 2)}× · "
             f"중립 {data.f_ratio(kh.get('moderate'), 2)}× · 추세 {data.f_ratio(kh.get('trailing'), 2)}× "
             f"· 낙폭예산 상한 {data.f_ratio(lev.get('dd_cap'), 2)}× "
             f"(현재 {data.f_ratio(lev.get('current'), 2)}×)")
@@ -131,12 +133,12 @@ def _risk_section():
     try:
         t3 = cached.tier3_gate()
         if t3.get("available"):
-            state = (f"**GO ×{t3.get('reco_lev'):.2f}**" + ("" if t3.get("fresh") else " (stale)")
+            state = (f"**통과 ×{t3.get('reco_lev'):.2f}**" + ("" if t3.get("fresh") else " (오래됨)")
                      + f" · {t3.get('at', '')}")
         else:
-            state = "미기록 — 게이트 NO-GO/평가 대기 또는 `ADAPTIVE_LEVERAGE_ENABLED` off"
-        st.caption(f"🏗️ Tier3 구조적 레버리지 게이트: {state} · "
-                   f"US 모의 슬리브 {'✅ ON' if t3.get('sleeve_env') else 'off'} — 실계좌 자동집행 없음(수동)")
+            state = "미기록 — 게이트 불가/평가 대기 또는 레버리지 학습이 꺼져 있습니다"
+        st.caption(f"🏗️ 구조 레버 게이트: {state} · "
+                   f"미국 모의 슬리브 {'✅ 켜짐' if t3.get('sleeve_env') else '꺼짐'} — 실계좌 자동집행 없음(수동)")
     except Exception:
         pass
 
@@ -204,6 +206,7 @@ def _exposure_section(rows):
 def _holdings_table(rows):
     """보유 상세 — 평단·현재가·손익 색·비중 바 · 행 클릭 → 종목 분석."""
     if not rows:
+        st.info("보유 데이터가 없습니다. 잔고를 동기화한 뒤 다시 열어 주세요.")
         return
     st.markdown("##### 📋 보유 상세 — 행 클릭 = 종목 분석")
     from datetime import date as _date
@@ -246,7 +249,7 @@ def _holdings_table(rows):
         column_config={
             "종목": st.column_config.TextColumn(width="medium", pinned=True),
             "실적": st.column_config.TextColumn(width="small",
-                                                help="다음 실적 발표까지 D-일 (yfinance)"),
+                                                help="다음 실적 발표까지 남은 일수"),
             "주수": st.column_config.NumberColumn(format="%.4f"),
             "평단": st.column_config.NumberColumn(format="$%.2f"),
             "현재가": st.column_config.NumberColumn(format="$%.2f"),
@@ -260,10 +263,19 @@ def _holdings_table(rows):
     except Exception:
         sel = []
     if sel and sel[0] < len(rows):
-        st.session_state["ticker"] = rows[sel[0]]["ticker"]
-        pg = st.session_state.get("_ticker_page")
-        if pg:
-            st.switch_page(pg)
+        ui_actions.open_ticker(rows[sel[0]]["ticker"],
+                               toast=f"종목 분석 → {rows[sel[0]]['ticker']}")
+    st.caption("행을 누르면 종목 분석으로 이동합니다")
+
+
+
+def _krw_cell(value) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "—"
+    return f"₩{number:,.0f}"
+
 
 
 def _kr_section():
@@ -279,17 +291,27 @@ def _kr_section():
     k2.metric("예수금", f"₩{kr.get('cash', 0):,.0f}")
     with k3:
         if kr["rows"]:
-            st.dataframe(pd.DataFrame([{
-                "종목": r["display"], "주수": r["shares"], "평단": r["avg"],
-                "현재가": r["cur"], "평가액": r["value"], "손익%": r["ret"],
-            } for r in kr["rows"]]), hide_index=True, width="stretch",
-                height=min(250, 44 + 35 * len(kr["rows"])),
+            kdf_rows = kr["rows"]
+            kev = st.dataframe(pd.DataFrame([{
+                "종목": r["display"], "주수": r["shares"],
+                "평단": _krw_cell(r["avg"]),
+                "현재가": _krw_cell(r["cur"]),
+                "평가액": _krw_cell(r["value"]),
+                "손익%": r["ret"],
+            } for r in kdf_rows]), hide_index=True, width="stretch",
+                height=min(250, 44 + 35 * len(kdf_rows)),
+                on_select="rerun", selection_mode="single-row", key="_pf_kr_tbl",
                 column_config={
-                    "평단": st.column_config.NumberColumn(format="localized"),
-                    "현재가": st.column_config.NumberColumn(format="localized"),
-                    "평가액": st.column_config.NumberColumn(format="localized"),
                     "손익%": st.column_config.NumberColumn(format="%+.1f%%"),
                 })
+            try:
+                ksel = kev.selection.rows
+            except Exception:
+                ksel = []
+            if ksel and ksel[0] < len(kdf_rows):
+                ui_actions.open_ticker(kdf_rows[ksel[0]]["ticker"],
+                                       toast=f"종목 분석 → {kdf_rows[ksel[0]]['display']}")
+            st.caption("행을 누르면 종목 분석으로 이동합니다")
         else:
             st.caption("보유 종목 없음 — 예수금만 있음")
     st.caption("위 리스크·성장·리밸런스 분석은 **USD 해외북 한정** — 국내북은 잔고 표시만"

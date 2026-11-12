@@ -116,12 +116,16 @@ def compare_bounds_json(main_hist, compare: dict, view_days=None) -> str:
 _TEMPLATE = r"""
 <style>
   /* 표면색 = CSS 변수 — 토스 다크/라이트. #wrap.tn-light 가 부모 테마와 동조 */
-  #wrap { --e-panel:#202027; --e-text:#f9fafb; --e-border:#3c3c47; --e-muted:#8b95a1;
-          --e-xh:#6b7684; --e-bub:#2c2c35; }
+  #wrap { --e-panel:#222b36; --e-text:#f9fafb; --e-border:#333d4b; --e-muted:#8b95a1;
+          --e-xh:#6b7684; --e-bub:#2a3340; }
   #wrap.tn-light { --e-panel:#ffffff; --e-text:#191f28; --e-border:#e5e8eb; --e-muted:#6b7684;
                    --e-xh:#8b95a1; --e-bub:#f2f4f6; }
   #tools { display:flex; gap:6px; align-items:center; flex-wrap:wrap; margin:0 0 6px 2px;
            font:12px Pretendard, -apple-system, sans-serif; }
+  /* 종목 화면 기본은 토스처럼 차트만. 그리기 버튼으로만 도구줄을 연다. 풀뷰(dock)는 좌측 독 유지. */
+  #wrap:not(.dock):not(.show-tools) #tools { display:none; }
+  #wrap.dock #bt-tools, #wrap.compact #bt-tools { display:none; }
+  #bt-tools.on, #wrap.show-tools #bt-tools { border-color:#3182f6; color:#3182f6; background:rgba(49,130,246,.10); }
   .tbtn { box-sizing:border-box; background:var(--e-panel); color:var(--e-text); border:1px solid var(--e-border); border-radius:10px;
           padding:4px 10px; font:12px Pretendard, -apple-system, sans-serif; cursor:pointer;
           line-height:1.5; white-space:nowrap; }
@@ -165,6 +169,7 @@ _TEMPLATE = r"""
   }
 </style>
 <div id="wrap">
+<button id="bt-tools" class="tbtn" type="button" title="그리기 도구">그리기</button>
 <div id="tools">
   <button id="bt-mag" class="tbtn on" title="그리기·편집 시 봉의 시가/고가/저가/종가에 착 붙음">🧲 자석</button>
   <button id="bt-hline" class="tbtn" title="차트에 짧게 긋기 = 시작점 가격 수평선">─ 수평선</button>
@@ -222,7 +227,7 @@ _TEMPLATE = r"""
 (function() {
   if (typeof Plotly === "undefined") {
     document.getElementById("chart").innerHTML =
-      "<div style='color:#9198a6;padding:20px'>plotly.js CDN 로드 실패 — 📐 팝오버의 '구형 렌더러'를 켜세요</div>";
+      "<div style='color:#9198a6;padding:20px'>차트를 불러오지 못했습니다. 지표 메뉴에서 구형 렌더러를 켜세요</div>";
     return;
   }
   const fig = @@FIG@@;
@@ -248,6 +253,10 @@ _TEMPLATE = r"""
   const crosshairKey = @@CROSSHAIR_KEY@@;        // 멀티 iframe 크로스헤어 동기화 키
   const rangeSyncKey = @@RANGE_SYNC_KEY@@;       // 멀티 iframe 보이는 시간 범위 동기화 키
   const chartNonce = Math.random().toString(36).slice(2);
+  const toolsBtn = document.getElementById("bt-tools");
+  if (toolsBtn) toolsBtn.addEventListener("click", () => {
+    document.getElementById("wrap").classList.toggle("show-tools");
+  });
   if (@@COMPACT@@) document.getElementById("wrap").classList.add("compact");
   if (@@DOCK@@) {
     const wrap = document.getElementById("wrap");
@@ -564,14 +573,18 @@ _TEMPLATE = r"""
         // 서버가 만든 categoryarray 는 지역 타임존 오프셋 문자열이라 포맷이 안 맞아
         // Plotly 가 못 찾고 화살표가 엉뚱한 위치로 튄다(감사 2026-08-25). rangeMsToAxis
         // 가 category 축이면 정수 봉 인덱스·아니면 기존 ISOString 을 주므로 그대로 재사용.
-        upd[`annotations[${i}].x`] = rangeMsToAxis(hiT);
-        upd[`annotations[${i}].y`] = toY(hi);
-        upd[`annotations[${i}].text`] = `${fmt(hi)} (${pct(hi) > 0 ? "+" : ""}${pct(hi)}%)`;
+        const x = rangeMsToAxis(hiT), y = toY(hi);
+        const text = `${fmt(hi)} (${pct(hi) > 0 ? "+" : ""}${pct(hi)}%)`;
+        if (anns[i].x !== x) upd[`annotations[${i}].x`] = x;
+        if (anns[i].y !== y) upd[`annotations[${i}].y`] = y;
+        if (anns[i].text !== text) upd[`annotations[${i}].text`] = text;
       }
       if (anns[i].name === "tn-lo") {
-        upd[`annotations[${i}].x`] = rangeMsToAxis(loT);
-        upd[`annotations[${i}].y`] = toY(lo);
-        upd[`annotations[${i}].text`] = `${fmt(lo)} (+${pct(lo)}%)`.replace("(+-", "(-");
+        const x = rangeMsToAxis(loT), y = toY(lo);
+        const text = `${fmt(lo)} (+${pct(lo)}%)`.replace("(+-", "(-");
+        if (anns[i].x !== x) upd[`annotations[${i}].x`] = x;
+        if (anns[i].y !== y) upd[`annotations[${i}].y`] = y;
+        if (anns[i].text !== text) upd[`annotations[${i}].text`] = text;
       }
     }
   }
@@ -588,7 +601,7 @@ _TEMPLATE = r"""
     const xr = curXRangeMs();
     if (!xr) return;
     const x0 = xr[0], x1 = xr[1];
-    setTarget(x0, x1);                           // y 는 lerp 루프가 수렴
+    setTarget(x0, x1);                           // y는 제스처 종료 후 한 번 맞춘다
     saveView(rawXr);                             // 뷰 위치 유지(60s 규칙) — 원문 저장
     const upd = {};
     callouts(x0, x1, upd);                       // 무거운 주석 갱신은 여기서만
@@ -784,7 +797,7 @@ _TEMPLATE = r"""
     }
     const prevC = idx > 0 ? bounds[idx - 1][5] : b[4];
     const chg = prevC ? ((b[5] / prevC - 1) * 100) : 0;
-    const col = b[5] >= b[4] ? "#26a69a" : "#ef5350";
+    const col = b[5] >= b[4] ? "#f04452" : "#3182f6";
     const vol = b[3] >= 1e6 ? (b[3] / 1e6).toFixed(1) + "M" : Math.round(b[3]).toLocaleString();
     ohlcEl.innerHTML = `시 ${f(b[4])} 고 ${f(b[2])} 저 ${f(b[1])} ` +
       `종 <b style="color:${col}">${f(b[5])}</b> ` +
@@ -2182,9 +2195,7 @@ def pannable_chart_html(fig, hist, *, height: int = 460, view_days=None,
             category_x = False
     bounds = bounds_json if bounds_json is not None else price_bounds_json(hist)
     config = json.dumps({
-        "scrollZoom": True, "displaylogo": False,   # 모드바 = hover 시만 (기본) — 상시 노출 제거
-        "modeBarButtonsToRemove": ["select2d", "lasso2d"],
-        "modeBarButtonsToAdd": ["drawline", "drawopenpath", "drawrect", "eraseshape"],
+        "scrollZoom": True, "displaylogo": False, "displayModeBar": False,
     })
     try:
         last_close = float(hist["Close"].iloc[-1])

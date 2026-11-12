@@ -8,7 +8,7 @@ from __future__ import annotations
 import streamlit as st
 
 from dashboard import data, views
-from ohlc_utils import normalize_ohlc_frame
+from ohlc_utils import normalize_ohlc_frame, repair_display_ohlc
 
 _TTL = 900       # 15분
 _TTL_SLOW = 1800  # 30분
@@ -160,8 +160,8 @@ wiki_context.clear = _wiki_context_cached.clear
 
 
 @st.cache_data(ttl=900, show_spinner=False)
-def social_sentiment():
-    return views.social_sentiment()
+def social_sentiment(hours: int = 72):
+    return views.social_sentiment(hours)
 
 
 @st.cache_data(ttl=_TTL, show_spinner=False)
@@ -241,8 +241,8 @@ def risk_struct():
 
 
 @st.cache_data(ttl=_TTL_SLOW, show_spinner="불러오는 중…")
-def econ(days=14):
-    return views.econ_events(days)
+def econ(days=14, start: str | None = None):
+    return views.econ_events(days, start)
 
 
 @st.cache_data(ttl=_TTL_HEAVY, show_spinner="랭킹 계산 중… (최대 1분)")
@@ -334,7 +334,7 @@ def ohlc(t, period="6mo"):
     except Exception:
         df = None
     if df is not None and not getattr(df, "empty", True):
-        df = _fill_stale_last_close(t, df)
+        df = repair_display_ohlc(_fill_stale_last_close(t, df))
         try:                                       # 성공 — 마지막 정상 데이터 디스크 백업
             p = _ohlc_disk_path(t, period)
             p.parent.mkdir(parents=True, exist_ok=True)
@@ -346,7 +346,7 @@ def ohlc(t, period="6mo"):
         p = _ohlc_disk_path(t, period)
         if p.exists():
             import pandas as pd
-            return normalize_ohlc_frame(pd.read_parquet(p))
+            return repair_display_ohlc(normalize_ohlc_frame(pd.read_parquet(p)))
     except Exception:
         pass
     return df

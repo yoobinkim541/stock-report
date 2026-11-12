@@ -10,9 +10,11 @@ from datetime import timedelta
 from dashboard import theme
 from ohlc_utils import normalize_ohlc_frame, normalize_time_series
 
-# 팔레트 단일 진실원 = theme (TradingView Terminal Noir). 테스트가 _GREEN/_RED 참조.
+# 팔레트 단일 진실원 = theme. _GREEN/_RED 는 판단·beat. 캔들 등락은 UP/DOWN.
 _GREEN = theme.GREEN
 _RED = theme.RED
+_UP = theme.UP
+_DOWN = theme.DOWN
 _BLUE = theme.BLUE
 _GRID = theme.AXIS_GRID
 
@@ -48,10 +50,8 @@ def _pannable(fig, *, rangeslider: bool = True, height: int = 360, rangebreaks=N
 
 
 def _market_from_ticker(ticker: str) -> str:
-    t = str(ticker or "").strip().upper()
-    if t.endswith((".KS", ".KQ")) or (t.isdigit() and len(t) == 6):
-        return "KR"
-    return "US"
+    import ticker_names
+    return "KR" if ticker_names.is_kr_listing(ticker) else "US"
 
 
 def _trading_rangebreaks(index, ticker: str = "") -> list[dict]:
@@ -416,8 +416,8 @@ def price_candle(hist, ticker: str = "", avg_cost=None, trades=None, view_days=N
         return _t(fig)
     fig.add_trace(go.Candlestick(
         x=hist.index, open=hist["Open"], high=hist["High"], low=hist["Low"], close=hist["Close"],
-        name=ticker or "OHLC", increasing_line_color=_GREEN, decreasing_line_color=_RED,
-        increasing_fillcolor=_GREEN, decreasing_fillcolor=_RED, line=dict(width=1)))
+        name=ticker or "OHLC", increasing_line_color=_UP, decreasing_line_color=_DOWN,
+        increasing_fillcolor=_UP, decreasing_fillcolor=_DOWN, line=dict(width=1)))
     close = hist["Close"]
     for win in (20, 60):
         if len(close) >= win:
@@ -528,7 +528,8 @@ def signed_bars(labels: list[str], values: list[float], title: str = ""):
     return _t(fig)
 
 
-def bullet_bands(price: float, rows: list, x_title: str = "적정가 ($)", height: int = 160):
+def bullet_bands(price: float, rows: list, x_title: str = "적정가 ($)", height: int = 160,
+                 currency: str = "$"):
     """현재가 vs 적정가 밴드(범용 수평 불릿) — rows=[(라벨, lo, mid, hi)]."""
     go = _go()
     fig = go.Figure()
@@ -541,7 +542,7 @@ def bullet_bands(price: float, rows: list, x_title: str = "적정가 ($)", heigh
                                  marker=dict(color=_BLUE, size=12), showlegend=False))
     if price:
         fig.add_vline(x=price, line=dict(color=_RED, dash="dash"),
-                      annotation_text=f"현재 ${price:,.0f}")
+                      annotation_text=f"현재 {currency}{price:,.0f}")
     fig.update_layout(margin=dict(t=24, b=10, l=10, r=10), height=height,
                       xaxis_title=x_title)
     return _t(fig)
@@ -581,7 +582,7 @@ def equity_curve(equity):
                 fig.add_trace(go.Scatter(y=equity[col], name=str(col)))
         else:
             s = pd.Series(equity)
-            fig.add_trace(go.Scatter(y=s, name="equity", line=dict(color=_BLUE)))
+            fig.add_trace(go.Scatter(y=s, name="순자산", line=dict(color=_BLUE)))
     except Exception:
         pass
     fig.update_layout(margin=dict(t=10, b=10, l=10, r=10), height=300,
@@ -600,10 +601,10 @@ def nav_curve(points: list[dict], currency: str = "₩"):
     navs = [float(p["nav"]) for p in pts]
     up = navs[-1] >= navs[0]
     color = _GREEN if up else _RED
-    fig.add_trace(go.Scatter(x=dates, y=navs, name="NAV", mode="lines",
+    fig.add_trace(go.Scatter(x=dates, y=navs, name="순자산", mode="lines",
                              line=dict(color=color, width=2), fill="tozeroy",
                              fillcolor=("rgba(52,211,153,0.08)" if up else "rgba(248,113,113,0.08)"),
-                             hovertemplate="%{x}<br>NAV " + currency + "%{y:,.0f}<extra></extra>"))
+                             hovertemplate="%{x}<br>순자산 " + currency + "%{y:,.0f}<extra></extra>"))
     fig.add_hline(y=navs[0], line=dict(color=theme.AXIS_TEXT, dash="dash", width=1),
                   annotation_text="인셉션", annotation_position="top left",
                   annotation_font=dict(color=theme.AXIS_TEXT, size=11))
@@ -661,8 +662,8 @@ def intraday_candle(hist, ticker: str = "", trades=None, vwap=None,
     fig.add_trace(go.Candlestick(
         x=plot_hist.index, open=plot_hist["Open"], high=plot_hist["High"], low=plot_hist["Low"],
         close=plot_hist["Close"],
-        name=ticker or "OHLC", increasing_line_color=_GREEN, decreasing_line_color=_RED,
-        increasing_fillcolor=_GREEN, decreasing_fillcolor=_RED, line=dict(width=1)))
+        name=ticker or "OHLC", increasing_line_color=_UP, decreasing_line_color=_DOWN,
+        increasing_fillcolor=_UP, decreasing_fillcolor=_DOWN, line=dict(width=1)))
     if vwap is not None and len(vwap) == len(hist):
         fig.add_trace(go.Scatter(x=hist.index, y=list(vwap), name="VWAP",
                                  line=dict(color="#f59e0b", width=1.4, dash="dot")))
@@ -765,8 +766,8 @@ def _rsi_series(close, n: int = 14):
     return 100 - 100 / (1 + rs)
 
 
-_MA_COLORS = {5: "#e879f9", 10: "#22d3ee", 20: "#f59e0b", 60: "#9333ea",
-              120: "#34d399", 200: "#f43f5e"}
+_MA_COLORS = {5: "#7aa7f7", 10: "#4e5968", 20: "#f59e0b", 60: "#3182f6",
+              120: "#8b95a1", 200: "#f04452"}
 _CMP_COLORS = ["#f59e0b", "#e879f9", "#22d3ee"]   # 비교 종목 팔레트 (메인=BLUE)
 
 
@@ -899,7 +900,7 @@ def _add_entry_zones(fig, zones, panes) -> None:
             continue
         if hi <= lo * 1.0005:                       # 점 존 → 얇은 밴드로 시각화
             lo, hi = lo * 0.9985, hi * 1.0015
-        fig.add_hrect(y0=lo, y1=hi, fillcolor="rgba(41,98,255,0.10)", line_width=0, **kw)
+        fig.add_hrect(y0=lo, y1=hi, fillcolor="rgba(49,130,246,0.10)", line_width=0, **kw)
         fig.add_annotation(xref="x domain", x=0.004, y=(lo + hi) / 2, yref="y",
                            xanchor="left", showarrow=False,
                            text=z.get("label", ""), font=dict(size=9, color="#7ea6ff"),
@@ -1169,13 +1170,13 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
             fig.add_trace(go.Candlestick(
                 x=hist.index, open=hist["Open"], high=hist["High"], low=hist["Low"],
                 close=close, name=ticker or "OHLC",
-                increasing_line_color=_GREEN, decreasing_line_color=_RED,
-                increasing_fillcolor=_GREEN, decreasing_fillcolor=_RED, line=dict(width=1)))
+                increasing_line_color=_UP, decreasing_line_color=_DOWN,
+                increasing_fillcolor=_UP, decreasing_fillcolor=_DOWN, line=dict(width=1)))
     elif kind == "ohlc" and has_ohlc:
         fig.add_trace(go.Ohlc(
             x=hist.index, open=hist["Open"], high=hist["High"], low=hist["Low"],
             close=close, name=ticker or "OHLC",
-            increasing_line_color=_GREEN, decreasing_line_color=_RED,
+            increasing_line_color=_UP, decreasing_line_color=_DOWN,
             line=dict(width=1)))
     else:
         marker = None
@@ -1291,7 +1292,7 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
             up = (close >= hist["Open"]).values
         else:
             up = (close.diff().fillna(0) >= 0).values
-        vcolors = [_GREEN if u else _RED for u in up]
+        vcolors = [_UP if u else _DOWN for u in up]
         fig.add_trace(go.Bar(x=hist.index, y=vol, name="거래량", showlegend=False,
                              marker=dict(color=vcolors), opacity=0.55),
                       row=vol_row, col=1)

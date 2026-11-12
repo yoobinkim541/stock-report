@@ -78,8 +78,6 @@ def build_answer_references(
         )
         if score > 0:
             ranked_events.append((score, row))
-    if not ranked_events:
-        ranked_events = [(0, row) for row in events[:source_limit]]
     ranked_events.sort(
         key=lambda item: (
             item[0],
@@ -105,7 +103,17 @@ def build_answer_references(
             },
         })
 
-    for report in reports[: max(1, source_limit // 2)]:
+    report_added = 0
+    report_cap = max(1, source_limit // 2)
+    for report in reports:
+        score = _score_reference_text(
+            question_tokens,
+            report.get("title"),
+            report.get("name"),
+            report.get("summary"),
+        )
+        if score <= 0:
+            continue
         source_refs.append({
             "kind": "report",
             "source": "stock-report:report",
@@ -113,12 +121,15 @@ def build_answer_references(
             "summary": _compact_text(report.get("summary") or "", 260),
             "url": "",
             "published_at": report.get("mtime") or "",
-            "reason": "최신 리포트 요약",
+            "reason": "질문과 키워드가 겹치는 리포트",
             "metadata": {
                 "path": report.get("path"),
                 "name": report.get("name"),
             },
         })
+        report_added += 1
+        if report_added >= report_cap:
+            break
 
     return {
         "wiki": wiki_refs,

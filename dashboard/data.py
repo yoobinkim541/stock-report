@@ -13,14 +13,14 @@ _REPO = os.getenv("STOCK_REPORT_PROJECT_DIR") or str(Path(__file__).resolve().pa
 
 # (market_type, phase_key) → (이모지, 라벨, DCA배율)
 _PHASE = {
-    ("bull", "bull2"): ("🫧", "Bull-2 버블", 0.5),
-    ("bull", "bull1"): ("🐂", "Bull-1 강세", 0.8),
-    ("bear", "0"): ("🟢", "0 정상", 1.0),
-    ("bear", "1"): ("🟡", "1 조정", 1.5),
-    ("bear", "2"): ("🟠", "2 중조정", 2.0),
-    ("bear", "3"): ("🔴", "3 심조정", 2.5),
-    ("bear", "4"): ("🚨", "4 급락", 3.0),
-    ("bear", "5"): ("💥", "5 폭락", 5.0),
+    ("bull", "bull2"): ("🫧", "과열", 0.5),
+    ("bull", "bull1"): ("🐂", "강세", 0.8),
+    ("bear", "0"): ("🟢", "정상", 1.0),
+    ("bear", "1"): ("🟡", "조정", 1.5),
+    ("bear", "2"): ("🟠", "중조정", 2.0),
+    ("bear", "3"): ("🔴", "심조정", 2.5),
+    ("bear", "4"): ("🚨", "급락", 3.0),
+    ("bear", "5"): ("💥", "폭락", 5.0),
 }
 
 
@@ -132,6 +132,49 @@ def holding_position(ticker: str, path: str | None = None) -> dict | None:
             return {"shares": h.get("shares", 0) or 0, "avg_price_usd": h.get("avg_price_usd"),
                     "value": h.get("value_usd", 0) or 0, "ret": h.get("return_pct", 0) or 0,
                     "cost": h.get("cost_usd", 0) or 0}
+    return _domestic_position(snap, tu)
+
+
+def _listing_stem(ticker: str) -> str | None:
+    """국내 6자리 코드(005930·0167A0·A005930·.KS/.KQ)만 줄기로 돌려준다."""
+    text = str(ticker or "").strip().upper()
+    if len(text) > 1 and text.startswith("A") and text[1].isdigit():
+        text = text[1:]
+    if text.endswith(".KS") or text.endswith(".KQ"):
+        text = text[:-3]
+    if len(text) != 6 or not text.isalnum() or not any(ch.isdigit() for ch in text):
+        return None
+    return text
+
+
+def _domestic_position(snap: dict, ticker: str) -> dict | None:
+    """국내 스냅샷 보유. 화면은 한국 종목 가격을 원으로 그리므로 평단도 원이다."""
+    want = _listing_stem(ticker)
+    if not want:
+        return None
+    for row in (snap.get("domestic") or {}).get("holdings") or []:
+        if _listing_stem(row.get("ticker")) != want:
+            continue
+        shares = float(row.get("shares") or 0)
+        if shares <= 0:
+            continue
+        avg = row.get("avg_price")
+        try:
+            avg_f = float(avg) if avg is not None else None
+        except (TypeError, ValueError):
+            avg_f = None
+        value = float(row.get("value") or 0)
+        if not value:
+            cur = float(row.get("current_price") or 0)
+            value = shares * cur
+        return {
+            "shares": shares,
+            "avg_price_usd": avg_f,
+            "value": value,
+            "ret": float(row.get("return_pct") or 0),
+            "cost": (avg_f * shares) if avg_f else 0.0,
+            "currency": "KRW",
+        }
     return None
 
 
@@ -159,7 +202,7 @@ def phase_badge(state_path: str | None = None) -> dict:
     except Exception:
         return {"emoji": "⚪", "label": "—", "dca": 1.0, "drawdown": 0.0}
     mt, pk = d.get("market_type", "bear"), str(d.get("phase_key", "0"))
-    emoji, label, dca = _PHASE.get((mt, pk), ("⚪", f"{mt}-{pk}", 1.0))
+    emoji, label, dca = _PHASE.get((mt, pk), ("⚪", "알 수 없음", 1.0))
     return {"emoji": emoji, "label": label, "dca": dca,
             "drawdown": d.get("drawdown_pct", 0) or 0.0}
 
@@ -391,7 +434,7 @@ def valuation_score(price, metrics, consensus=None, intrinsic=None) -> dict | No
             jpb = (roe_k - 0.03) / (0.09 - 0.03)     # 정당 P/B (잔여이익 닫힌해·r9%·g3%)
             if jpb > 0:                              # 실제 < 정당 → 저평가
                 comps.append((0.6, clamp((jpb / pbr_k - 1) / 0.5),
-                              f"P/B {pbr_k:.1f}·ROE {roe_k * 100:.0f}%"))
+                              f"PBR {pbr_k:.1f}·ROE {roe_k * 100:.0f}%"))
     if len(comps) < 2:
         return None
     wsum = sum(w for w, _, _ in comps)
@@ -404,8 +447,8 @@ def valuation_score(price, metrics, consensus=None, intrinsic=None) -> dict | No
 _DRIVER_RULES = [
     ("close_vs_52w_high", lambda v: "52주 고점 근접" if v >= 0.95 else
         (f"고점 -{(1 - v) * 100:.0f}%" if v <= 0.75 else None)),
-    ("mom_126d", lambda v: f"6M 모멘텀 {v * 100:+.0f}%" if abs(v) >= 0.15 else None),
-    ("excess_mom_60d", lambda v: f"QQQ대비 {v * 100:+.1f}%p(60d)" if abs(v) >= 0.03 else None),
+    ("mom_126d", lambda v: f"6개월 모멘텀 {v * 100:+.0f}%" if abs(v) >= 0.15 else None),
+    ("excess_mom_60d", lambda v: f"QQQ 대비 {v * 100:+.1f}%p (60일)" if abs(v) >= 0.03 else None),
     ("rsi_14", lambda v: f"RSI {v:.0f} 과매도" if v <= 35 else
         (f"RSI {v:.0f} 과열" if v >= 70 else None)),
     ("cmf_21", lambda v: "자금 유입(CMF+)" if v >= 0.08 else
@@ -413,7 +456,7 @@ _DRIVER_RULES = [
     ("vol_ratio_20", lambda v: f"거래량 급증 ×{v:.1f}" if v >= 1.5 else None),
     ("golden_cross", lambda v: "골든크로스" if v >= 1 else None),
     ("ichi_above_cloud", lambda v: "일목 구름 위" if v >= 1 else None),
-    ("mom_21d", lambda v: f"1M {v * 100:+.0f}%" if abs(v) >= 0.08 else None),
+    ("mom_21d", lambda v: f"1개월 {v * 100:+.0f}%" if abs(v) >= 0.08 else None),
     ("fund_score", lambda v: f"재무 {v:.0f}점 우수" if v >= 70 else
         (f"재무 {v:.0f}점 취약" if v <= 35 else None)),
 ]
@@ -792,7 +835,7 @@ def market_temperature(*, fear_greed=None, rsi_w=None, per_pctile_20y=None,
         comps.append((1.0, clamp((55.0 - rw) / 30.0), f"주봉 RSI {rw:.0f}"))
     pct = _try_float(per_pctile_20y)
     if pct is not None:
-        comps.append((1.0, clamp((60.0 - pct) / 40.0), f"PER 20y {pct:.0f}%ile"))
+        comps.append((1.0, clamp((60.0 - pct) / 40.0), f"PER 20년 {pct:.0f}백분위"))
     pg = _try_float(peg)
     if pg is not None and pg > 0:
         comps.append((0.7, clamp((1.4 - pg) / 0.9), f"PEG {pg:.2f}"))
@@ -839,65 +882,127 @@ def rank_badge(rank) -> str:
 
 
 def rank_move(rank, prev_rank) -> str:
-    """직전 실행 대비 순위 변동 — ▲n 상승·▼n 하락·〓 유지·NEW 신규 (순수)."""
+    """직전 실행 대비 순위 변동 — ▲n 상승·▼n 하락·〓 유지·신규 (순수)."""
     r = _try_float(rank)
     if r is None:
         return "—"
     p = _try_float(prev_rank)
     if p is None:
-        return "NEW"
+        return "신규"
     d = int(p) - int(r)
     return f"▲{d}" if d > 0 else (f"▼{-d}" if d < 0 else "〓")
 
 
-def entry_levels(price, supports: list, resistances: list, fairs: list) -> dict:
+def reaction_count(close, level: float, band: float) -> int:
+    """가격이 레벨 밴드에 들어왔다가 다시 벗어난 횟수. 한 번 닿고 머무르면 1."""
+    try:
+        vals = [float(v) for v in close if v == v]
+    except Exception:
+        return 0
+    if len(vals) < 3 or band <= 0:
+        return 0
+    hits = 0
+    inside = False
+    for v in vals:
+        now = abs(v - level) <= band
+        if now and not inside:
+            hits += 1
+        inside = now
+    return hits
+
+
+def swing_pivots(low, high, *, left: int = 5, right: int = 2) -> tuple[list[float], list[float]]:
+    """확정된 스윙 저점·고점. right 봉이 지나야 피벗으로 인정한다."""
+    try:
+        lo = [float(v) for v in low]
+        hi = [float(v) for v in high]
+    except Exception:
+        return [], []
+    n = min(len(lo), len(hi))
+    if n < left + right + 1:
+        return [], []
+    lows, highs = [], []
+    for i in range(left, n - right):
+        win_lo = lo[i - left:i + right + 1]
+        win_hi = hi[i - left:i + right + 1]
+        if lo[i] <= min(win_lo):
+            lows.append(lo[i])
+        if hi[i] >= max(win_hi):
+            highs.append(hi[i])
+    return lows, highs
+
+
+def entry_levels(price, supports: list, resistances: list, fairs: list,
+                 cluster_pct: float = 0.015) -> dict:
     """진입 레벨 가이드 조립 (순수) — 기술적 지지/저항 + 밸류 기준가 합성.
 
-    supports/resistances/fairs: [(라벨, 가격)]. 반환:
-    {entries: [(라벨, 가격, 현재가比%)] 현재가 아래 근접순 최대 3 — 분할 진입 후보 레벨,
-     resists: 위쪽 최대 2, fairs: 유효 밸류 기준가+갭, fair_gap_pct: 평균 기준가 대비}
-    **레벨 후보 서술이지 예측/매매신호 아님** — 캡션 정직 병기 전제.
+    supports/resistances/fairs: [(라벨, 가격)] 또는 [(라벨, 가격, 가중치)].
+    가중치가 모두 같으면 현재가 근접순(기존 계약). 반응·합류 가중치가 있으면
+    그 점수가 높은 존을 먼저 고른다.
+    반환 entries/zones 는 최대 3. **레벨 후보 서술이지 예측/매매신호 아님.**
     """
     p = _try_float(price)
     if not p or p <= 0:
         return {}
+    gap_pct = _try_float(cluster_pct) or 0.015
+    gap_pct = min(0.04, max(0.006, float(gap_pct)))
 
     def _pct(v):
         return (v / p - 1) * 100
 
-    # 지지 클러스터링 — 1.5% 이내 재료를 존으로 묶음 (겹침 = 강도·신뢰)
-    raw = sorted(((lab, float(v)) for lab, v in supports
-                  if _try_float(v) and 0 < float(v) < p), key=lambda x: -x[1])
+    def _parse(items, *, below: bool | None):
+        out = []
+        for item in items or []:
+            if not item or len(item) < 2:
+                continue
+            v = _try_float(item[1])
+            w = _try_float(item[2]) if len(item) > 2 else 1.0
+            if not v or v <= 0:
+                continue
+            if below is True and not (v < p):
+                continue
+            if below is False and not (v > p):
+                continue
+            out.append((str(item[0]), float(v), float(w if w and w > 0 else 1.0)))
+        return out
+
+    raw = sorted(_parse(supports, below=True), key=lambda x: -x[1])
     zones = []
-    for lab, v in raw:
-        if zones and (zones[-1]["lo"] / v - 1) < 0.015:
+    for lab, v, w in raw:
+        if zones and (zones[-1]["lo"] / v - 1) < gap_pct:
             z = zones[-1]
             z["lo"] = min(z["lo"], v)
             z["hi"] = max(z["hi"], v)
             z["labels"].append(lab)
+            z["score"] += w
         else:
-            zones.append({"lo": v, "hi": v, "labels": [lab]})
-    ent = []
-    for z in zones[:3]:
-        mid = (z["lo"] + z["hi"]) / 2
-        ent.append((" + ".join(z["labels"][:3]), mid))
-        z["mid"] = mid
+            zones.append({"lo": v, "hi": v, "labels": [lab], "score": w})
+    for z in zones:
+        z["mid"] = (z["lo"] + z["hi"]) / 2
         z["n"] = len(z["labels"])
-    res = sorted(((lab, float(v)) for lab, v in resistances
-                  if _try_float(v) and float(v) > p),
-                 key=lambda x: x[1])[:2]
-    fv = [(lab, float(v)) for lab, v in fairs if _try_float(v) and float(v) > 0]
+        z["dist"] = abs(z["mid"] - p) / p
+    # 10% 안에서는 반응·합류 점수가 단순 근접보다 우선. 그 밖은 가까운 순.
+    # 가중치가 모두 같으면 근접순이 유지된다.
+    for z in zones:
+        z["rank"] = z["score"] / (1.0 + z["dist"] / 0.03)
+    near = [z for z in zones if z["dist"] <= 0.10]
+    far = [z for z in zones if z["dist"] > 0.10]
+    near.sort(key=lambda z: (-z["rank"], z["dist"]))
+    far.sort(key=lambda z: z["dist"])
+    zones = near + far
+    ent = [(" + ".join(z["labels"][:3]), z["mid"]) for z in zones[:3]]
+    res = sorted(_parse(resistances, below=False), key=lambda x: x[1])[:2]
+    fv = _parse(fairs, below=None)
     if not ent and not fv:
         return {}
     gap = None
     if fv:
-        avg = sum(v for _, v in fv) / len(fv)
-        gap = _pct(avg)
+        gap = _pct(sum(v for _, v, _ in fv) / len(fv))
     return {"price": p,
             "entries": [(lab, v, _pct(v)) for lab, v in ent],
             "zones": [{**z, "pct": _pct(z["mid"])} for z in zones[:3]],
-            "resists": [(lab, v, _pct(v)) for lab, v in res],
-            "fairs": [(lab, v, _pct(v)) for lab, v in fv],
+            "resists": [(lab, v, _pct(v)) for lab, v, _ in res],
+            "fairs": [(lab, v, _pct(v)) for lab, v, _ in fv],
             "fair_gap_pct": gap}
 
 
@@ -1002,6 +1107,33 @@ def load_watchlist() -> list[dict]:
             "folder": e.get("folder") or "미분류",
         })
     return rows
+
+
+def add_watchlist_ticker(ticker: str, *, note: str | None = None,
+                        folder: str | None = None) -> tuple[bool, str]:
+    """관심종목 편집기의 입력을 정규화하고 공용 저장소에 추가한다."""
+    import ticker_names
+    from lib import watchlist
+
+    symbol = ticker_names.normalize_input(ticker)
+    if not symbol:
+        return False, "종목 코드 또는 이름을 확인하세요."
+    try:
+        watchlist.add_ticker(symbol, reason="수동 추가", source="dashboard",
+                             note=note, folder=folder)
+    except Exception:
+        return False, "관심종목을 저장하지 못했습니다."
+    return True, symbol
+
+
+def remove_watchlist_ticker(ticker: str) -> bool:
+    """확인된 관심종목 삭제를 공용 저장소에 반영한다."""
+    from lib import watchlist
+
+    try:
+        return watchlist.remove_ticker(ticker)
+    except Exception:
+        return False
 
 
 def is_in_watchlist(ticker: str) -> bool:

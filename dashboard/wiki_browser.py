@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Iterable
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import hashlib
@@ -11,18 +12,41 @@ from typing import Any
 import streamlit as st
 
 from agent_console import wiki as core_wiki
-from dashboard.wiki_mesh import _corpus_fingerprint
+from agent_console.shared_memory import normalize_artifact_refs
+from dashboard import ui_actions
 
 WIKI_SURFACE = "wiki"
 VALID_STATUSES = ("draft", "reviewed", "stable", "archived")
 WIKI_BODY_LIMIT = 12000
 SURFACE_LABELS = {
+    "all": "전체",
     "market": "시장",
     "portfolio": "포트폴리오",
-    "ticker": "티커",
-    "paper": "페이퍼",
-    "lab": "랩",
-    "wiki": "기타",
+    "ticker": "종목",
+    "paper": "모의투자",
+    "lab": "전략랩",
+    "wiki": "위키",
+}
+KIND_LABELS = {
+    "all": "전체",
+    "note": "메모",
+    "playbook": "실행 지침",
+    "decision": "결정",
+    "risk": "리스크",
+    "concept": "개념",
+    "source_digest": "출처 요약",
+}
+STATUS_LABELS = {
+    "all": "전체",
+    "draft": "초안",
+    "reviewed": "검토됨",
+    "stable": "확정",
+    "archived": "보관",
+}
+VERIFY_LABELS = {
+    "source-backed": "출처 확인",
+    "unverified": "미확인",
+    "conversation": "대화",
 }
 # surface / kind 선택 목록의 단일 진실원. 첫 항목 "all" 은 필터 전용이라
 # 편집 UI 는 [1:] 를 쓴다. dashboard/pages/ai_wiki.py 가 여기서 가져간다.
@@ -51,8 +75,10 @@ class WikiPage:
     merge_history: tuple[dict[str, Any], ...] = field(default_factory=tuple)
     merged_into: str = ""
     merge_event_id: str = ""
+    source_knowledge: dict[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
+        source_refs = normalize_artifact_refs(self.source_refs)
         return {
             "id": self.id,
             "title": self.title,
@@ -65,14 +91,15 @@ class WikiPage:
             "confidence": self.confidence,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
-            "source_refs": list(self.source_refs),
+            "source_refs": source_refs,
             "source": dict(self.source),
-            "verification_status": "source-backed" if _has_non_conversation_source_refs(self.source_refs) else "unverified",
+            "verification_status": "source-backed" if _has_non_conversation_source_refs(source_refs) else "unverified",
             "evidence_ids": list(self.evidence_ids),
             "conflicting_evidence_ids": list(self.conflicting_evidence_ids),
             "merge_history": [dict(item) for item in self.merge_history],
             "merged_into": self.merged_into,
             "merge_event_id": self.merge_event_id,
+            "source_knowledge": _public_source_knowledge(self.source_knowledge),
         }
 
 
@@ -131,9 +158,85 @@ def _has_non_conversation_source_refs(refs: Iterable[object]) -> bool:
     return core_wiki.has_non_conversation_source_refs(refs)
 
 
+def option_label(table: dict[str, str], value: str) -> str:
+    key = str(value or "").strip().lower()
+    return table.get(key, value or "기타")
+
+
+
+def display_source_ref(value: object) -> str:
+    """사용자에게 보이는 원문 단서. URL은 유지하고 저장 키는 가린다."""
+    text = str(value or "").strip()
+    if not text:
+        return "출처"
+    lowered = text.lower()
+    if lowered.startswith(("http://", "https://")):
+        return text
+    if lowered.startswith("conversation:"):
+        return "대화"
+    if lowered.startswith("wiki:"):
+        return "위키"
+    if lowered.startswith(("/", "./")) or "\\" in text:
+        return "파일"
+    key = lowered.split(":", 1)[-1].split(":", 1)[0] if lowered.startswith("source:") else lowered.split(":", 1)[0]
+    from dashboard import views
+    label = views.NEWS_SOURCE_LABEL.get(key)
+    if label:
+        return label
+    if any("\uac00" <= ch <= "\ud7a3" for ch in text):
+        return text
+    return "출처"
+
+
+_MERGE_ACTION = {"merge": "병합", "delete": "삭제", "split": "분할"}
+
+
+def merge_action_label(value: object) -> str:
+    key = str(value or "merge").strip().lower()
+    mapped = _MERGE_ACTION.get(key)
+    if mapped:
+        return mapped
+    text = str(value or "").strip()
+    if not text or text.isascii():
+        return "병합"
+    return text
+
+
+def page_display_name(page_id: object, *, lookup=None) -> str:
+    """저장된 페이지 id 대신 제목을 보여 준다. 없으면 다른 문서."""
+    text = str(page_id or "").strip()
+    if not text:
+        return "다른 문서"
+    if any("\uac00" <= ch <= "\ud7a3" for ch in text):
+        return text
+    finder = core_wiki.get_page if lookup is None else lookup
+    try:
+        page = finder(text)
+    except Exception:
+        page = None
+    title = str((page or {}).get("title") or "").strip() if isinstance(page, dict) else ""
+    return title or "다른 문서"
+
+
+def merge_event_caption(event: dict | None, *, lookup=None) -> str:
+    event = event or {}
+    when = str(event.get("occurred_at") or "").strip()
+    action = merge_action_label(event.get("action"))
+    titles = [str(item).strip() for item in (event.get("source_titles") or []) if str(item).strip()]
+    if not titles:
+        titles = [
+            page_display_name(item, lookup=lookup)
+            for item in (event.get("source_ids") or [])
+            if str(item).strip()
+        ]
+    detail = " · ".join(part for part in (when, action) if part)
+    if titles:
+        detail += f" · 원본: {', '.join(titles)}"
+    return detail or "병합"
+
+
 def _surface_label(surface: str) -> str:
-    clean = str(surface or "wiki").strip().lower()
-    return SURFACE_LABELS.get(clean, clean or "기타")
+    return option_label(SURFACE_LABELS, surface)
 
 
 def _group_visible_pages(pages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -217,8 +320,76 @@ def _render_tree_item(page: dict[str, Any], *, selected_page_id: str = "") -> st
     return ""
 
 
+_WIKI_BODY_REFERENCE_RE = re.compile(r"\[\[([^\]\n]+)\]\]")
+_MARKDOWN_CODE_RE = re.compile(r"(`{3,}.*?`{3,}|~{3,}.*?~{3,}|(?<!`)`+[^`\n]*`+(?!`))", re.DOTALL)
+
+
+def transform_wiki_body(body: str, pages: Iterable[dict[str, Any]]) -> tuple[str, list[tuple[dict[str, Any], str]]]:
+    """Render known wiki references as labels without changing the stored body."""
+    by_id = {str(page.get("id") or ""): page for page in pages if page.get("id")}
+    by_title: dict[str, list[dict[str, Any]]] = {}
+    for page in by_id.values():
+        title = str(page.get("title") or "").strip()
+        if title:
+            by_title.setdefault(title, []).append(page)
+
+    references: list[tuple[dict[str, Any], str]] = []
+    referenced_ids: set[str] = set()
+    rendered_parts: list[str] = []
+    chunks = _MARKDOWN_CODE_RE.split(str(body or ""))
+    for index, chunk in enumerate(chunks):
+        if index % 2:
+            rendered_parts.append(chunk)
+            continue
+
+        def replace(match: re.Match[str]) -> str:
+            token = match.group(1).strip()
+            if "|" in token:
+                page_id, label = (part.strip() for part in token.split("|", 1))
+                page = by_id.get(page_id)
+            else:
+                page = by_id.get(token)
+                if page is not None:
+                    label = str(page.get("title") or token)
+                else:
+                    label = token
+                    matches = by_title.get(token, [])
+                    page = matches[0] if len(matches) == 1 else None
+            if page is None:
+                return match.group(0)
+            page_id = str(page.get("id") or "")
+            if page_id not in referenced_ids:
+                references.append((page, label))
+                referenced_ids.add(page_id)
+            escaped_label = re.sub(r"([\\`*_{}\[\]()#+.!|>~-])", r"\\\1", label)
+            return f"**{escaped_label}**"
+
+        rendered_parts.append(_WIKI_BODY_REFERENCE_RE.sub(replace, chunk))
+    return "".join(rendered_parts), references
+
+
+def render_wiki_body(body: str, pages: Iterable[dict[str, Any]], *, st_module: Any = st) -> None:
+    markdown, references = transform_wiki_body(body, pages)
+    st_module.markdown(markdown)
+    for index, (page, label) in enumerate(references):
+        page_id = str(page.get("id") or "")
+        if st_module.button(label, key=f"wiki_body_ref_{page_id}_{index}"):
+            st_module.session_state["agent_wiki_selected_page_id"] = page_id
+            st_module.session_state["wiki_editor_mode"] = "read"
+            st_module.rerun()
+
+
 def _verification_status(page: dict[str, Any]) -> str:
     return "source-backed" if _has_non_conversation_source_refs(page.get("source_refs") or []) else "unverified"
+
+
+_SOURCE_KNOWLEDGE_FIELDS = ("claims", "limitations", "relations", "integrations")
+
+
+def _public_source_knowledge(value: object) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    return {key: deepcopy(value[key]) for key in _SOURCE_KNOWLEDGE_FIELDS if key in value}
 
 
 def _trust_warnings(page: dict[str, Any]) -> list[str]:
@@ -226,7 +397,7 @@ def _trust_warnings(page: dict[str, Any]) -> list[str]:
     if warnings:
         return warnings
     if _verification_status(page) == "unverified":
-        return ["원문 출처 없음: 대화 기반 draft로만 참고합니다."]
+        return ["원문 출처 없음: 대화 기반 초안으로만 참고합니다."]
     return []
 
 
@@ -236,7 +407,7 @@ def promotion_guardrail(status: str, source_refs: Iterable[object]) -> dict[str,
         return {
             "allowed": False,
             "downgraded_to": "draft",
-            "message": "reviewed/stable에는 conversation 이외의 source ref가 필요합니다.",
+            "message": "검토됨/확정으로 올리려면 대화 기록이 아닌 출처가 필요합니다.",
         }
     return {"allowed": True, "downgraded_to": status, "message": ""}
 
@@ -259,43 +430,43 @@ def build_wiki_health_model(pages: Iterable[dict[str, Any] | WikiPage], *, searc
             recommendations.append({
                 "category": "balance",
                 "title": f"{_surface_label(dominant_surface)} 편중 완화",
-                "detail": f"{_surface_label(dominant_surface)} 문서가 {dominant_count}/{total}개로 많습니다. 시장/포트폴리오/티커 간 파생 문서 분리를 늘려 보세요.",
+                "detail": f"{_surface_label(dominant_surface)} 문서가 {dominant_count}/{total}개로 많습니다. 시장·포트폴리오·종목 쪽으로 문서를 나눠 보세요.",
             })
     if total and kind_counts.get("source_digest", 0) >= max(4, int(total * 0.4)):
         recommendations.append({
             "category": "curation",
-            "title": "source_digest 증류 강화",
-            "detail": "요약만 있는 문서가 많습니다. 판단 카드(playbook/risk/decision/concept)로 더 자주 승격해 재사용성을 높이세요.",
+            "title": "출처 요약 정리",
+            "detail": "요약만 있는 문서가 많습니다. 실행 지침·리스크·결정·개념 카드로 더 자주 올려 다시 쓰이게 하세요.",
         })
     if unverified > source_backed:
         recommendations.append({
             "category": "trust",
             "title": "원문 출처 보강",
-            "detail": "대화 기반 초안이 더 많습니다. reviewed/stable 문서는 source refs를 붙이고, 판단이 섞인 메모는 원문/뉴스와 교차확인하세요.",
+            "detail": "대화만으로 만든 초안이 더 많습니다. 검토됨/확정 문서에는 출처를 붙이고, 판단이 섞인 메모는 원문·뉴스와 맞춰 보세요.",
         })
     if int(lint_codes.get("orphan_page", 0)) > 0:
         recommendations.append({
             "category": "connectivity",
             "title": "고립 문서 연결",
-            "detail": f"고립 문서 {int(lint_codes.get('orphan_page', 0))}건이 있습니다. 같은 surface나 topic으로 교차 링크를 추가하면 그래프가 더 살아납니다.",
+            "detail": f"고립 문서 {int(lint_codes.get('orphan_page', 0))}건이 있습니다. 같은 화면이나 주제로 서로 링크를 넣으면 연결이 살아납니다.",
         })
     if int(lint_codes.get("missing_cross_ref", 0)) > 0:
         recommendations.append({
             "category": "connectivity",
             "title": "중복 출처 교차 연결",
-            "detail": f"공유 태그/출처를 가진 문서 {int(lint_codes.get('missing_cross_ref', 0))}건이 연결되어 있지 않습니다. merge 또는 cross-link가 필요합니다.",
+            "detail": f"같은 태그·출처를 가진 문서 {int(lint_codes.get('missing_cross_ref', 0))}건이 연결되어 있지 않습니다. 병합하거나 서로 링크하세요.",
         })
     if int(lint_codes.get("zero_usage", 0)) > 0:
         recommendations.append({
             "category": "hygiene",
             "title": "미사용 문서 정리",
-            "detail": f"30일 이상 사용되지 않은 문서 {int(lint_codes.get('zero_usage', 0))}건이 있습니다. archive 또는 split/merge 후보를 검토하세요.",
+            "detail": f"30일 이상 쓰이지 않은 문서 {int(lint_codes.get('zero_usage', 0))}건이 있습니다. 보관하거나 나누고 합칠 후보를 보세요.",
         })
     if not recommendations and total:
         recommendations.append({
             "category": "healthy",
             "title": "위키 구조 양호",
-            "detail": "surface 그룹과 본문 읽기 흐름이 안정적입니다. 다음 단계는 source-backed 비율과 judgment 카드 축적을 조금 더 끌어올리는 것입니다.",
+            "detail": "화면 구분과 본문 읽기 흐름이 안정적입니다. 다음은 출처가 붙은 문서와 판단 카드를 조금 더 쌓는 것입니다.",
         })
     search_health = dict(search_health or {})
     qmd = dict(search_health.get("qmd") or {})
@@ -335,11 +506,139 @@ def build_selected_evidence_model(page: dict[str, Any] | WikiPage | None, *, con
         "wiki_schema_version": core_wiki._safe_count(normalized.get("wiki_schema_version"), 1, 10),
         "parent_page_id": normalized.get("parent_page_id") or "",
         "merge_history": [dict(item) for item in normalized.get("merge_history") or []],
+        "source_knowledge": _public_source_knowledge(normalized.get("source_knowledge")),
         "merged_into": normalized.get("merged_into") or "",
         "merge_event_id": normalized.get("merge_event_id") or "",
         "prompt_preview": context_section,
         "tags": list(normalized.get("tags") or []),
     }
+
+
+def _render_selected_evidence(evidence: dict[str, Any], pages: Iterable[dict[str, Any]], *, st_module: Any = st) -> None:
+    knowledge = evidence.get("source_knowledge") or {}
+    claims = knowledge.get("claims") or []
+    limitations = knowledge.get("limitations") or []
+    relations = knowledge.get("relations") or []
+    integrations = knowledge.get("integrations") or []
+    has_structured_evidence = any((claims, limitations, relations, integrations))
+    render_source_note_links(evidence, st_module=st_module)
+
+    if has_structured_evidence:
+        with st_module.expander("구조화된 출처 지식", expanded=True):
+            for claim in claims:
+                if not isinstance(claim, dict):
+                    continue
+                st_module.markdown(str(claim.get("text") or ""))
+                metadata = [
+                    f"as of: {claim.get('as_of') or 'unknown'}",
+                    f"scope: {claim.get('scope') or 'unknown'}",
+                    f"knowledge state: {claim.get('knowledge_state') or 'unknown'}",
+                    f"source revision: {claim.get('source_revision_id') or 'unknown'}",
+                ]
+                st_module.caption(" · ".join(metadata))
+            for limitation in limitations:
+                st_module.markdown(f"- {limitation}")
+            for relation in relations:
+                if not isinstance(relation, dict):
+                    st_module.markdown(f"- {relation}")
+                    continue
+                dates = " → ".join(str(relation.get(key) or "unknown") for key in ("from_as_of", "to_as_of"))
+                st_module.markdown(
+                    f"- {relation.get('type') or 'unknown'} · {dates} · "
+                    f"{relation.get('scope_explanation') or 'unknown'}"
+                )
+            for integration in integrations:
+                if not isinstance(integration, dict):
+                    st_module.markdown(f"- {integration}")
+                    continue
+                role = str(integration.get("role") or "unknown")
+                revision = str(integration.get("revision_id") or "unknown")
+                detail = str(integration.get("text") or integration.get("description") or "")
+                st_module.markdown(f"- {role} · source revision: {revision}" + (f" · {detail}" if detail else ""))
+                if integration.get("relation_state"):
+                    st_module.caption(f"relation state: {integration['relation_state']}")
+                if integration.get("relation_note"):
+                    st_module.caption(str(integration["relation_note"]))
+
+    if evidence.get("body"):
+        render_wiki_body(evidence["body"], pages, st_module=st_module)
+    elif not has_structured_evidence:
+        st_module.info("본문이 아직 없습니다.")
+
+
+def _source_note_reader(generation_id: str | None = None):
+    from agent_console.wiki_publication import pin_generation
+    from agent_console.wiki_publication_config import publication_root
+
+    return pin_generation(root=publication_root(core_wiki.wiki_artifacts_dir()), generation_id=generation_id)
+
+
+def render_source_note_links(evidence: dict, *, reader=None, st_module: Any = st) -> None:
+    """Emit only citations whose paired assets are present in one pinned reader."""
+    import json
+    from agent_console.wiki_publication_config import enabled
+    from reports.wiki_source_note_viewer import frozen_source_note_citation, valid_note_id
+
+    knowledge = evidence.get("source_knowledge") or {}
+    if not isinstance(knowledge, dict) or not isinstance(knowledge.get("claims", []), list):
+        return
+    revisions = {claim["source_revision_id"] for claim in knowledge.get("claims", [])
+                 if isinstance(claim, dict) and valid_note_id(claim.get("source_revision_id"))}
+    if not revisions or (reader is None and not enabled()):
+        return
+    try:
+        reader = reader if reader is not None else _source_note_reader()
+        snapshot = json.loads(reader.read("snapshot.json"))
+        for note_id in sorted(snapshot.get("source_note_assets", {})):
+            citation = frozen_source_note_citation(note_id, reader=reader)
+            if citation.get("revision_id") in revisions and citation["availability"] == "historical":
+                st_module.markdown(f"[Source {citation['revision_id']}]({citation['viewer_url']})")
+    except (OSError, ValueError, KeyError, TypeError, UnicodeError):
+        st_module.warning("Source note unavailable")
+
+
+def render_source_note_query(query_params, *, reader=None, journal=None, now=None, st_module: Any = st) -> bool:
+    """Handle citation navigation before reading editorial pages or chat context."""
+    from agent_console.wiki_publication_config import enabled
+    from reports.wiki_source_journal import Journal
+    from reports.wiki_source_note_viewer import (
+        frozen_source_note_citation, source_note_citation, valid_note_id,
+    )
+
+    if "source_note" not in query_params:
+        return False
+
+    def single(key):
+        values = query_params.get_all(key) if hasattr(query_params, "get_all") else [query_params.get(key)]
+        return values[0] if len(values) == 1 else None
+
+    note_id, generation_id = single("source_note"), single("generation")
+    citation = {"availability": "unavailable"}
+    if valid_note_id(note_id) and ("generation" not in query_params or valid_note_id(generation_id)):
+        try:
+            if reader is not None or "generation" in query_params or enabled():
+                reader = reader if reader is not None else _source_note_reader(generation_id)
+                if generation_id is None or generation_id == reader.generation_id:
+                    citation = frozen_source_note_citation(note_id, reader=reader)
+            else:
+                citation = source_note_citation(note_id, journal=journal if journal is not None else Journal(),
+                                                now=now if now is not None else datetime.now(timezone.utc))
+        except (OSError, ValueError, KeyError, TypeError, UnicodeError):
+            pass
+    status = citation["availability"]
+    if status not in {"available", "historical"}:
+        st_module.warning(f"Source note {status}")
+        return True
+    st_module.text(citation["title"] or "Source note")
+    st_module.caption(f"Source note {status}" + ("; current eligibility not checked" if status == "historical" else ""))
+    st_module.text(f"Source revision: {citation['revision_id']}")
+    st_module.text(f"Published: {citation['published_at'] or 'unknown'}; collected: {citation['collected_at'] or 'unknown'}")
+    st_module.link_button("Original source", citation["canonical_url"])
+    # Pass exact pinned text to a non-executing code widget, including any HTML,
+    # Markdown links, images or code-fence breakouts inside the source.
+    markdown = citation["markdown_bytes"].decode("utf-8") if status == "historical" else citation["markdown"]
+    st_module.code(markdown, language="markdown", wrap_lines=True)
+    return True
 
 
 def _now() -> str:
@@ -435,12 +734,13 @@ def _record_to_page(record: dict[str, Any]) -> dict[str, Any]:
         "created_at": record.get("createdAt") or "",
         "updated_at": record.get("updatedAt") or record.get("createdAt") or "",
         "source": source,
-        "source_refs": _dedupe_texts(record.get("artifacts") or [], limit=12, item_limit=120),
+        "source_refs": normalize_artifact_refs(record.get("artifacts") or []),
         "evidence_ids": _dedupe_texts(record.get("evidence_ids") or [], limit=100, item_limit=120),
         "conflicting_evidence_ids": _dedupe_texts(record.get("conflicting_evidence_ids") or [], limit=100, item_limit=120),
         "merge_history": core_wiki._normalize_merge_history(record.get("merge_history")),
         "merged_into": _clean(record.get("merged_into") or "", 80),
         "merge_event_id": _clean(record.get("merge_event_id") or "", 100),
+        "source_knowledge": _public_source_knowledge(record.get("source_knowledge")),
         "decisions": decisions,
         "openQuestions": open_questions,
         "messages": messages,
@@ -456,7 +756,7 @@ def _normalize_page(page: dict[str, Any] | WikiPage) -> dict[str, Any]:
         return _record_to_page({"title": page})
     if {"title", "summary", "body", "verification_status", "source_refs", "openQuestions"}.intersection(page):
         tags = _dedupe_texts(page.get("tags") or [], limit=20, item_limit=60)
-        source_refs = _dedupe_texts(page.get("source_refs") or [], limit=12, item_limit=120)
+        source_refs = normalize_artifact_refs(page.get("source_refs") or [])
         normalized = {
             "id": page.get("id") or _page_id(page.get("title") or "위키 페이지", page.get("surface") or WIKI_SURFACE, page.get("kind") or "note"),
             "title": _clean(page.get("title") or "위키 페이지", 160),
@@ -479,6 +779,7 @@ def _normalize_page(page: dict[str, Any] | WikiPage) -> dict[str, Any]:
             "merge_history": core_wiki._normalize_merge_history(page.get("merge_history")),
             "merged_into": _clean(page.get("merged_into") or "", 80),
             "merge_event_id": _clean(page.get("merge_event_id") or "", 100),
+            "source_knowledge": _public_source_knowledge(page.get("source_knowledge")),
             "decisions": _dedupe_texts(page.get("decisions") or [], limit=8, item_limit=280),
             "openQuestions": _dedupe_texts(page.get("openQuestions") or [], limit=8, item_limit=280),
             "messages": list(page.get("messages") or []),
@@ -506,6 +807,8 @@ def _matches_surface(page: dict[str, Any], surface: str) -> bool:
 
 
 def _matches_status(page: dict[str, Any], status: str) -> bool:
+    if status == "active":
+        return str(page.get("status") or "").lower() != "archived"
     return status == "all" or page.get("status") == status.lower()
 
 
@@ -590,16 +893,13 @@ def select_page_id(pages: Iterable[dict[str, Any] | WikiPage], *, selected_page_
 
 
 def _select_page_id_normalized(normalized: list[dict[str, Any]], *, selected_page_id: str = "", query: str = "", surface: str = "all", status: str = "all") -> str | None:
+    selected_page_id = _clean(selected_page_id, 80)
+    if selected_page_id and any(page.get("id") == selected_page_id for page in normalized):
+        return selected_page_id
     visible = _visible_pages(normalized, query=query, surface=surface, status=status)
     if not visible:
         return None
-    selected_page_id = _clean(selected_page_id, 80)
-    if selected_page_id:
-        for page in visible:
-            if page.get("id") == selected_page_id:
-                return selected_page_id
     return str(visible[0].get("id")) if visible else None
-
 
 def build_merge_log(pages: Iterable[dict[str, Any] | WikiPage], *, limit: int = 30) -> list[dict[str, Any]]:
     """전체 위키에서 최근 병합 이력을 시간순(최신 우선)으로 모은다.
@@ -772,6 +1072,25 @@ def _wiki_stats() -> dict[str, Any]:
     }
 
 
+WIKI_STATUS_LABELS = (("draft", "초안"), ("reviewed", "검토"), ("stable", "안정"), ("archived", "보관"))
+
+
+def wiki_status_metrics(stats: dict[str, Any]) -> list[tuple[str, str]]:
+    """페이지·상태별(없는 상태는 0)·최근 지표. 엔진 stats 는 문서가 없는 상태를 생략한다."""
+    counts = stats.get("status_counts") or {}
+    latest = stats.get("latest") or {}
+    metrics = [("페이지", f"{int(stats.get('total') or 0):,}")]
+    metrics += [(label, f"{int(counts.get(key) or 0):,}") for key, label in WIKI_STATUS_LABELS]
+    metrics.append(("최근", (str(latest.get("title") or "—"))[:20]))
+    return metrics
+
+
+def render_wiki_status_metrics(stats: dict[str, Any], *, st_module: Any = st) -> None:
+    metrics = wiki_status_metrics(stats)
+    for col, (label, value) in zip(st_module.columns(len(metrics)), metrics):
+        col.metric(label, value)
+
+
 def render_wiki_tab(surface: str, pack: dict[str, Any] | None = None) -> None:
     import pandas as pd
     import streamlit as st
@@ -779,27 +1098,25 @@ def render_wiki_tab(surface: str, pack: dict[str, Any] | None = None) -> None:
     from agent_console import wiki
     from dashboard import wiki_mesh
 
+    if render_source_note_query(st.query_params):
+        return
+
     st.markdown("##### AI 위키")
     st.caption("대화와 메모를 카드로 승격해 챗봇이 다시 읽는 지식층입니다.")
 
     stats = _wiki_stats()
-    cols = st.columns(4)
-    cols[0].metric("페이지", f"{stats.get('total', 0)}")
-    cols[1].metric("초안", f"{stats.get('status_counts', {}).get('draft', 0)}")
-    cols[2].metric("검토", f"{stats.get('status_counts', {}).get('reviewed', 0)}")
-    latest = stats.get("latest") or {}
-    cols[3].metric("최근", latest.get("title", "—")[:20] if latest else "—")
+    render_wiki_status_metrics(stats)
 
     pages_all, search_health, lint = _cached_wiki_snapshot()
     health = build_wiki_health_model(pages_all, search_health=search_health, lint=lint)
 
     hcols = st.columns(6)
-    hcols[0].metric("검색", str(health.get("provider") or "fallback"))
-    hcols[1].metric("qmd files", f"{health.get('qmd_file_count', 0)}")
-    hcols[2].metric("source-backed", f"{health.get('source_backed_count', 0)}")
-    hcols[3].metric("unverified", f"{health.get('unverified_count', 0)}")
-    hcols[4].metric("lint", f"{health.get('lint_issue_count', 0)}")
-    hcols[5].metric("open Q", f"{health.get('open_question_count', 0)}")
+    hcols[0].metric("검색", option_label({"qmd": "검색 색인", "fallback": "기본 검색"}, str(health.get("provider") or "fallback")))
+    hcols[1].metric("색인 파일", f"{health.get('qmd_file_count', 0)}")
+    hcols[2].metric("출처 확인", f"{health.get('source_backed_count', 0)}")
+    hcols[3].metric("미확인", f"{health.get('unverified_count', 0)}")
+    hcols[4].metric("점검", f"{health.get('lint_issue_count', 0)}")
+    hcols[5].metric("열린 질문", f"{health.get('open_question_count', 0)}")
 
     merge_log = build_merge_log(pages_all, limit=30)
     with st.expander(f"🔀 최근 병합 이력 · {len(merge_log)}건", expanded=False):
@@ -832,17 +1149,28 @@ def render_wiki_tab(surface: str, pack: dict[str, Any] | None = None) -> None:
     current_surface = str(st.session_state.get("agent_wiki_surface_filter") or "all")
     surface_index = surfaces.index(current_surface) if current_surface in surfaces else 0
     surface_filter = f2.selectbox(
-        "표면",
+        "화면",
         surfaces,
         index=surface_index,
         key="agent_wiki_surface_filter",
+        format_func=lambda value: option_label(SURFACE_LABELS, value),
     )
-    status_filter = f3.selectbox(
+    # Obsidian 스타일의 활성 지식망 우선: 보관(archived)된 과거 문서는 분리하고 활성 지식을 기본 노출
+    status_options = ["활성 위키 (전체)", "초안 (draft)", "검토완료 (reviewed)", "안정 (stable)", "보관 (archived)"]
+    status_map = {
+        "활성 위키 (전체)": "active",
+        "초안 (draft)": "draft",
+        "검토완료 (reviewed)": "reviewed",
+        "안정 (stable)": "stable",
+        "보관 (archived)": "archived",
+    }
+    status_sel = f3.selectbox(
         "상태",
-        statuses,
+        status_options,
         index=0,
-        key="agent_wiki_status_filter",
+        key="agent_wiki_status_filter_ui",
     )
+    status_filter = status_map.get(status_sel, "active")
 
     selected_page_id = st.session_state.get("agent_wiki_selected_page_id", "")
     graph_selected = wiki_mesh.render_wiki_mesh(
@@ -919,7 +1247,7 @@ def render_wiki_tab(surface: str, pack: dict[str, Any] | None = None) -> None:
             selected_page_id = browser["selected_id"]
             st.session_state["agent_wiki_selected_page_id"] = selected_page_id
 
-    corpus_fingerprint = _corpus_fingerprint(pages_all)
+    corpus_fingerprint = wiki_mesh._corpus_fingerprint(pages_all)
     editor_mode = str(st.session_state.get("wiki_editor_mode") or "read")
     browser_selected = browser.get("selected") or {}
     preview_page = browser_selected
@@ -951,18 +1279,17 @@ def render_wiki_tab(surface: str, pack: dict[str, Any] | None = None) -> None:
             else:
                 with st.container(border=True):
                     st.markdown(safe_markdown_bold(evidence.get("title", "위키 페이지")))
-                    st.caption(
-                        f"{preview_page.get('surface', 'wiki')} · {preview_page.get('kind', 'note')} · "
-                        f"{preview_page.get('status', 'draft')} · verification: {evidence.get('verification_status', 'unverified')}"
-                    )
+                    st.caption(" · ".join([
+                        option_label(SURFACE_LABELS, str(preview_page.get("surface") or "wiki")),
+                        option_label(KIND_LABELS, str(preview_page.get("kind") or "note")),
+                        option_label(STATUS_LABELS, str(preview_page.get("status") or "draft")),
+                        option_label(VERIFY_LABELS, str(evidence.get("verification_status") or "unverified")),
+                    ]))
                     summary_text = evidence.get("summary") or evidence.get("judgment")
                     if summary_text:
                         st.caption(summary_text)
 
-                    if evidence.get("body"):
-                        st.markdown(evidence["body"])
-                    else:
-                        st.info("본문이 아직 없습니다.")
+                    _render_selected_evidence(evidence, pages_all)
 
                     for warning in evidence.get("warnings") or []:
                         st.warning(warning)
@@ -971,7 +1298,7 @@ def render_wiki_tab(surface: str, pack: dict[str, Any] | None = None) -> None:
                     with st.expander(f"근거 · {len(refs)}", expanded=False):
                         if refs:
                             for ref in refs[:8]:
-                                st.caption(f"source ref · {ref}")
+                                st.caption(f"원문 · {display_source_ref(ref)}")
                         else:
                             st.warning("원문 출처가 없어 대화 기반 참고로만 사용됩니다.")
 
@@ -991,34 +1318,37 @@ def render_wiki_tab(surface: str, pack: dict[str, Any] | None = None) -> None:
             with st.form("wiki_editor", clear_on_submit=False):
                 title = st.text_input("제목", value=default_page.get("title", ""))
                 editor_surface = st.selectbox(
-                    "surface",
+                    "화면",
                     SURFACE_OPTIONS[1:],
                     index=max(0, SURFACE_OPTIONS[1:].index(default_page.get("surface", "market"))
                           if default_page.get("surface", "market") in SURFACE_OPTIONS[1:] else 0),
                     key="wiki_editor_surface",
+                    format_func=lambda value: option_label(SURFACE_LABELS, value),
                 )
                 kind = st.selectbox(
-                    "kind",
+                    "종류",
                     KIND_OPTIONS[1:],
                     index=max(0, KIND_OPTIONS[1:].index(default_page.get("kind", "note"))
                           if default_page.get("kind", "note") in KIND_OPTIONS[1:] else 0),
                     key="wiki_editor_kind",
+                    format_func=lambda value: option_label(KIND_LABELS, value),
                 )
                 editor_status = st.selectbox(
-                    "status",
+                    "상태",
                     ["draft", "reviewed", "stable", "archived"],
                     index=max(0, ["draft", "reviewed", "stable", "archived"].index(default_page.get("status", "draft"))
                           if default_page.get("status", "draft") in ["draft", "reviewed", "stable", "archived"] else 0),
                     key="wiki_editor_status",
+                    format_func=lambda value: option_label(STATUS_LABELS, value),
                 )
-                tags = st.text_input("tags", value=", ".join(default_page.get("tags", [])))
+                tags = st.text_input("태그", value=", ".join(default_page.get("tags", [])))
                 summary = st.text_area("요약", value=default_page.get("summary", ""), height=130)
                 body = st.text_area("본문", value=default_page.get("body", ""), height=280)
-                source_refs = st.text_input("source refs", value=", ".join(default_page.get("source_refs", [])))
+                source_refs = st.text_input("출처", value=", ".join(default_page.get("source_refs", [])))
                 parsed_source_refs = [item.strip() for item in source_refs.replace(";", ",").split(",") if item.strip()]
                 guardrail = promotion_guardrail(editor_status, parsed_source_refs)
                 if not guardrail.get("allowed"):
-                    st.warning(f"승격 불가: {guardrail.get('message')} 저장 시 {guardrail.get('downgraded_to')}로 낮아집니다.")
+                    st.warning(f"승격 불가: {guardrail.get('message')} 저장 시 {option_label(STATUS_LABELS, guardrail.get('downgraded_to'))}로 낮아집니다.")
                 if st.form_submit_button("위키 저장", type="primary", width="stretch"):
                     saved = wiki.upsert_page(
                         {
@@ -1039,14 +1369,17 @@ def render_wiki_tab(surface: str, pack: dict[str, Any] | None = None) -> None:
                     st.session_state["wiki_editor_mode"] = "read"
                     st.success("위키 페이지를 저장했습니다.")
                     st.rerun()
-            if default_page.get("id"):
-                if st.button("🗑 이 페이지 삭제", key=f"wiki_delete_{default_page.get('id')}", width="stretch"):
-                    if wiki.delete_page(default_page["id"]):
-                        _cached_wiki_snapshot.clear()
-                        st.session_state.pop("agent_wiki_selected_page_id", None)
-                        st.session_state["wiki_editor_mode"] = "read"
-                        st.toast("위키 페이지 삭제 완료")
-                        st.rerun()
+            if default_page.get("id") and ui_actions.confirm_delete(
+                    default_page["id"],
+                    button_key=f"wiki_delete_{default_page.get('id')}",
+                    label="🗑 이 페이지 삭제"):
+                if wiki.delete_page(default_page["id"]):
+                    _cached_wiki_snapshot.clear()
+                    st.session_state.pop("agent_wiki_selected_page_id", None)
+                    st.session_state["wiki_editor_mode"] = "read"
+                    st.toast("위키 페이지 삭제 완료")
+                    st.rerun()
+                st.toast("삭제하지 못했습니다.")
 
     with right:
         st.markdown("##### 백링크 · 태그")
@@ -1071,13 +1404,9 @@ def render_wiki_tab(surface: str, pack: dict[str, Any] | None = None) -> None:
             if evidence.get("merge_history") or evidence.get("merged_into"):
                 st.markdown("###### 병합/아카이브 기록")
                 if evidence.get("merged_into"):
-                    st.caption(f"이 문서는 {evidence['merged_into']}에 병합되어 보관 중입니다.")
+                    st.caption(f"이 문서는 {page_display_name(evidence['merged_into'])}에 병합되어 보관 중입니다.")
                 for event in evidence.get("merge_history") or []:
-                    source_titles = ", ".join(event.get("source_titles") or event.get("source_ids") or [])
-                    detail = f"{event.get('occurred_at', '')} · {event.get('action', 'merge')}"
-                    if source_titles:
-                        detail += f" · 원본: {source_titles}"
-                    st.caption(detail)
+                    st.caption(merge_event_caption(event))
                     if event.get("reason"):
                         st.write(event["reason"])
 

@@ -1511,7 +1511,11 @@ const REDRAW_COST_MS = __REDRAW_COST__;
 global.Plotly = {
   newPlot(g, d, l, c) { g.data = d; g.layout = l; return { then(cb) { cb(); return this; } }; },
   relayout(g, u) { relayoutCalls.push(u);
-    for (const k of Object.keys(u)) if (!k.includes(".") && !k.includes("[")) g.layout[k] = u[k];
+    for (const k of Object.keys(u)) {
+      const annotation = k.match(/^annotations\[(\d+)\]\.(\w+)$/);
+      if (annotation) g.layout.annotations[Number(annotation[1])][annotation[2]] = u[k];
+      else if (!k.includes(".") && !k.includes("[")) g.layout[k] = u[k];
+    }
     clock += REDRAW_COST_MS;
     return { then(cb) { cb(); return this; } }; },
 };
@@ -1604,3 +1608,38 @@ def test_light_chart_skips_live_y_follow_during_wheel_zoom_burst(tmp_path):
     during_zoom, after_end = int(m.group(1)), int(m.group(2))
     assert during_zoom == 0, f"가벼운 차트 줌 중 y 추종이 남아 있다(during={during_zoom})"
     assert after_end > during_zoom
+
+
+@pytest.mark.skipif(_NODE is None, reason="node 미설치")
+def test_repeated_view_does_not_redraw_unchanged_extrema(tmp_path):
+    index = pd.date_range("2025-01-01", periods=300, freq="D")
+    frame = pd.DataFrame({
+        "Open": 100., "High": 102., "Low": 98., "Close": 101., "Volume": 1e6,
+    }, index=index)
+    fig = charts.price_chart(frame, "TEST", kind="candle", view_days=365)
+    html = plotly_embed.pannable_chart_html(fig, frame, view_days=365)
+    script = re.findall(r"<script>(.*?)</script>", html, re.S)[-1]
+    harness = _WHEEL_ZOOM_HARNESS.replace("__REDRAW_COST__", "2").replace("__SCRIPT__", script)
+    harness += r"""
+function sameView() {
+  gd.emit("plotly_relayout", {"xaxis.range": gd.layout.xaxis.range.slice()});
+  if (pendingTimer) { const fn = pendingTimer; pendingTimer = null; fn(); }
+  pump(3);
+}
+sameView();
+const extrema = (gd.layout.annotations || []).filter(a => a.name === "tn-hi" || a.name === "tn-lo");
+if (extrema.length !== 2) fail("missing_extrema");
+const before = JSON.stringify(extrema);
+relayoutCalls.length = 0;
+sameView();
+if (JSON.stringify(extrema) !== before) fail("changed_extrema");
+if (relayoutCalls.some(u => Object.keys(u).some(k => k.startsWith("annotations[")))) {
+  fail("unchanged_annotation_redraw");
+}
+console.log("OK stable-extrema");
+"""
+    runner = tmp_path / "stable_extrema.js"
+    runner.write_text(harness, encoding="utf-8")
+    result = subprocess.run([_NODE, str(runner)], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "OK stable-extrema" in result.stdout

@@ -9,7 +9,7 @@ import streamlit as st
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import ticker_names
-from dashboard import cached
+from dashboard import cached, ui_actions
 from dashboard.pages import ticker as ticker_page
 
 try:
@@ -33,8 +33,7 @@ def _default_ticker() -> str:
 
 def render():
     st.title("🇰🇷 국내 ETF")
-    st.subheader("국내 ETF 전용")
-    st.caption("국내 상장 ETF만 모아서 원화 기준으로 봅니다. 표시 전용 · 주문 0")
+    st.caption("국내 ETF 전용 · 상장 ETF만 원화 기준으로 봅니다. 표시 전용 · 주문 0")
 
     if not _KR_TICKERS:
         st.info("국내 ETF 목록을 불러오지 못했습니다.")
@@ -46,7 +45,7 @@ def render():
     except ValueError:
         idx = 0
 
-    ticker = st.selectbox(
+    picked = st.selectbox(
         "국내 ETF 선택",
         _KR_TICKERS,
         index=idx,
@@ -54,8 +53,13 @@ def render():
         key="_kr_etf_ticker",
         help="국내 ETF 전용 보기입니다. 예: 069500.KS · 0167A0.KS",
     )
-
-    st.session_state["ticker"] = ticker
+    # 페이지를 연 것만으로 사이드바 종목을 국내 ETF 기본값으로 바꾸지 않는다.
+    current = ticker_names.normalize_input(str(st.session_state.get("ticker") or ""))
+    previous = st.session_state.get("_kr_etf_applied")
+    if (previous is not None and picked != previous) or current in _KR_TICKERS:
+        st.session_state["ticker"] = picked
+    st.session_state["_kr_etf_applied"] = picked
+    ticker = picked
     st.markdown(f"**{ticker_names.label(ticker, allow_net=False)}**")
 
     etf = cached.etf(ticker) or {}
@@ -72,6 +76,8 @@ def render():
         return
     if (etf.get("market_type") or "").lower() != "kr":
         st.info("해당 종목은 국내 ETF가 아닙니다 — 해외 ETF·개별주는 ‘종목 분석’ 페이지에서 보세요.")
+        if st.button("종목 분석으로 이동", key="_kr_etf_to_ticker"):
+            ui_actions.open_ticker(ticker, toast=f"종목 분석 → {ticker}")
         return
 
     st.caption("가격·괴리·보수·구성은 아래 한 화면에서 봅니다.")

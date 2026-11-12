@@ -11,7 +11,7 @@ import streamlit as st
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import ticker_names
-from dashboard import cached, charts, data, theme
+from dashboard import cached, charts, data, theme, ui_actions
 
 
 def render():
@@ -26,9 +26,9 @@ def render():
         currency="USD"))
 
     c1, c2, c3 = st.columns(3)
-    c1.metric("Phase", f"{ph['emoji']} {ph['label']}")
+    c1.metric("국면", f"{ph['emoji']} {ph['label']}")
     c2.metric("QQQ 낙폭", f"{ph['drawdown']:+.1f}%")
-    c3.metric("DCA 배율", f"{ph['dca']}×")
+    c3.metric("적립 배율", f"{ph['dca']}×")
 
     _ai_briefing_card()
 
@@ -56,16 +56,9 @@ def render():
             sel = ev.selection.rows if hasattr(ev, "selection") else []
             if sel:
                 picked = df.iloc[sel[0]]["종목"]
-                if picked and picked != st.session_state.get("ticker"):
-                    st.session_state["ticker"] = picked
-                    st.toast(f"종목 분석 → {picked}")
-                    _tp = st.session_state.get("_ticker_page")
-                    if _tp is not None:
-                        st.switch_page(_tp)   # 종목 분석 페이지로 자동 이동
-                    else:
-                        st.rerun()            # 단독 렌더(테스트) 폴백
+                ui_actions.open_ticker(str(picked), toast=f"종목 분석 → {picked}")
     else:
-        st.warning("보유 데이터 없음 — portfolio_snapshot 확인")
+        st.warning("보유 데이터가 없습니다. 잔고를 동기화한 뒤 다시 열어 주세요.")
 
     kr = cached.kr_holdings()
     if kr.get("rows"):
@@ -87,7 +80,8 @@ def render():
                       unsafe_allow_html=True)
             kdf = pd.DataFrame([{
                 "종목": r["display"],
-                "평가액(₩)": round(r["value"]), "손익%": round(r["ret"] or 0, 1),
+                "평가액(₩)": f"₩{round(r['value'] or 0):,}",
+                "손익%": round(r["ret"] or 0, 1),
                 "비중%": round(r["value"] / ktotal * 100, 1) if ktotal else 0.0,
             } for r in krows])
             kev = st.dataframe(kdf, hide_index=True, width="stretch",
@@ -95,17 +89,10 @@ def render():
             ksel = kev.selection.rows if hasattr(kev, "selection") else []
             if ksel and ksel[0] < len(krows):
                 kpicked = krows[ksel[0]]["ticker"]        # 내비게이션은 실제 티커 — 표시값과 분리
-                if kpicked and kpicked != st.session_state.get("ticker"):
-                    st.session_state["ticker"] = kpicked
-                    st.toast(f"종목 분석 → {krows[ksel[0]]['display']}")
-                    _tp = st.session_state.get("_ticker_page")
-                    if _tp is not None:
-                        st.switch_page(_tp)   # 종목 분석 페이지로 자동 이동
-                    else:
-                        st.rerun()            # 단독 렌더(테스트) 폴백
+                ui_actions.open_ticker(str(kpicked), toast=f"종목 분석 → {krows[ksel[0]]['display']}")
 
     # Phase 행동 지침 (표시 전용)
-    st.info(f"**이번 국면 {ph['emoji']} {ph['label']}** · 권장 DCA 배율 **{ph['dca']}×** "
+    st.info(f"**이번 국면 {ph['emoji']} {ph['label']}** · 권장 적립 배율 **{ph['dca']}×** "
             f"(QQQ 낙폭 {ph['drawdown']:+.1f}%) — 표시·참고용, 자동집행 없음")
 
     # 🚦 ML 게이트 한눈 (주간 재검증 — 상세: 리서치 → 축 게이트)
@@ -115,17 +102,20 @@ def render():
         def _ax(e):
             if not e.get("available"):
                 return "—"
-            code = (e.get("verdict") or {}).get("code", "?")
-            rec = ((e.get("recommendation") or {}).get("chosen") or "")
+            code = {"OBSERVE": "관찰", "GO": "통과", "NO-GO": "불가"}.get(
+                (e.get("verdict") or {}).get("code"), (e.get("verdict") or {}).get("code") or "?")
+            rec = {"hi52": "52주고점", "lowvol": "저변동", "mom12": "12개월", "mom": "모멘텀"}.get(
+                ((e.get("recommendation") or {}).get("chosen") or ""),
+                ((e.get("recommendation") or {}).get("chosen") or ""))
             ap = "·반영중" if (e.get("shadow") or {}).get("applied") else ""
             return f"{code}{('·' + rec) if rec else ''}{ap}"
 
         if t3.get("available") and t3.get("fresh"):
-            t3s = f"GO ×{t3.get('reco_lev'):.2f}" + (" (모의 슬리브 ON)" if t3.get("sleeve_env") else "")
+            t3s = f"통과 ×{t3.get('reco_lev'):.2f}" + (" (모의 슬리브 켜짐)" if t3.get("sleeve_env") else "")
         else:
-            t3s = "미기록" if not t3.get("available") else "stale"
-        st.caption(f"🚦 ML 게이트 — 구조레버 {t3s} · KR축 {_ax(g.get('kr', {}))} · "
-                   f"US축 {_ax(g.get('us', {}))} · 상세: 리서치 → 축 게이트")
+            t3s = "미기록" if not t3.get("available") else "오래됨"
+        st.caption(f"🚦 모델 게이트 — 구조 레버 {t3s} · 국내 축 {_ax(g.get('kr', {}))} · "
+                   f"미국 축 {_ax(g.get('us', {}))} · 상세: 리서치 → 축 게이트")
     except Exception:
         pass
 
@@ -157,8 +147,8 @@ def _ai_briefing_card():
                 st.markdown(f"- {r}")
         if b.get("checkpoints"):
             st.markdown("**✅ 체크포인트** — " + " · ".join(b["checkpoints"]))
-        st.caption(f"{b.get('generated_at', '')} · {b.get('model', '')} · LLM 해설"
-                   "(계산된 지표·뉴스 DATA 한정) — 검증 안 된 참고용·매매신호 아님")
+        st.caption(f"{b.get('generated_at', '')} · {b.get('model', '')} · 자동 해설"
+                   "(계산된 지표·뉴스만) — 검증 안 된 참고용·매매신호 아님")
 
 
 def _market_detail_control() -> bool:
@@ -166,8 +156,15 @@ def _market_detail_control() -> bool:
     loaded = bool(st.session_state.get("_home_market_details_loaded", False))
     left, right = st.columns([1, 2.4], vertical_alignment="center")
     with left:
-        if st.button("상세 시장 데이터 불러오기", key="_home_load_market_details",
-                     type="secondary", width="stretch"):
+        label = "상세 데이터 다시 불러오기" if loaded else "상세 시장 데이터 불러오기"
+        if st.button(label, key="_home_load_market_details",
+                     type="secondary", width="stretch",
+                     help="이미 연 뒤에는 시장 지표·매크로 캐시를 비우고 다시 조회합니다"):
+            if loaded:
+                for fn in (cached.market_indicators, cached.macro_assets, cached.sp500_valuation):
+                    clearer = getattr(fn, "clear", None)
+                    if callable(clearer):
+                        clearer()
             st.session_state["_home_market_details_loaded"] = True
             st.rerun()
             return True
@@ -194,7 +191,7 @@ def _market_bar(load_details: bool = False):
         if fg:
             theme.render(theme.fng_gauge_html(fg.get("score"), fg.get("prev_week")))
         else:
-            st.caption("😱 공포·탐욕 지수 N/A")
+            st.caption("😱 공포·탐욕 지수 없음")
     for i in range(2):
         with cols[i + 1]:
             if i < len(idx):
@@ -202,7 +199,7 @@ def _market_bar(load_details: bool = False):
                 theme.render(theme.index_rsi_gauges_html(ix.get("name"), ix.get("price"),
                                                          ix.get("chg"), ix.get("rsi_d"), ix.get("rsi_w")))
             else:
-                st.caption("지수 데이터 N/A")
+                st.caption("지수 데이터 없음")
     with cols[3]:
         # 🌡️ 시장 온도계 — 역발상 종합 (표시·참고 — 실행 규칙은 Phase DCA 배율)
         plan = cached.accumulation() or {}
@@ -226,10 +223,10 @@ def _market_bar(load_details: bool = False):
     # 🧮 S&P500 밸류 스트립 — PER(multpl 보고이익+역사 백분위)·fPER·성장·PEG
     if v:
         theme.render(theme.valuation_strip_html(v))
-        st.caption(f"PER = multpl.com 보고이익(1871~ {v.get('hist_n', 0)}개월 백분위) · "
+        st.caption(f"PER = 장기 보고이익(1871~ {v.get('hist_n', 0)}개월 백분위) · "
                    f"자체 집계(상위 {v.get('n', 0)}종목 시총가중) PER "
-                   f"{data.f_ratio(v.get('per'), 1)} 병행 · fPER/성장/PEG = 자체 집계 · "
-                   f"{v.get('asof', '')} · 12h 캐시 · 표시·참고용")
+                   f"{data.f_ratio(v.get('per'), 1)} 병행 · 선행 PER/성장/PEG = 자체 집계 · "
+                   f"{v.get('asof', '')} · 12시간 캐시 · 표시·참고용")
 
 
 @st.fragment
@@ -254,10 +251,25 @@ def _macro_row(load_details: bool = False):
 _MAPS = {   # 라벨 → (cached 로더명, 부가 캡션)
     "S&P 500": ("sp500_heatmap",
                 "기술 섹터는 세부 카테고리(반도체·소프트웨어/클라우드·IT서비스·하드웨어)로 분해"),
-    "코스피 200": ("kr200_heatmap", "업종별(Naver) · 시총 = marcap 스냅샷"),
+    "코스피 200": ("kr200_heatmap", "업종별 · 시가총액 스냅샷"),
     "러셀 2000": ("russell2000_heatmap",
                  "미국 소형주 **근사** — 보통주 시총 1001~3000위 (러셀 공식 구성 아님·정직 표기)"),
 }
+
+
+_MAP_STATUS = {
+    "fresh": "최신",
+    "stale": "오래됨",
+    "unavailable": "없음",
+    "snapshot": "스냅샷",
+    "yfinance": "시세",
+    "unknown": "미상",
+}
+
+
+def _map_status_label(value, fallback: str = "미상") -> str:
+    raw = str(value or "").strip()
+    return _MAP_STATUS.get(raw, raw or fallback)
 
 
 @st.fragment
@@ -270,14 +282,14 @@ def _market_map():
     allow_live = bool(st.session_state.pop("_heatmap_allow_live", False))
     rows = getattr(cached, loader)(allow_live=allow_live)
     status = cached.heatmap_status(which)
-    freshness = status.get("freshness") or "unavailable"
-    source = status.get("source") or "unknown"
+    freshness = _map_status_label(status.get("freshness"), "없음")
+    source = _map_status_label(status.get("source"))
     asof = status.get("asof") or "기준 시각 미상"
     st.caption("타일 크기 = 시가총액 · 색 = 당일 등락(🟩상승 / 🟥하락) · "
-               f"**타일 클릭 → 종목 분석** · {note} · source={source} · "
-               f"freshness={freshness} · {asof}")
+               f"**타일 클릭 → 종목 분석** · {note} · 출처 {source} · "
+               f"신선도 {freshness} · {asof}")
     if not rows:
-        st.info("시장 맵 snapshot이 없거나 부분 데이터입니다. 운영 refresh 후 다시 시도해 주세요.")
+        st.info("시장 맵 스냅샷이 없거나 일부만 있습니다. 갱신 뒤 다시 열어 주세요.")
         return
     ev = st.plotly_chart(charts.market_treemap(rows), width="stretch",
                          config={"displayModeBar": False}, on_select="rerun",
@@ -293,11 +305,5 @@ def _market_map():
         if lab in valid:
             picked = lab
             break
-    if picked and picked != st.session_state.get("ticker"):
-        st.session_state["ticker"] = picked
-        st.toast(f"종목 분석 → {picked}")
-        _tp = st.session_state.get("_ticker_page")
-        if _tp is not None:
-            st.switch_page(_tp)
-        else:
-            st.rerun()
+    if picked:
+        ui_actions.open_ticker(str(picked), toast=f"종목 분석 → {picked}")

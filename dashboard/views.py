@@ -13,7 +13,7 @@ from typing import Any
 
 from agent_console import storage
 from dashboard import chart_workspace
-from ohlc_utils import normalize_ohlc_frame
+from ohlc_utils import normalize_ohlc_frame, repair_display_ohlc
 
 
 logger = logging.getLogger(__name__)
@@ -86,24 +86,24 @@ def risk_report_text(weights: dict) -> str:
     """포트폴리오 리스크 리포트 (format_risk_report → HTML 태그 제거 평문)."""
     from ml import risk_model
     if not weights:
-        return "보유 데이터 없음 — portfolio_snapshot 확인 필요"
+        return "보유 데이터가 없습니다. 잔고를 동기화한 뒤 다시 열어 주세요."
     try:
         summ = risk_model.portfolio_risk_summary(weights)
         return _strip_html(risk_model.format_risk_report(summ))
-    except Exception as e:
-        return f"리스크 분석 실패: {e}"
+    except Exception:
+        return "리스크 분석을 불러오지 못했습니다."
 
 
 def risk_summary(weights: dict) -> dict:
     """구조화 리스크 요약 (위험기여·팩터β·레버리지 — 차트용). graceful."""
     from ml import risk_model
     if not weights:
-        return {"error": "보유 데이터 없음 — portfolio_snapshot 확인 필요"}
+        return {"error": "보유 데이터가 없습니다. 잔고를 동기화한 뒤 다시 열어 주세요."}
     try:
         summ = risk_model.portfolio_risk_summary(weights)
         return summ if isinstance(summ, dict) else {"error": "리스크 계산 데이터 부족"}
-    except Exception as e:
-        return {"error": str(e)}
+    except Exception:
+        return {"error": "리스크 분석을 불러오지 못했습니다."}
 
 
 def strategy_studio_catalog(limit: int = 50) -> dict[str, Any]:
@@ -200,8 +200,8 @@ def news_digest(ticker: str, hours: int = 72, limit: int = 10) -> str:
                    if ticker in (e.get("symbols") or e.get("tickers") or [])]
             ev = rel or ev
         return source_collector.build_digest(ev, limit=limit)
-    except Exception as e:
-        return f"뉴스 로드 실패: {e}"
+    except Exception:
+        return "뉴스를 불러오지 못했습니다."
 
 
 def earnings_calendar(ticker: str) -> dict:
@@ -222,11 +222,13 @@ def intrinsic_value(ticker: str) -> dict:
         return {"error": str(e)}
 
 
-def econ_events(days: int = 14) -> list[dict]:
-    """경제 일정 (saveticker /calendar/events, QT2)."""
+def econ_events(days: int = 14, start: str | None = None) -> list[dict]:
+    """경제 일정 (saveticker /calendar/events, QT2). start 는 YYYY-MM-DD."""
+    from datetime import date
     from providers import econ_calendar
     try:
-        return econ_calendar.upcoming_events(days=days)
+        start_date = date.fromisoformat(start) if start else None
+        return econ_calendar.upcoming_events(days=days, start=start_date)
     except Exception:
         return []
 
@@ -498,13 +500,15 @@ def _reconstruct_positions_from_history(hist: list[dict], decisions: list[dict],
 def paper_summary(surface: str = "kr_mock") -> dict:
     """자동 모의투자 계좌 요약 — NAV 시계열·벤치마크·MDD·보유·비용·결정 원장. read-only·graceful.
 
-    잔고 API(모의 도메인) 실패/비활성 시 마지막 EOD 스냅샷 NAV 로 폴백(balance_ok=False).
+    잔고 API(모의 도메인) 실패/비활성 또는 NAV 로 쓸 수 없는 잔고(브로커 거부·NAV 미확인 —
+    `mock_generations.balance_problem`)면 시드·보유액·0 으로 NAV 를 메우지 않고 마지막 유효
+    EOD 스냅샷 NAV 로 폴백한다(balance_ok=False, balance_problem=사유).
     표시 전용 — 주문 경로 0. 크론 리포트(kiwoom_mock_report·us_mock_report)와 동일 데이터원.
     """
     hist_name, bench_sym, bench_name, cur, seed_env, seed_def = _PAPER.get(surface, _PAPER["kr_mock"])
     seed = float(os.getenv(seed_env, str(seed_def)))
     out: dict = {"surface": surface, "currency": cur, "bench_name": bench_name,
-                 "balance_ok": False, "nav": None, "cash": None, "positions": [],
+                 "balance_ok": False, "balance_problem": None, "nav": None, "cash": None, "positions": [],
                  "nav_series": [], "inception_date": None, "cum_ret": None, "day_ret": None,
                  "strat_mdd": None, "bench_ret": None, "bench_mdd": None,
                  "generation_count": 1, "generation": 1,
@@ -535,15 +539,16 @@ def paper_summary(surface: str = "kr_mock") -> dict:
         snaps = [r for r in hist if r.get("kind") == "snapshot" and r.get("nav") is not None]
     out["nav_series"] = [{"date": str(r.get("date", ""))[:10], "nav": float(r["nav"])} for r in snaps]
 
-    # 2) 라이브 잔고 (모의 API — 비활성/장애 시 마지막 스냅샷 폴백)
+    # 2) 라이브 잔고 (모의 API — 비활성/장애/거부/NAV 미확인 시 마지막 유효 스냅샷 폴백)
     nav = None
     try:
+        from lib import mock_generations
         mock = __import__("kiwoom_mock" if surface == "kr_mock" else "kis_mock")
         bal = mock.get_balance()
-        if bal.get("ok"):
+        out["balance_problem"] = mock_generations.balance_problem(bal)
+        if out["balance_problem"] is None:
             out["balance_ok"] = True
-            nav = bal.get("nav") or ((bal.get("pos_value") or 0.0)
-                                     + (bal.get("cash_krw" if surface == "kr_mock" else "cash_usd") or 0.0))
+            nav = float(bal["nav"])
             out["cash"] = bal.get("cash_krw" if surface == "kr_mock" else "cash_usd")
             if surface == "us_mock":
                 # 통화 구성 분해 — KIS 모의는 통합증거금(USD 예수금 0·원화가 증거금)이라
@@ -566,7 +571,8 @@ def paper_summary(surface: str = "kr_mock") -> dict:
                                          "value": p.get("value", 0) or 0, "ret": ret})
             out["positions"].sort(key=lambda r: -(r["value"] or 0))
     except Exception:
-        pass
+        if not out["balance_ok"]:
+            out["balance_problem"] = out["balance_problem"] or "balance_failed"
     if nav is None and snaps:                    # 폴백: 마지막 EOD 스냅샷
         nav = float(snaps[-1]["nav"])
         out["cash"] = snaps[-1].get("cash")
@@ -678,9 +684,14 @@ def paper_summary(surface: str = "kr_mock") -> dict:
 def paper_glance() -> list[dict]:
     """사이드바용 모의 계좌 초경량 요약 — store EOD 스냅샷만 읽음 (잔고 API·벤치·원장 X).
 
-    전 페이지 사이드바에서 매 rerun 호출되므로 네트워크 0·로컬 DB 만. 스냅샷 없는
+    전 페이지 사이드바에서 매 rerun 호출되므로 네트워크 0·로컬 DB 만. 기록이 전혀 없는
     surface 는 제외(크론 미실행 환경 → 빈 리스트 = 레일 숨김). graceful.
-    [{surface, label, currency, nav, cum_ret, day_ret, n_days}]
+    무효 snapshot(잔고 실패 nav=None·0 이하·무효 표시)과 실패 이벤트는 시계열에서 빠진다
+    (mock_generations 롤업 규칙). 마지막 유효 기록 이후 잔고 실패가 있으면
+    `balance_failure={date, reason}` 로 알린다.
+    세대 마감 직후 새 세대 첫 스냅샷 전에는 행을 숨기지 않고 `awaiting_generation=True`,
+    nav=직전 세대 마감 NAV(원 계좌 금액), current_cum_ret/day_ret=None 으로 반환한다.
+    [{surface, label, currency, nav, cum_ret(전체 세대), current_cum_ret(현 세대), day_ret, n_days, ...}]
     """
     specs = (("kr_mock", "🇰🇷 국내", "₩", "kr_mock_history"),
              ("us_mock", "🇺🇸 미국", "$", "us_mock_history"))
@@ -692,7 +703,30 @@ def paper_glance() -> list[dict]:
             current = roll.get("current") or {}
             lifetime = roll.get("lifetime") or {}
             snaps = current.get("nav_series") or []
+            generation = roll.get("generation_count") or 1
+            failure = roll.get("latest_failure")
             if not snaps:
+                life_series = lifetime.get("nav_series") or []
+                if not life_series:
+                    continue
+                closing = life_series[-1]
+                out.append({
+                    "surface": surface,
+                    "label": label,
+                    "currency": cur,
+                    "nav": float(closing.get("raw_nav", closing["nav"])),
+                    "cum_ret": lifetime.get("cum_return_pct"),
+                    "current_cum_ret": None,
+                    "day_ret": None,
+                    "n_days": 0,
+                    "generation": generation,
+                    "awaiting_generation": True,
+                    "closed_generation": closing.get("generation"),
+                    "closed_nav_date": str(closing.get("date") or "")[:10] or None,
+                    "lifetime_n_days": lifetime.get("n_snapshots") or len(life_series),
+                    "lifetime_inception_date": lifetime.get("start_date"),
+                    "balance_failure": failure,
+                })
                 continue
             nav = float(current.get("nav")) if current.get("nav") is not None else float(snaps[-1])
             out.append({
@@ -705,9 +739,11 @@ def paper_glance() -> list[dict]:
                 "current_cum_ret": current.get("cum_return_pct"),
                 "day_ret": current.get("day_return_pct"),
                 "n_days": current.get("n_snapshots") or len(snaps),
-                "generation": roll.get("generation_count") or 1,
+                "generation": generation,
+                "awaiting_generation": False,
                 "lifetime_n_days": lifetime.get("n_snapshots") or len(snaps),
                 "lifetime_inception_date": lifetime.get("start_date"),
+                "balance_failure": failure,
             })
         except Exception:
             continue
@@ -1248,14 +1284,19 @@ def chart_fundamentals(ticker: str) -> dict:
 # ── 수집 뉴스 (시장·캘린더 — 출처별·중요도순) ─────────────────────────────────
 
 # 출처 표시 순서·라벨 (뉴스성 소스 우선, 수치성 스냅샷 후순위)
-NEWS_SOURCE_ORDER = ["saveticker", "telegram", "arca", "fred", "worldgovernmentbonds", "yahoo_finance"]
+NEWS_SOURCE_ORDER = ["saveticker", "telegram", "arca", "rss", "fred", "worldgovernmentbonds", "yahoo_finance"]
 NEWS_SOURCE_LABEL = {
     "saveticker": "📰 SaveTicker",
     "telegram": "✈️ 텔레그램",
     "arca": "💬 아카라이브",
+    "rss": "🗞️ 통신·공시",
     "fred": "🏛️ FRED 매크로",
     "worldgovernmentbonds": "🏦 국채금리",
     "yahoo_finance": "📈 시장 스냅샷",
+    "polymarket": "🎲 예측시장",
+    "kalshi": "🎲 예측시장",
+    "economic_calendar": "📅 경제 일정",
+    "fed": "🏛️ 연준",
 }
 
 
@@ -1310,7 +1351,8 @@ def group_news(events: list, label_by_id: dict | None = None, score_fn=None) -> 
                 score = max(int(score), 3 + s)
             except (TypeError, ValueError):
                 pass
-        tickers = [str(t).lstrip("$") for t in (e.get("tags") or []) if str(t).startswith("$")]
+        from providers.news_labels import _event_tickers
+        tickers = sorted(_event_tickers(e))[:4]
         pub = str(e.get("published_at") or "")
         groups.setdefault(news_source_key(e.get("source")), []).append({
             "title": title, "url": e.get("url"), "score": int(score), "reason": reason,
@@ -1393,13 +1435,40 @@ def _institution_analysis(snapshots: list[dict], comparison: dict, *, with_llm_s
     }
 
 
+def _watch_quote_symbol(ticker: str) -> str:
+    """관심종목 티커 → yfinance 심볼. 정규화 이전 저장분(국내 6자리 원형)도 .KS 로."""
+    t = str(ticker or "").strip().upper()
+    return f"{t}.KS" if t.isdigit() and len(t) == 6 else t
+
+
 def watchlist_quotes(tickers) -> dict:
-    """관심종목 시세 오버레이(가격·등락률) — market_data 배치 조회. graceful {}."""
+    """관심종목 시세 — {원래 티커: {price, chg_pct, as_of, currency, source} | {error}}.
+
+    국내(.KS) 시세가 없으면 코스닥(.KQ)으로 한 번 더 조회한다(6자리 코드만으론 시장을
+    알 수 없다). 조회 실패와 '시세 없음'을 티커별로 구분해 표에 그대로 보여준다.
+    """
+    from providers import market_data
+
+    tks = [str(t).strip() for t in tickers or [] if str(t).strip()]
+    symbols = {t: _watch_quote_symbol(t) for t in tks}
     try:
-        from providers import market_data
-        return market_data.batch_quote_change(list(tickers))
-    except Exception:
-        return {}
+        quotes = market_data.batch_quote_change(sorted(set(symbols.values())))
+        retry = {t: s[:-3] + ".KQ" for t, s in symbols.items() if s.endswith(".KS") and s not in quotes}
+        if retry:
+            quotes.update(market_data.batch_quote_change(sorted(set(retry.values()))))
+            symbols.update({t: s for t, s in retry.items() if s in quotes})
+    except Exception as exc:
+        return {t: {"error": f"시세 조회 실패({type(exc).__name__})"} for t in tks}
+    out = {}
+    for t, symbol in symbols.items():
+        quote = quotes.get(symbol)
+        if not quote:
+            out[t] = {"error": "시세 없음"}
+            continue
+        kr = symbol.endswith((".KS", ".KQ"))
+        out[t] = {**quote, "symbol": symbol, "currency": "KRW" if kr else "USD",
+                  "source": "yfinance"}
+    return out
 
 
 def congress_trading(name: str) -> list[dict] | None:
@@ -1849,7 +1918,7 @@ def chart_data_bundle(ticker: str, timeframe: str, session_policy: str = "regula
     prepared = None
     actual = requested
     if hist is not None and not getattr(hist, "empty", True):
-        prepared = hist.copy(deep=True)
+        prepared = repair_display_ohlc(hist.copy(deep=True))
         prepared.attrs.update(getattr(hist, "attrs", {}) or {})
         provider_timezone = (prepared.attrs.get("provider_timezone")
                              or prepared.attrs.get("source_timezone")
@@ -2032,7 +2101,8 @@ def trendlines_for(ticker: str, tf: str = "1d", *, lines: bool = True,
 _TAPE_SYMS = [("^VIX", "VIX", 2), ("DX-Y.NYB", "달러 인덱스", 2), ("KRW=X", "달러 환율", 2),
               ("^KS11", "코스피", 2), ("^KQ11", "코스닥", 2), ("^IXIC", "나스닥", 2),
               ("^GSPC", "S&P500", 2), ("NQ=F", "나스닥100 선물", 1), ("ES=F", "S&P 선물", 1),
-              ("GC=F", "금", 1), ("BTC-USD", "비트코인", 0), ("^TNX", "미10년물", 2)]
+              ("GC=F", "금", 1), ("BTC-USD", "비트코인", 0), ("ETH-USD", "이더리움", 0),
+              ("XRP-USD", "XRP", 2), ("SOL-USD", "솔라나", 2), ("^TNX", "미10년물", 2)]
 
 _TAPE_SNAP = os.path.expanduser("~/reports/ml-cache/market_tape.json")
 _TAPE_MAX_AGE_S = 900

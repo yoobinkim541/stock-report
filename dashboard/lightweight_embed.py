@@ -30,8 +30,8 @@ _SERIES_TYPES = {
     "bars": "bar",
     "high_low": "bar",
 }
-_UP = _theme.GREEN          # Plotly 캔들(charts._GREEN/_RED)과 같은 팔레트 — 두 엔진 색 일치
-_DOWN = _theme.RED
+_UP = _theme.UP
+_DOWN = _theme.DOWN
 _ACCENT = _theme.BLUE
 
 

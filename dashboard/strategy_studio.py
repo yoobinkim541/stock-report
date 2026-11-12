@@ -30,6 +30,157 @@ _COST_SCENARIO_VALUES = {
     "low": {"fees_bps": 2.0, "slippage_bps": 2.0, "spread_bps": 1.0},
     "high": {"fees_bps": 8.0, "slippage_bps": 10.0, "spread_bps": 6.0},
 }
+_COST_LABELS = {"default": "기본 비용", "low": "낮은 비용", "high": "높은 비용"}
+
+_DATA_PROFILE_LABELS = {
+    "generic": "일반",
+    "global_swing": "글로벌 스윙",
+    "kr_intraday": "국내 장중",
+    "extended_us": "미국 연장",
+}
+_EXECUTION_PROFILE_LABELS = {
+    "bar": "봉 단위",
+    "global_swing": "글로벌 스윙",
+    "kr_intraday": "국내 장중",
+    "extended_us": "미국 연장",
+}
+_VALIDATION_MODE_LABELS = {
+    "single_pass": "단일 통과",
+    "walk_forward": "워크포워드",
+    "purged_walk_forward": "퍼지 워크포워드",
+    "cpcv": "CPCV",
+}
+_SIGNAL_TYPE_LABELS = {
+    "rule": "규칙",
+    "factor": "팩터",
+    "model": "모델",
+    "ensemble": "앙상블",
+}
+_PROVIDER_LABELS = {
+    "rule": "규칙",
+    "momentum": "모멘텀",
+    "volatility": "변동성",
+    "cross_sectional_rank": "횡단면 순위",
+    "model": "모델",
+    "ensemble": "앙상블",
+}
+_OPTIMIZER_LABELS = {
+    "legacy_fixed": "고정 비중",
+    "cost_aware_risk_budget": "비용 반영 위험예산",
+    "equal_weight": "동일 비중",
+    "risk_budget": "위험예산",
+}
+_PERIOD_LABELS = {
+    "30d": "30일",
+    "60d": "60일",
+    "1mo": "1개월",
+    "3mo": "3개월",
+    "6mo": "6개월",
+    "1y": "1년",
+    "2y": "2년",
+    "5y": "5년",
+}
+_QUALITY_LABELS = {
+    "stale": "오래됨",
+    "unknown": "알 수 없음",
+    "incomplete": "불완전",
+    "ok": "정상",
+    "fresh": "최신",
+    "complete": "완료",
+}
+_CHECK_LABELS = {
+    "environment": "환경이 올바르지 않습니다",
+    "preview_only": "미리보기만 가능합니다",
+    "validation_mode": "검증 모드가 승격 조건이 아닙니다",
+    "cpcv_future_training": "CPCV 학습 구간에 미래 데이터가 있습니다",
+    "cpcv_chronology_evidence": "CPCV 시간순 증거가 맞지 않습니다",
+    "cpcv_not_activation_safe": "CPCV는 진단용이라 실거래 승격이 불가합니다",
+    "min_trades": "거래 수가 부족합니다",
+    "min_test_periods": "테스트 기간이 부족합니다",
+    "min_observations": "관측치가 부족합니다",
+    "net_excess": "비용 차감 초과수익이 없습니다",
+    "max_drawdown": "최대낙폭이 한도를 넘습니다",
+    "max_turnover": "회전율이 한도를 넘습니다",
+    "pbo_unavailable": "PBO를 계산하지 못했습니다",
+    "max_pbo": "PBO가 한도를 넘습니다",
+    "dsr_unavailable": "DSR을 계산하지 못했습니다",
+    "min_dsr": "DSR이 기준보다 낮습니다",
+    "dsr_evidence": "DSR 근거가 없습니다",
+    "pbo_evidence": "PBO 근거가 없습니다",
+    "max_regime_concentration_unavailable": "국면 집중도를 계산하지 못했습니다",
+    "max_regime_concentration": "국면 집중도가 한도를 넘습니다",
+    "stale_provenance": "출처 기록이 오래되었습니다",
+    "provenance": "출처 기록이 없습니다",
+    "leakage": "미래 정보 누수가 있습니다",
+    "live_activation_explicit": "실거래 활성화 확인이 없습니다",
+    "turnover limit exceeded": "회전율 한도를 넘었습니다",
+    "stale quotes": "시세가 오래되었습니다",
+}
+_NOTE_LABELS = {
+    "yahoo": "시세",
+    "yfinance": "시세",
+    "True": "예",
+    "False": "아니오",
+    "diagnostic": "진단",
+    "promotion_failed_check": "승격 조건",
+    "run_error": "실행 오류",
+    "data_quality": "데이터 품질",
+    "turnover_limit": "회전율 한도",
+}
+_ENV_LABELS = {
+    "draft": "초안",
+    "sandbox": "검증용",
+    "paper": "모의",
+    "live": "실거래",
+}
+
+
+
+
+def _option_label(mapping: dict[str, str], value: object) -> str:
+    return mapping.get(str(value), str(value))
+
+
+def _env_label(value: object) -> str:
+    return _ENV_LABELS.get(str(value or "draft").strip().lower(), "초안")
+
+
+def _display_note(value: object, fallback: str) -> str:
+    """화면 문구. 알려진 엔진 코드는 한국어로, 한글이 없는 문장은 대체 문구로."""
+    text = str(value or "").strip()
+    if text in _CHECK_LABELS:
+        return _CHECK_LABELS[text]
+    if text in _NOTE_LABELS:
+        return _NOTE_LABELS[text]
+    if any("\uac00" <= ch <= "\ud7a3" for ch in text):
+        return _user_error(text, fallback)
+    if " " not in text and any(ch.isdigit() for ch in text) and len(text) <= 40:
+        return text
+    if text.isupper() and text.replace(".", "").replace("-", "").isalnum() and len(text) <= 12:
+        return text
+    return fallback
+
+
+_ERROR_LABELS = {
+    "full_validation_failed": "검증을 통과하지 못했습니다.",
+    "invalid_current_spec": "현재 전략 스펙이 올바르지 않습니다.",
+    "llm_unavailable": "AI 패치를 만들지 못했습니다. 잠시 후 다시 시도하세요.",
+    "invalid_llm_patch": "AI가 제안한 패치를 해석하지 못했습니다.",
+    "patch_rejected": "패치가 검증에서 거절되었습니다.",
+    "strategy spec not found": "전략을 찾지 못했습니다.",
+    "activation blocked": "실거래 활성화가 차단되었습니다.",
+    "live activation requires explicit confirmation": "실거래 활성화는 확인이 필요합니다.",
+    "spec not found": "전략을 찾지 못했습니다.",
+}
+
+
+def _user_error(value: object, fallback: str) -> str:
+    text = str(value or "").strip()
+    if text in _ERROR_LABELS:
+        return _ERROR_LABELS[text]
+    if not text or any(token in text for token in ("Error", "Exception", "Traceback", "File ", "/")):
+        return fallback
+    return text
 
 
 def render_strategy_lab(
@@ -149,18 +300,21 @@ def _render_editor_controls(prefix: str, defaults: dict[str, str]) -> dict[str, 
         options=list(_DATA_PROFILES),
         index=_option_index(_DATA_PROFILES, defaults.get("data_profile"), "generic"),
         key=_state_key(prefix, "data_profile"),
+        format_func=lambda value: _option_label(_DATA_PROFILE_LABELS, value),
     )
     execution_profile = first[1].selectbox(
         "실행 프로필",
         options=list(_EXECUTION_PROFILES),
         index=_option_index(_EXECUTION_PROFILES, defaults.get("execution_profile"), "bar"),
         key=_state_key(prefix, "execution_profile"),
+        format_func=lambda value: _option_label(_EXECUTION_PROFILE_LABELS, value),
     )
     validation_mode = first[2].selectbox(
         "검증 모드",
         options=list(_VALIDATION_MODES),
         index=_option_index(_VALIDATION_MODES, defaults.get("validation_mode"), "single_pass"),
         key=_state_key(prefix, "validation_mode"),
+        format_func=lambda value: _option_label(_VALIDATION_MODE_LABELS, value),
     )
 
     second = st.columns(3)
@@ -169,18 +323,21 @@ def _render_editor_controls(prefix: str, defaults: dict[str, str]) -> dict[str, 
         options=list(_SIGNAL_TYPES),
         index=_option_index(_SIGNAL_TYPES, defaults.get("strategy_type"), "rule"),
         key=_state_key(prefix, "strategy_type"),
+        format_func=lambda value: _option_label(_SIGNAL_TYPE_LABELS, value),
     )
     provider = second[1].selectbox(
         "신호 공급자",
         options=list(_SIGNAL_PROVIDERS),
         index=_option_index(_SIGNAL_PROVIDERS, defaults.get("provider"), "rule"),
         key=_state_key(prefix, "provider"),
+        format_func=lambda value: _option_label(_PROVIDER_LABELS, value),
     )
     portfolio_optimizer = second[2].selectbox(
         "포트폴리오 최적화",
         options=list(_PORTFOLIO_OPTIMIZERS),
         index=_option_index(_PORTFOLIO_OPTIMIZERS, defaults.get("portfolio_optimizer"), "legacy_fixed"),
         key=_state_key(prefix, "portfolio_optimizer"),
+        format_func=lambda value: _option_label(_OPTIMIZER_LABELS, value),
     )
 
     cost_scenario = st.selectbox(
@@ -188,7 +345,7 @@ def _render_editor_controls(prefix: str, defaults: dict[str, str]) -> dict[str, 
         options=list(_COST_SCENARIOS),
         index=_option_index(_COST_SCENARIOS, defaults.get("cost_scenario"), "default"),
         key=_state_key(prefix, "cost_scenario"),
-        format_func=lambda value: {"default": "기본 비용", "low": "낮은 비용", "high": "높은 비용"}.get(value, value),
+        format_func=lambda value: _option_label(_COST_LABELS, value),
     )
     return {
         "data_profile": data_profile,
@@ -311,22 +468,17 @@ def _render_environment_state(
     selected_preview = _ensure_preview(prefix, preview, **_preview_context(prefix, selected_record))
     activation = st.session_state.get(_state_key(prefix, "activation"))
     if isinstance(activation, Mapping) and activation.get("activated") is True:
-        state = "live 활성"
+        state = "실거래 활성"
     else:
         promotion = spec.get("promotion") if isinstance(spec.get("promotion"), Mapping) else {}
         requested = str(promotion.get("environment") or "draft").strip().lower()
-        if requested == "live":
-            state = "live 차단"
-        elif requested in {"sandbox", "paper"}:
-            state = requested
-        else:
-            state = "draft"
+        state = "실거래 차단" if requested == "live" else _env_label(requested)
         if _strict_validation_ready(selected_preview):
-            state = "검증 통과 · 활성화 전" if state == "live 차단" else state
-    st.markdown(f"**상태** · `{state}` · 드래프트 편집")
-    st.caption("상태 구분: 드래프트 · sandbox · live")
-    if state == "live 차단":
-        st.caption("실거래 상태는 엄격한 시계열 검증, provenance, 데이터 품질, 서버 승인 capability가 모두 필요합니다.")
+            state = "검증 통과 · 활성화 전" if state == "실거래 차단" else state
+    st.markdown(f"**상태** · `{state}` · 초안 편집")
+    st.caption("상태 구분: 초안 · 검증용 · 모의 · 실거래")
+    if state == "실거래 차단":
+        st.caption("실거래는 시계열 검증, 출처 기록, 데이터 품질, 서버 승인이 모두 필요합니다.")
 
 
 def _parse_spec_quiet(text: object) -> dict[str, Any] | None:
@@ -409,12 +561,13 @@ def _render_editor_panel(
         "벤치마크",
         value=st.session_state.get(_state_key(prefix, "benchmark"), benchmark_default),
         key=_state_key(prefix, "benchmark"),
-        help="전략을 무엇과 비교할지 적습니다. 비워두면 base_symbol 또는 기본 벤치마크를 씁니다.",
+        help="전략을 무엇과 비교할지 적습니다. 비워두면 기준 종목 또는 기본 벤치마크를 씁니다.",
     ).strip()
     period = st.selectbox(
         "기간",
         options=["1mo", "3mo", "6mo", "1y", "2y", "5y", "60d", "30d"],
         index=3,
+        format_func=lambda value: _option_label(_PERIOD_LABELS, value),
         key=_state_key(prefix, "period"),
     )
 
@@ -481,7 +634,7 @@ def _render_preview_panel(
         return
 
     if not selected_preview.get("ok", True):
-        st.error(_join_values(selected_preview.get("errors")) or str(selected_preview.get("error") or "전략 결과를 만들지 못했습니다"))
+        st.error(_user_error(_join_values(selected_preview.get("errors")) or selected_preview.get("error"), "전략 결과를 만들지 못했습니다."))
     report = selected_preview.get("report") if isinstance(selected_preview.get("report"), Mapping) else {}
     summary = report.get("summary") if isinstance(report.get("summary"), Mapping) else {}
     metrics = dict(selected_preview.get("metrics")) if isinstance(selected_preview.get("metrics"), Mapping) else {}
@@ -494,17 +647,19 @@ def _render_preview_panel(
     st.markdown("##### 성과·위험")
     cols = st.columns(5)
     cols[0].metric("거래 수", str(summary.get("trade_count") or selected_preview.get("trade_count") or metrics.get("trade_count") or 0))
-    cols[1].metric("순 CAGR", data.f_frac_pct_s(_first_value(summary, metrics, "net_cagr", "cagr")))
+    cols[1].metric("순 연환산", data.f_frac_pct_s(_first_value(summary, metrics, "net_cagr", "cagr")))
     cols[2].metric("MDD", data.f_frac_pct(_first_value(summary, metrics, "max_drawdown")))
-    cols[3].metric("Sharpe", data.f_ratio(_first_value(summary, metrics, "sharpe"), 2))
-    cols[4].metric("회전율 (Turnover)", data.f_frac_pct(_first_value(summary, metrics, "turnover")))
+    cols[3].metric("샤프", data.f_ratio(_first_value(summary, metrics, "sharpe"), 2))
+    cols[4].metric("회전율", data.f_frac_pct(_first_value(summary, metrics, "turnover")))
 
     if summary.get("name"):
+        profile = selected_preview.get("profile") or spec_payload.get("data_profile") or "generic"
+        execution_name = selected_preview.get("execution_profile") or spec_payload.get("execution_profile") or "bar"
         st.caption(
             f"{summary.get('name')} · {summary.get('market', '')}/{summary.get('timeframe', '')} · "
             f"기준 {summary.get('base_symbol') or '—'} · "
-            f"{selected_preview.get('profile') or spec_payload.get('data_profile') or 'generic'} / "
-            f"{selected_preview.get('execution_profile') or spec_payload.get('execution_profile') or 'bar'}"
+            f"{_option_label(_DATA_PROFILE_LABELS, profile)} / "
+            f"{_option_label(_EXECUTION_PROFILE_LABELS, execution_name)}"
         )
 
     execution = report.get("execution") if isinstance(report.get("execution"), Mapping) else {}
@@ -525,7 +680,7 @@ def _render_preview_panel(
         st.warning("부분 체결 발생 · 체결 원장과 잔여 목표 비중을 함께 확인하세요.")
     st.caption(
         "결과 원장 기준 · 비용 시나리오: "
-        + str(st.session_state.get(_state_key(prefix, "cost_scenario"), "default"))
+        + _COST_LABELS.get(str(st.session_state.get(_state_key(prefix, "cost_scenario"), "default")), "기본 비용")
     )
     benchmark = selected_preview.get("benchmark") if isinstance(selected_preview.get("benchmark"), Mapping) else report.get("benchmark")
     if isinstance(benchmark, Mapping):
@@ -546,14 +701,14 @@ def _render_preview_panel(
                 }
                 st.toast("전략 규칙을 차트 리플레이에 준비했습니다.")
             except Exception as exc:
-                st.error(str(exc))
+                st.error(_user_error(exc, "차트 리플레이로 보내지 못했습니다. 다시 시도하세요."))
 
     warnings = list(selected_preview.get("warnings") or report.get("warnings") or [])
     errors = list(selected_preview.get("errors") or report.get("errors") or [])
     if warnings:
-        st.warning("경고: " + " · ".join(str(w) for w in warnings[:4]))
+        st.warning("경고: " + " · ".join(_display_note(w, "확인이 필요한 경고가 있습니다.") for w in warnings[:4]))
     if errors:
-        st.error("오류: " + " · ".join(str(e) for e in errors[:4]))
+        st.error("오류: " + " · ".join(_display_note(e, "검증을 통과하지 못했습니다.") for e in errors[:4]))
 
     _render_validation_details(prefix, selected_preview, report, metrics)
 
@@ -570,7 +725,7 @@ def _render_preview_panel(
         if detail_columns:
             st.line_chart(equity[detail_columns], width="stretch")
     else:
-        st.info("표시할 equity 시계열이 없습니다.")
+        st.info("표시할 순자산 시계열이 없습니다.")
 
     trades = list(selected_preview.get("trades") or report.get("trades") or [])
     if trades:
@@ -640,45 +795,64 @@ def _render_validation_details(
 
     st.markdown("##### 검증·승격")
     if mode == "single_pass":
-        st.info("single_pass 미리보기 · 실거래 승격 불가")
+        st.info("단일 통과 미리보기 · 실거래 승격 불가")
     elif _strict_validation_ready(result):
-        st.success("엄격 검증 통과 · 서버 activation capability 확인 대기")
+        st.success("엄격 검증 통과 · 서버의 실거래 가능 여부 확인 대기")
     else:
-        failed = _join_values(promotion.get("failed_checks")) or "엄격 게이트 미충족"
+        failed_items = promotion.get("failed_checks") or []
+        failed = " · ".join(
+            _display_note(item, "검증 조건을 통과하지 못했습니다") for item in failed_items
+        ) or "엄격 게이트 미충족"
         st.warning(f"승격 차단 · {failed}")
         if mode == "cpcv":
-            st.warning("chronology 증거가 모든 실제 CPCV 폴드와 일치하는지 확인해야 합니다.")
+            st.warning("시간순 증거가 모든 실제 CPCV 폴드와 일치하는지 확인해야 합니다.")
 
     gate_rows = [
         {"게이트": "검증", "상태": "통과" if validation.get("promotion_eligible") is True else "차단"},
         {"게이트": "승격", "상태": "통과" if promotion.get("accepted") is True else "차단"},
-        {"게이트": "activation safe", "상태": "통과" if promotion.get("activation_safe") is True else "차단"},
-        {"게이트": "preview", "상태": "실행 결과" if promotion.get("preview") is False else "미리보기"},
+        {"게이트": "실거래 안전", "상태": "통과" if promotion.get("activation_safe") is True else "차단"},
+        {"게이트": "미리보기", "상태": "실행 결과" if promotion.get("preview") is False else "미리보기"},
     ]
     if promotion.get("failed_checks"):
-        gate_rows.append({"게이트": "실패 항목", "상태": _join_values(promotion.get("failed_checks"))})
+        gate_rows.append({
+            "게이트": "실패 항목",
+            "상태": " · ".join(
+                _display_note(item, "검증 조건을 통과하지 못했습니다")
+                for item in promotion.get("failed_checks") or []
+            ),
+        })
     st.dataframe(pd.DataFrame(gate_rows), hide_index=True, width="stretch", height=min(220, 44 + 32 * len(gate_rows)))
 
-    st.markdown("##### 데이터 품질·provenance")
+    st.markdown("##### 데이터 품질·출처")
     quality_status = str(data_quality.get("status") or "").lower()
     if data_quality.get("stale") is True or data_quality.get("fresh") is False:
         quality_status = "stale"
     quality_status = quality_status or "unknown"
-    quality_text = f"상태: {quality_status} · {'사용 가능' if data_quality.get('ok') is True else '검증 필요'}"
+    quality_text = (
+        f"상태: {_option_label(_QUALITY_LABELS, quality_status) if quality_status in _QUALITY_LABELS else '알 수 없음'}"
+        f" · {'사용 가능' if data_quality.get('ok') is True else '검증 필요'}"
+    )
     if quality_status in {"stale", "unknown", "incomplete"}:
         st.warning(quality_text)
     else:
         st.caption(quality_text)
-    quality_warnings = _join_values(data_quality.get("warnings"))
+    raw_warnings = data_quality.get("warnings") or []
+    if isinstance(raw_warnings, str):
+        raw_warnings = [raw_warnings]
+    quality_warnings = " · ".join(
+        _display_note(item, "확인이 필요한 경고가 있습니다.")
+        for item in raw_warnings
+        if str(item).strip()
+    )
     if quality_warnings:
         st.caption("데이터 경고: " + quality_warnings)
     provenance_rows = _flatten_mapping(provenance)
     if provenance:
-        st.caption(f"원천 provenance · {'통과' if provenance.get('ok') is True else '검증 필요'}")
+        st.caption(f"출처 기록 · {'통과' if provenance.get('ok') is True else '검증 필요'}")
     if provenance_rows:
         st.dataframe(pd.DataFrame(provenance_rows), hide_index=True, width="stretch", height=min(240, 44 + 30 * len(provenance_rows)))
     else:
-        st.info("provenance 기록이 없습니다.")
+        st.info("출처 기록이 없습니다.")
 
     folds = result.get("folds") or validation.get("folds") or []
     st.markdown("##### 검증 폴드")
@@ -691,8 +865,8 @@ def _render_validation_details(
             "폴드": fold.get("path_id") or fold.get("fold_id") or fold.get("fold") or "—",
             "학습 종료": fold.get("train_max") or fold.get("train_end") or evidence.get("train_max") or "—",
             "테스트 시작": fold.get("test_min") or fold.get("test_start") or evidence.get("test_min") or "—",
-            "미래 학습": fold.get("future_training", evidence.get("future_training", "—")),
-            "시간순 증거": evidence.get("valid", "—"),
+            "미래 학습": _display_note(fold.get("future_training", evidence.get("future_training", "—")), "—"),
+            "시간순 증거": _display_note(evidence.get("valid", "—"), "—"),
         })
     if fold_rows:
         st.dataframe(pd.DataFrame(fold_rows), hide_index=True, width="stretch", height=min(260, 44 + 32 * len(fold_rows)))
@@ -710,16 +884,19 @@ def _render_validation_details(
         for item in diagnostics
     ).lower()
     if "model" in diagnostic_text and any(token in diagnostic_text for token in ("missing", "unavailable", "provenance")):
-        st.warning("모델 상태 확인 필요 · 모델 또는 모델 provenance가 없습니다.")
+        st.warning("모델 상태 확인 필요 · 모델 또는 출처 기록이 없습니다.")
     if "insufficient" in diagnostic_text or "표본" in diagnostic_text:
         st.warning("표본 부족 · 통계적 검증에 필요한 관측치가 부족합니다.")
     if diagnostics:
         rows = []
         for item in diagnostics:
             if isinstance(item, Mapping):
-                rows.append({"유형": item.get("type") or "diagnostic", "메시지": item.get("message") or _join_values(item)})
+                rows.append({
+                    "유형": _display_note(item.get("type") or "diagnostic", "진단"),
+                    "메시지": _display_note(item.get("message") or _join_values(item), "확인이 필요한 진단입니다."),
+                })
             else:
-                rows.append({"유형": "diagnostic", "메시지": str(item)})
+                rows.append({"유형": "진단", "메시지": _display_note(item, "확인이 필요한 진단입니다.")})
         st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch", height=min(260, 44 + 32 * len(rows)))
     else:
         st.caption("진단 항목이 없습니다.")
@@ -729,19 +906,35 @@ def _render_validation_details(
         panel = signals.get("panel") if isinstance(signals.get("panel"), Mapping) else {}
         provider = panel.get("provider") or signals.get("provider")
         if provider:
-            st.caption(f"신호 공급자: {provider}")
+            st.caption(f"신호 공급자: {_option_label(_PROVIDER_LABELS, provider)}")
 
 
 def _flatten_mapping(value: Mapping[str, Any], prefix: str = "") -> list[dict[str, str]]:
+    names = {
+        "ok": "통과",
+        "source": "출처",
+        "version": "버전",
+        "data": "데이터",
+        "checks": "검사",
+        "fold": "폴드",
+        "provenance_ok": "출처 확인",
+        "status": "상태",
+    }
     rows: list[dict[str, str]] = []
     for key, child in value.items():
-        path = f"{prefix}.{key}" if prefix else str(key)
+        label = names.get(str(key))
+        if label is None:
+            label = str(key) if any("\uac00" <= ch <= "\ud7a3" for ch in str(key)) else "세부"
+        path = f"{prefix} · {label}" if prefix else label
         if isinstance(child, Mapping):
             rows.extend(_flatten_mapping(child, path))
         elif isinstance(child, (list, tuple)):
-            rows.append({"항목": path, "값": ", ".join(str(item) for item in child)})
+            rows.append({
+                "항목": path,
+                "값": ", ".join(_display_note(item, "확인이 필요한 값입니다.") for item in child),
+            })
         else:
-            rows.append({"항목": path, "값": str(child)})
+            rows.append({"항목": path, "값": _display_note(child, "확인이 필요한 값입니다.")})
     return rows
 
 
@@ -764,11 +957,11 @@ def _render_environment_actions(
     current_environment = str(promotion.get("environment") or "draft").strip().lower()
     if isinstance(activation, Mapping) and activation.get("environment"):
         current_environment = str(activation.get("environment")).strip().lower()
-    st.caption(f"현재 레일: {current_environment if current_environment in {'draft', 'sandbox', 'paper', 'live'} else 'draft'}")
+    st.caption(f"현재 레일: {_env_label(current_environment)}")
 
     action_cols = st.columns(2)
     save_sandbox = action_cols[0].button(
-        "sandbox 저장",
+        "검증용 저장",
         key=_state_key(prefix, "save_sandbox"),
         disabled=not bool(draft_spec),
         width="stretch",
@@ -778,7 +971,7 @@ def _render_environment_actions(
         if saved:
             _set_draft_record(prefix, saved)
             _refresh_caches()
-            st.toast("sandbox 전략을 저장했습니다.")
+            st.toast("검증용 전략을 저장했습니다.")
             st.rerun()
 
     confirm_live = st.checkbox(
@@ -794,9 +987,9 @@ def _render_environment_actions(
         width="stretch",
     )
     if not strict_ready:
-        st.caption("실거래 활성화 차단 · 엄격 검증과 서버 capability 승인이 필요합니다.")
+        st.caption("실거래 활성화 차단 · 엄격 검증과 서버 승인이 필요합니다.")
     elif not spec_id:
-        st.caption("실거래 활성화 차단 · 먼저 저장된 전략을 선택하거나 sandbox에 저장하세요.")
+        st.caption("실거래 활성화 차단 · 먼저 저장된 전략을 선택하거나 검증용으로 저장하세요.")
 
     if activate_live and spec_id:
         try:
@@ -819,7 +1012,7 @@ def _render_environment_actions(
             _refresh_caches()
             st.toast("실거래 활성화가 완료되었습니다.")
         else:
-            st.error(str(activation_result.get("error") or "실거래 활성화가 차단되었습니다"))
+            st.error(_user_error(activation_result.get("error"), "실거래 활성화가 차단되었습니다."))
         st.rerun()
 
 
@@ -838,8 +1031,8 @@ def _save_sandbox_spec(spec: dict[str, Any], *, spec_id: str, validation_mode: s
                 source="validation_sandbox",
             )
         return views.strategy_studio.save_strategy_spec(sandbox_spec)
-    except Exception as exc:
-        st.error(f"sandbox 저장 실패: {exc}")
+    except Exception:
+        st.error("검증용 사본을 저장하지 못했습니다. 잠시 후 다시 시도하세요.")
         return None
 
 
@@ -1125,7 +1318,7 @@ def _render_patch_panel(prefix: str, selected_record: dict[str, Any] | None, pat
         # propose_strategy_patch() 가 예외를 던지면 preview 는 빈 dict {} 이고
         # 실제 오류 메시지는 current_patch["error"] (최상위)에 있음 — preview
         # 안쪽만 보면 항상 일반 메시지로 대체돼 원인이 사라짐(감사 #32).
-        st.warning(preview.get("error") or current_patch.get("error") or "패치 미리보기 실패")
+        st.warning(_user_error(preview.get("error") or current_patch.get("error"), "패치 미리보기에 실패했습니다."))
 
     patch = current_patch.get("patch") or {}
     if patch:
@@ -1167,17 +1360,18 @@ def _render_conversation_panel(prefix: str, pack: dict[str, Any], selected_recor
     agent_prompt = _build_agent_prompt(prompt, spec_payload, pack=pack, mode=mode)
     try:
         reply = agent.answer(agent_prompt, "lab", async_postprocess=True)
-        answer_text = reply.get("answer", "") if reply.get("ok") else reply.get("error", "응답 실패")
-        meta = f"엔진 {reply.get('context', {}).get('engine', 'unknown')}"
-    except Exception as exc:
-        answer_text = f"AI 응답 실패: {exc}"
-        meta = "error"
+        engine = str((reply.get("context") or {}).get("engine") or "")
+        answer_text = reply.get("answer", "") if reply.get("ok") else _user_error(reply.get("error"), "응답을 받지 못했습니다.")
+        meta = f"엔진 {engine if engine and engine != 'unknown' else '확인 불가'}"
+    except Exception:
+        answer_text = "AI 응답을 받지 못했습니다. 잠시 후 다시 시도하세요."
+        meta = "응답 실패"
 
     patch_result = None
     try:
         patch_result = views.strategy_studio.propose_strategy_patch(prompt, spec_payload, history=history, pack=pack)
-    except Exception as exc:
-        patch_result = {"ok": False, "error": str(exc), "patch": {}, "diff": [], "preview": {}}
+    except Exception:
+        patch_result = {"ok": False, "error": "패치를 만들지 못했습니다.", "patch": {}, "diff": [], "preview": {}}
 
     if patch_result:
         _set_patch(prefix, patch_result)
@@ -1480,16 +1674,16 @@ def _save_spec(spec_payload: dict[str, Any]) -> dict[str, Any] | None:
         if spec_id:
             return views.strategy_studio.save_strategy_version(spec_id, spec_payload, source="ui")
         return views.strategy_studio.save_strategy_spec(spec_payload)
-    except Exception as exc:
-        st.error(f"저장 실패: {exc}")
+    except Exception:
+        st.error("전략을 저장하지 못했습니다. 잠시 후 다시 시도하세요.")
         return None
 
 
 def _revert_spec(spec_id: str, version: int) -> dict[str, Any] | None:
     try:
         return views.strategy_studio.revert_strategy_version(spec_id, version)
-    except Exception as exc:
-        st.error(f"복원 실패: {exc}")
+    except Exception:
+        st.error("이전 버전으로 되돌리지 못했습니다. 잠시 후 다시 시도하세요.")
         return None
 
 
@@ -1559,8 +1753,8 @@ def _parse_spec_text(text: str) -> dict[str, Any] | None:
         if payload.get("id") and not spec.get("id"):
             spec["id"] = payload.get("id")
         return spec
-    except Exception as exc:
-        st.error(f"전략 JSON 파싱 실패: {exc}")
+    except Exception:
+        st.error("전략 JSON을 읽지 못했습니다. 형식을 확인한 뒤 다시 시도하세요.")
         return None
 
 

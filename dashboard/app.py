@@ -139,13 +139,21 @@ with st.sidebar:
     _tc.toggle("☀️ 라이트" if st.session_state.get("tn_light") else "🌙 다크",
                key="tn_light", help="라이트/다크 모드 전환 (선택은 이 브라우저에 기억)")
 
-    # 보유 종목 워치리스트 (터미널 레일 — 무네트워크: 스냅샷 수익률)
-    _wl = sorted(_holdings, key=lambda h: h.get("value", 0) or 0, reverse=True)
-    if _wl:
+    # 보유 워치 — 미국북·국내북 평가액·수익률. 국내 코드는 클릭 가능한 .KS/.KQ.
+    try:
+        _kr_book = (cached.kr_holdings() or {}).get("rows") or []
+    except Exception:
+        _kr_book = []
+    _us_hold, _kr_hold = theme.sidebar_holding_rails(_holdings, _kr_book)
+    if _us_hold or _kr_hold:
         st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
-        theme.render(theme.watchlist_html(
-            [{"symbol": h["ticker"], "name": h.get("name"), "last": h.get("value"), "chg_pct": h.get("ret")}
-             for h in _wl if h.get("ticker")], title="보유 종목"))
+        if _us_hold:
+            theme.render(theme.watchlist_html(
+                _us_hold, title="보유 · 미국 · 평가액·수익률", money="$"))
+        if _kr_hold:
+            theme.render(theme.watchlist_html(
+                _kr_hold, title="보유 · 국내 · 평가액·수익률", money="₩", decimals=0))
+        st.caption("종목을 누르면 분석으로 이동합니다")
 
     # 🧪 모의투자 레일 (KR·US 자동 페이퍼트레이딩 — EOD 스냅샷 초경량·무네트워크)
     _pg = cached.paper_glance()
@@ -153,7 +161,7 @@ with st.sidebar:
         st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
         theme.render(theme.paper_rail_html(_pg))
         if st.button("🧪 모의투자 상세", width="stretch", key="_paper_btn",
-                     help="계좌 현황·NAV 곡선·판단근거 원장"):
+                     help="계좌 현황·순자산 곡선·판단근거 원장"):
             st.session_state["_nav_to_paper"] = True   # 페이지 객체 생성 후 switch (아래)
 
     # 💰 주식 모으기 레일 — 주문서 계산은 QQQ/VIX/환율·종목가 네트워크를 사용하므로
@@ -188,7 +196,7 @@ st.session_state["_ticker_page"] = _ticker_pg
 st.session_state["_kr_etf_page"] = _kr_etf_pg
 st.session_state["_chart_page"] = _chart_pg          # ⛶ 전체화면 풀차트 왕복용
 _wiki_pg = st.Page(ai_wiki.render, title="AI 위키", icon="🗂️", url_path="wiki")
-st.session_state["_wiki_page"] = _wiki_pg
+st.session_state["_wiki_page"] = _wiki_pg        # AI 콘솔 위키 카드 → 위키 페이지 이동용
 
 nav = st.navigation([_home_pg, _portfolio_pg, _watchlist_pg, _ticker_pg, _kr_etf_pg, _chart_pg,
                      _market_pg, _paper_pg, _research_pg, _agent_pg, _wiki_pg])

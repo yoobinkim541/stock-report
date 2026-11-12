@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 
 import pandas as pd
@@ -15,12 +16,53 @@ import streamlit as st
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from dashboard import cached, charts, data
+import ticker_names
+from dashboard import cached, charts, data, ui_actions
 
 _NOBAR = {"displayModeBar": False}
 _SURFACES = ["kr_mock", "us_mock"]
 _SURF_LABEL = {"kr_mock": "🇰🇷 국내 (키움 모의)", "us_mock": "🇺🇸 미국 (KIS 해외 모의)"}
 _SIDE_ICON = {"편입": "📥", "증액": "➕", "퇴출": "📤", "감액": "➖"}
+_EXIT_LABEL = {
+    "stop": "손절",
+    "target": "목표",
+    "timestop": "시간 청산",
+    "signal_collapse": "신호 붕괴",
+    "eod_flat": "장마감 청산",
+    "orphan_repair": "고아 포지션 정리",
+    "partial_target": "부분 목표",
+}
+_STATE_LABEL = {"strong": "강함", "weak": "약함", "broken": "깨짐", "inactive": "꺼짐"}
+_REGIME_LABEL = {"risk_on": "위험선호", "risk_off": "위험회피", "neutral": "중립"}
+_AXIS_LABEL = {
+    "orb": "시가범위", "vwap": "VWAP", "volspike": "거래량", "ofi": "주문흐름",
+    "news": "뉴스", "ema": "이평", "rsi": "RSI", "bb": "볼린저",
+}
+_AXIS_COL = {"mom12": "12개월", "hi52": "52주고점", "lowvol": "저변동", "pead": "실적", "news": "뉴스"}
+_REASON_TOKEN = {
+    "mom12": "12개월", "hi52": "52주고점", "lowvol": "저변동", "pead": "실적",
+    "value": "밸류", "quality": "퀄리티", "mom": "모멘텀", "news": "뉴스",
+    "ranker": "랭커", "conf": "신뢰", "fund": "재무", "signal": "신호",
+}
+
+
+def _reason_text(value) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return "—"
+    text = text.replace("fail-closed", "안전 차단").replace("stale", "오래됨")
+    for code, label in sorted(_REASON_TOKEN.items(), key=lambda item: -len(item[0])):
+        text = re.sub(rf"(?<![A-Za-z0-9_]){re.escape(code)}(?![A-Za-z0-9_])", label, text)
+    return text
+
+
+
+
+def _label(table: dict[str, str], value, fallback: str = "—") -> str:
+    raw = str(value or "").strip()
+    if not raw or raw == "—":
+        return fallback
+    return table.get(raw, raw)
 
 
 def _money(x, cur: str) -> str:
@@ -30,9 +72,37 @@ def _money(x, cur: str) -> str:
     return f"{cur}{f:,.0f}" if cur == "₩" else f"{cur}{f:,.2f}"
 
 
+
+def _signed_money(x, cur: str) -> str:
+    f = data._try_float(x)
+    if f is None:
+        return "—"
+    text = _money(abs(f), cur)
+    if f < 0:
+        return f"-{text}"
+    if f > 0:
+        return f"+{text}"
+    return text
+
+
+def _analysis_symbol(raw) -> str:
+    """모의 잔고 코드(005930·A005930)를 종목 분석 티커로 맞춘다."""
+    text = str(raw or "").strip()
+    return ticker_names.normalize_input(text) or text
+
+
+def _order_label(raw) -> str:
+    text = str(raw or "").strip()
+    if not text:
+        return "—"
+    symbol = _analysis_symbol(text)
+    return ticker_names.label(symbol, maxlen=18) if symbol else text
+
+
+
 def render():
     st.title("🧪 자동 모의투자")
-    st.caption("신호 기반 자동 페이퍼트레이딩 — 모의 도메인 하드락 · 표시 전용 · **실거래 아님**")
+    st.caption("신호 기반 자동 모의매매 — 모의 도메인 하드락 · 표시 전용 · **실거래 아님**")
     mk = st.segmented_control("시장", _SURFACES, default="kr_mock", key="paper_market",
                               format_func=lambda s: _SURF_LABEL.get(s, s),
                               label_visibility="collapsed") or "kr_mock"
@@ -47,12 +117,17 @@ def _account_section(surface: str):
     cur = d.get("currency", "₩")
     bench = d.get("bench_name", "지수")
 
+    problem = d.get("balance_problem")
     if d.get("nav") is None:
-        st.info("계좌 데이터 없음 — 모의투자 크론(kiwoom_mock_track·us_mock_track)이 아직 "
-                "실행되지 않았거나 `*_MOCK_ENABLED` 미설정입니다.")
+        if problem:
+            st.warning(f"⚠️ 잔고 조회 실패({problem}) — 표시할 유효 NAV 기록이 없습니다 "
+                       "(세대 마감 직후이거나 모의투자 신청·연결 확인 필요).")
+        else:
+            st.info("계좌 데이터 없음 — 모의투자 크론(kiwoom_mock_track·us_mock_track)이 아직 "
+                    "실행되지 않았거나 `*_MOCK_ENABLED` 미설정입니다.")
         return
     if not d.get("balance_ok"):
-        st.caption("⚠️ 잔고 API 조회 불가 — 마지막 EOD 스냅샷 기준 표시")
+        st.caption(f"⚠️ 잔고 API 조회 불가{f'({problem})' if problem else ''} — 마지막 유효 EOD 스냅샷 기준 표시")
 
     # ── 계좌 KPI ──────────────────────────────────────────────────────────────
     excess = None
@@ -63,9 +138,9 @@ def _account_section(surface: str):
         life_excess = d["lifetime_cum_ret"] - d["lifetime_bench_ret"]
     is_margin = surface == "us_mock" and d.get("fx")   # 통합증거금 — 원화가 증거금·USD 예수금 0
     m = st.columns(4)
-    m[0].metric("NAV", _money(d["nav"], cur),
+    m[0].metric("순자산", _money(d["nav"], cur),
                 delta=(f"{d['day_ret']:+.2f}% 전일" if d.get("day_ret") is not None else None),
-                help=("계좌 원화 총자산 ÷ 환율 (통합증거금 — 환율 변동도 NAV 에 반영됨)"
+                help=("계좌 원화 총자산 ÷ 환율 (통합증거금 — 환율 변동도 순자산에 반영됨)"
                       if is_margin else None))
     m[1].metric("세대 누적 수익률", data.f_pct_s(d.get("cum_ret"), 2),
                 help=f"세대 {d.get('generation') or '—'} · 인셉션 {d.get('inception_date') or '—'} 이후")
@@ -98,7 +173,7 @@ def _account_section(surface: str):
     if len(series) >= 2:
         st.plotly_chart(charts.nav_curve(series, cur), width="stretch", config=_NOBAR)
     else:
-        st.info("NAV 시계열 축적 중 — EOD 스냅샷(평일 크론)마다 누적됩니다")
+        st.info("순자산 시계열이 아직 쌓이는 중입니다. 평일 마감 스냅샷마다 누적됩니다.")
 
     # ── 보유 + 현금 ───────────────────────────────────────────────────────────
     pos = d.get("positions") or []
@@ -106,22 +181,35 @@ def _account_section(surface: str):
     with left:
         st.markdown(f"##### 보유 {len(pos)}종목")
         if pos:
-            st.dataframe(pd.DataFrame([{
+            event = st.dataframe(pd.DataFrame([{
                 "종목": p["name"], "수량": p["shares"],
-                "평단": f"{p['avg']:,.0f}" if cur == "₩" else f"{p['avg']:,.2f}",
-                "현재가": f"{p['cur']:,.0f}" if cur == "₩" else f"{p['cur']:,.2f}",
+                "평단": _money(p["avg"], cur),
+                "현재가": _money(p["cur"], cur),
                 "평가액": _money(p["value"], cur), "수익률": data.f_pct_s(p.get("ret"), 2),
-            } for p in pos]), hide_index=True, width="stretch")
+            } for p in pos]), hide_index=True, width="stretch",
+                on_select="rerun", selection_mode="single-row", key=f"_paper_pos_{surface}")
+            try:
+                sel = event.selection.rows
+            except Exception:
+                sel = []
+            if sel and sel[0] < len(pos):
+                symbol = _analysis_symbol(pos[sel[0]].get("symbol"))
+                if symbol:
+                    ui_actions.open_ticker(
+                        symbol,
+                        toast=f"종목 분석 → {pos[sel[0]].get('name') or symbol}",
+                    )
+            st.caption("행을 누르면 종목 분석으로 이동합니다")
         elif d.get("balance_ok"):
             st.caption("보유 없음 — 현금 100%")
         else:
-            st.caption("보유 상세는 잔고 API 연결 시 표시")
+            st.caption("보유 내역을 불러오지 못했습니다.")
     with right:
         if is_margin:
             # 달러/원화 혼동 방지 — '현금'처럼 보이던 값은 원화 여유증거금의 달러 환산(파생값)
             st.markdown("##### 여유 증거금")
             st.metric("여유 증거금 (환산)", _money(d.get("cash"), cur), label_visibility="collapsed",
-                      help="NAV − 포지션 평가액 (파생값). USD 실예수금이 아니라 "
+                      help="순자산 − 포지션 평가액 (파생값). USD 실예수금이 아니라 "
                            "원화 여유 증거금의 달러 환산입니다.")
             usd_dep = d.get("usd_deposit") or 0.0
             st.caption(f"💱 USD 실예수금 {_money(usd_dep, '$')} · "
@@ -140,12 +228,12 @@ def _account_section(surface: str):
         st.markdown("##### 최근 주문 내역")
         st.dataframe(pd.DataFrame([{
             "시각": r.get("date"),
-            "종목": r.get("code") or r.get("symbol") or r.get("ticker"),
+            "종목": _order_label(r.get("code") or r.get("symbol") or r.get("ticker")),
             "방향": "매수" if r.get("side") == "buy" else ("매도" if r.get("side") == "sell" else r.get("side")),
             "수량": r.get("qty"),
-            "사유": r.get("reason") or "—",
+            "사유": _reason_text(r.get("reason")),
             "상태": "✅ 성공" if r.get("ok") is True else ("❌ 실패" if r.get("ok") is False else "—"),
-            "메시지": r.get("msg") or "—",
+            "메시지": _reason_text(r.get("msg")) if r.get("msg") else "—",
         } for r in orders[:30]]), hide_index=True, width="stretch",
             column_config={"메시지": st.column_config.TextColumn(width="large")})
 
@@ -153,11 +241,11 @@ def _account_section(surface: str):
     sl = d.get("sleeve")
     if sl:
         if sl.get("reco"):
-            state = f"게이트 **GO ×{sl['reco']:.2f}** → 목표 {(sl['reco'] - 1) * 100:.0f}%"
+            state = f"게이트 **통과 ×{sl['reco']:.2f}** → 목표 {(sl['reco'] - 1) * 100:.0f}%"
         elif sl.get("enabled"):
-            state = "게이트 미통과/stale → 목표 0% (청산 방향)"
+            state = "게이트 미통과/오래됨 → 목표 0% (청산 방향)"
         else:
-            state = "슬리브 off (보유 잔량만)"
+            state = "슬리브 꺼짐 (보유 잔량만)"
         st.markdown(f"🏗️ **구조레버 슬리브** — {state} · 보유 {sl['symbol']} "
                     f"{sl['shares']}주 ({sl['frac']:.0f}%)")
 
@@ -206,7 +294,7 @@ def _intraday_section(surface: str):
     st.markdown("##### 🕐 단기 트레이딩 (1분봉)")
     if s:
         cur = s["currency"]
-        badge = "🌑 shadow(가상체결)" if s["shadow"] else "🧪 모의 집행"
+        badge = "🌑 가상체결" if s["shadow"] else "🧪 모의 집행"
         k = st.columns(4)
         k[0].metric("오늘 트레이드", f"{s['today_n']}건",
                     delta=(f"승 {s['wins']}" if s["today_n"] else None), delta_color="off")
@@ -218,7 +306,7 @@ def _intraday_section(surface: str):
     date = c1.selectbox("날짜", list(reversed(dates)) or [day_default],
                         key=f"intr_date_{surface}") if dates else day_default
     if not date:
-        st.caption("분봉 데이터 없음 — `INTRADAY_BARS_ENABLED=true` + kis_stream 재시작 후 축적됩니다")
+        st.caption("분봉이 아직 없습니다.")
         return
     day = cached.intraday_day(mkt, date)
     syms = day.get("symbols") or []
@@ -227,14 +315,17 @@ def _intraday_section(surface: str):
         return
     sym = c2.selectbox("종목", syms, key=f"intr_sym_{surface}",
                        format_func=lambda t: data.name_label(t) if hasattr(data, "name_label") else t)
-    interval = c3.segmented_control("봉", ["1m", "5m"], default="1m",
-                                    key=f"intr_iv_{surface}") or "1m"
+    interval = c3.segmented_control(
+        "봉", ["1m", "5m"], default="1m", key=f"intr_iv_{surface}",
+        format_func=lambda value: {"1m": "1분", "5m": "5분"}.get(value, value),
+    ) or "1m"
 
     ch = cached.intraday_chart(sym, mkt, date, interval)
     bars = ch.get("bars")
     if bars is None or getattr(bars, "empty", True):
-        st.caption("분봉 없음 (bar store 미축적·yfinance 폴백 실패)")
+        st.caption("이 날짜의 분봉이 없습니다.")
         return
+    cur = (s or {}).get("currency") or ("₩" if surface == "kr_mock" else "$")
     # 그날 그 심볼 결정의 스톱/목표선 (최근 결정 기준)
     rows_sym = [r for r in (day.get("rows") or []) if r.get("ticker") == sym]
     levels = []
@@ -252,7 +343,7 @@ def _intraday_section(surface: str):
                                 on_select="rerun", selection_mode="points")
     except TypeError:
         st.plotly_chart(fig, width="stretch", config=charts.PAN_CFG)
-    src_note = {"store": "자체 1분봉(실시간 수집)", "yfinance": "yfinance 폴백(지연)"}.get(ch.get("src"), "")
+    src_note = {"store": "자체 1분봉(실시간 수집)", "yfinance": "시세 폴백(지연)"}.get(ch.get("src"), "")
     bar_count = ch.get("bar_count")
     bar_span = ""
     if ch.get("bar_first") and ch.get("bar_last"):
@@ -271,47 +362,50 @@ def _intraday_section(surface: str):
         side_lbl = "매수(진입)" if sel.get("side") == "buy" else "매도(청산)"
         cc = st.columns(4)
         cc[0].metric("구분", side_lbl)
-        cc[1].metric("수량·가격", f"{sel.get('qty')}주 @ {float(sel.get('price') or 0):,.2f}")
+        cc[1].metric("수량·가격", f"{sel.get('qty')}주 @ {_money(sel.get('price'), cur)}")
         cc[2].metric("점수", data.f_ratio((rec or {}).get("score"), 2))
-        cc[3].metric("결과", (f"{rec.get('exit_reason')} R{rec.get('realized_r'):+.2f}"
-                              if rec and rec.get("realized_r") is not None else "⏳/—"))
+        result = (
+            f"{_label(_EXIT_LABEL, rec.get('exit_reason'))} R{rec.get('realized_r'):+.2f}"
+            if rec and rec.get("realized_r") is not None else "⏳/—"
+        )
+        cc[3].metric("결과", result)
         if rec and rec.get("features"):
             axes = {k: v for k, v in rec["features"].items()
                     if k in ("orb", "vwap", "volspike", "ofi", "news", "ema", "rsi", "bb")}
             st.caption("판단 축 점수: " + " · ".join(
-                f"{k} {data.f_ratio(v, 2)}" for k, v in axes.items() if v is not None))
+                f"{_label(_AXIS_LABEL, k)} {data.f_ratio(v, 2)}" for k, v in axes.items() if v is not None))
 
     # 그날 트레이드 원장표 (결정⋈결과)
     rows = day.get("rows") or []
     if rows:
         st.dataframe(pd.DataFrame([{
             "시각": str(r.get("id", ""))[-6:], "종목": r.get("ticker"),
-            "수량": r.get("qty"), "진입": r.get("price"),
+            "수량": r.get("qty"), "진입": _money(r.get("price"), cur),
             "점수": data.f_ratio(r.get("score"), 2),
-            "청산": r.get("exit_reason") or "⏳오픈",
-            "net R": (f"{r['realized_r']:+.2f}" if r.get("realized_r") is not None else "—"),
-            "손익": (f"{r['net_pnl']:+,.0f}" if r.get("net_pnl") is not None else "—"),
-            "모드": "shadow" if r.get("shadow") else "모의",
+            "청산": _label(_EXIT_LABEL, r.get("exit_reason"), "⏳오픈"),
+            "순R": (f"{r['realized_r']:+.2f}" if r.get("realized_r") is not None else "—"),
+            "손익": _signed_money(r.get("net_pnl"), cur) if r.get("net_pnl") is not None else "—",
+            "모드": "가상" if r.get("shadow") else "모의",
         } for r in rows]), hide_index=True, width="stretch")
-    st.caption("⚠️ 단기 슬리브 — shadow 기본(가상체결)·게이트(트레이드≥100·순R>0·PSR·PBO) 통과 후에만 "
-               "모의 집행 승격 · 실거래 아님")
+    st.caption("⚠️ 단기 슬리브 — 가상체결이 기본입니다. 트레이드 100건 이상·순R>0·검증 관문을 통과한 뒤에만 "
+               "모의 집행으로 올라갑니다. 실거래 아님")
 
 
 @st.fragment
 def _decisions_section(surface: str):
     st.markdown("##### 🧾 판단 근거 (편입/퇴출 결정 원장)")
-    st.caption("append-only 불변 원장 — 결정 시점 근거(point-in-time) ⋈ 실현 결과(성숙 후 백필)")
+    st.caption("지우지 않는 원장 — 결정 시점의 근거와, 시간이 지난 뒤 채운 실현 결과")
     d = cached.paper(surface)
     rows = d.get("decisions") or []
     if not rows:
-        st.info("결정 이력 없음 — 자동 모의투자 크론 실행 후 누적됩니다")
+        st.info("편입·퇴출 기록이 아직 없습니다.")
         return
     fc1, fc2, fc3 = st.columns([2, 1, 1])
     sides = fc1.multiselect("구분", ["편입", "퇴출", "증액", "감액", "레버슬리브"],
                             default=["편입", "퇴출"], key=f"paper_sides_{surface}")
     n = fc2.slider("표시 건수", 20, 200, 50, 10, key=f"paper_n_{surface}")
     show_axes = fc3.toggle("축 피처 보기", key=f"paper_axes_{surface}",
-                           help="★새 수집 축(mom12·hi52·lowvol·pead·news) — 원장 축적 현황")
+                           help="★새 수집 축(12개월·52주고점·저변동·실적·뉴스) — 원장 축적 현황")
     view = [r for r in rows if not sides or r.get("side") in sides][:n]
     if not view:
         st.caption("선택한 구분의 결정 없음")
@@ -328,23 +422,23 @@ def _decisions_section(surface: str):
             "정책점수": data.f_ratio(r.get("policy_score"), 3),
             "선택점수": data.f_ratio(r.get("selection_score"), 3),
             "오버레이": "켜짐" if overlay_active else "꺼짐",
-            "상태": r.get("momentum_state") or "inactive",
+            "상태": _label(_STATE_LABEL, r.get("momentum_state") or "inactive"),
             "모멘텀점수": data.f_ratio(r.get("momentum_score"), 3) if overlay_active else "—",
             "배수": f"×{float(mult):.2f}" if overlay_active and mult is not None else "—",
             "틸트": data.f_ratio(r.get("momentum_tilt"), 3),
-            "레짐": r.get("regime") or "—",
-            "판단 근거": r.get("reason") or "—",
+            "레짐": _label(_REGIME_LABEL, r.get("regime")),
+            "판단 근거": _reason_text(r.get("reason")),
             "체결": "✅" if r.get("ok") else ("❌" if r.get("ok") is False else "—"),
             "실현 순초과": data.f_frac_pct_s(r.get("fwd_excess"), 2),
             "적중": ("✅" if r["correct"] else "❌") if r.get("correct") is not None else "⏳",
         }
         if show_axes:
             f = r.get("features") or {}
-            for ax in ("mom12", "hi52", "lowvol", "pead", "news"):
-                base[ax] = data.f_ratio(f.get(ax), 2)
+            for ax in _AXIS_COL:
+                base[_AXIS_COL[ax]] = data.f_ratio(f.get(ax), 2)
         return base
 
     st.dataframe(pd.DataFrame([_row(r) for r in view]), hide_index=True, width="stretch",
                  column_config={"판단 근거": st.column_config.TextColumn(width="large")})
-    st.caption("실현 순초과 = horizon 경과 후 지수 대비 초과수익(거래비용 차감) · ⏳ = 결과 성숙 대기 · "
+    st.caption("실현 순초과 = 평가 기간이 지난 뒤 지수 대비 초과수익(거래비용 차감) · ⏳ = 결과 성숙 대기 · "
                "⚠️ 모의투자 — 실거래 아님")

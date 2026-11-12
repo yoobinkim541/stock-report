@@ -8,8 +8,21 @@ import streamlit as st
 from agent_console import wiki
 
 
-from dashboard import cached
-from dashboard.wiki_browser import KIND_OPTIONS, SURFACE_OPTIONS, build_wiki_health_model
+from dashboard import cached, ui_actions
+from dashboard.wiki_browser import (
+    KIND_LABELS,
+    KIND_OPTIONS,
+    STATUS_LABELS,
+    SURFACE_LABELS,
+    SURFACE_OPTIONS,
+    build_wiki_health_model,
+    display_source_ref,
+    merge_event_caption,
+    option_label,
+    page_display_name,
+    promotion_guardrail,
+    render_wiki_status_metrics,
+)
 
 STATUS_OPTIONS = ["all", "draft", "reviewed", "stable", "archived"]
 
@@ -63,12 +76,7 @@ def render():
     )
 
     stats = _safe_wiki_stats()
-    cols = st.columns(4)
-    cols[0].metric("페이지", f"{stats.get('total', 0)}")
-    cols[1].metric("초안", f"{stats.get('status_counts', {}).get('draft', 0)}")
-    cols[2].metric("검토", f"{stats.get('status_counts', {}).get('reviewed', 0)}")
-    latest = stats.get("latest") or {}
-    cols[3].metric("최근", (latest.get("title", "—") or "—")[:20])
+    render_wiki_status_metrics(stats)
 
     try:
         pages_all = cached.wiki_pages(query="", surface="all", status="all", limit=10000)
@@ -87,14 +95,17 @@ def render():
     surface_counts = health.get("surface_counts") or {}
     if surface_counts:
         st.markdown("##### 그룹 분포")
-        surface_series = pd.Series(surface_counts).sort_values(ascending=False)
+        surface_series = pd.Series({
+            option_label(SURFACE_LABELS, key): count for key, count in surface_counts.items()
+        }).sort_values(ascending=False)
         st.bar_chart(surface_series, height=180)
-        kind_counts = health.get("kind_counts") or {}
-        if kind_counts:
-            top_kinds = ", ".join(
-                f"{k}: {v}" for k, v in sorted(kind_counts.items(), key=lambda item: (-item[1], item[0]))[:6]
-            )
-            st.caption(f"kind 분포 · {top_kinds}")
+    kind_counts = health.get("kind_counts") or {}
+    if kind_counts:
+        top_kinds = ", ".join(
+            f"{option_label(KIND_LABELS, k)}: {v}"
+            for k, v in sorted(kind_counts.items(), key=lambda item: (-item[1], item[0]))[:6]
+        )
+        st.caption(f"종류 분포 · {top_kinds}")
 
     recommendations = health.get("recommendations") or []
     if recommendations:
@@ -102,22 +113,47 @@ def render():
         for rec in recommendations[:5]:
             with st.container(border=True):
                 st.markdown(f"**{rec.get('title', '권고')}**")
-                st.caption(rec.get("category", "general"))
+                st.caption(option_label({
+                    "balance": "균형",
+                    "curation": "정리",
+                    "trust": "신뢰",
+                    "connectivity": "연결",
+                    "hygiene": "정리",
+                    "healthy": "양호",
+                    "general": "일반",
+                }, rec.get("category", "general")))
                 st.write(rec.get("detail", ""))
 
     # 폼 제출형 검색 — 종전엔 text_input 이 폼 밖이라 글자 하나 칠 때마다 전체 rerun + 위키 조회
     with st.form("wiki_search_form", border=False):
         query = st.text_input("검색", key="wiki_query", placeholder="손실한도, 레버리지, SOL, 중동, 크레딧...")
         f1, f2, f3, f4 = st.columns([1, 1, 1, 0.6])
-        surface = f1.selectbox("화면(surface)", SURFACE_OPTIONS, index=0, key="wiki_surface_filter")
-        status = f2.selectbox("상태", STATUS_OPTIONS, index=0, key="wiki_status_filter")
-        kind_filter = f3.selectbox("종류", KIND_OPTIONS, index=0, key="wiki_kind_filter")
+        surface = f1.selectbox(
+            "화면", SURFACE_OPTIONS, index=0, key="wiki_surface_filter",
+            format_func=lambda value: option_label(SURFACE_LABELS, value),
+        )
+        status = f2.selectbox(
+            "상태", STATUS_OPTIONS, index=0, key="wiki_status_filter",
+            format_func=lambda value: option_label(STATUS_LABELS, value),
+        )
+        kind_filter = f3.selectbox(
+            "종류", KIND_OPTIONS, index=0, key="wiki_kind_filter",
+            format_func=lambda value: option_label(KIND_LABELS, value),
+        )
         f4.form_submit_button("검색", width="stretch")
 
     pages = cached.wiki_pages(query=query, surface=surface, status=status, limit=60)
+    wanted = str(st.session_state.get("wiki_selected_page_id") or "")
+    if wanted and not any(page.get("id") == wanted for page in pages):
+        extra = cached.wiki_page(wanted)
+        if extra and extra.get("id"):
+            pages = [extra, *pages]
     if kind_filter != "all":
         pages = [page for page in pages if page.get("kind") == kind_filter]
-
+    sync_id = str(st.session_state.get("_wiki_picker_sync") or "")
+    if sync_id and not any(str(page.get("id") or "") == sync_id for page in pages):
+        st.session_state.pop("_wiki_picker_sync", None)
+        st.toast("문서를 열지 못했습니다.")
     _pending_curation_section()
 
     left, right = st.columns([1.05, 0.95], gap="large")
@@ -130,11 +166,13 @@ def render():
             if selected:
                 st.session_state["wiki_selected_page_id"] = selected["id"]
                 _page_card(selected)
-                if st.button("삭제", width="stretch"):
+                if ui_actions.confirm_delete(selected["id"], button_key="ai_wiki_delete", label="삭제"):
                     if wiki.delete_page(selected["id"]):
                         cached.clear_wiki_caches()
+                        st.session_state.pop("wiki_selected_page_id", None)
                         st.toast("위키 페이지 삭제 완료")
                         st.rerun()
+                    st.toast("삭제하지 못했습니다.")
 
     with right:
         st.markdown("##### 편집기")
@@ -143,30 +181,40 @@ def render():
         with st.form("wiki_editor", clear_on_submit=False):
             title = st.text_input("제목", value=default_page.get("title", ""))
             editor_surface = st.selectbox(
-                "surface",
+                "화면",
                 SURFACE_OPTIONS[1:],
                 index=max(0, SURFACE_OPTIONS[1:].index(default_page.get("surface", "market"))
                       if default_page.get("surface", "market") in SURFACE_OPTIONS[1:] else 0),
                 key="wiki_editor_surface",
+                format_func=lambda value: option_label(SURFACE_LABELS, value),
             )
             kind = st.selectbox(
-                "kind",
+                "종류",
                 KIND_OPTIONS[1:],
                 index=max(0, KIND_OPTIONS[1:].index(default_page.get("kind", "note"))
                       if default_page.get("kind", "note") in KIND_OPTIONS[1:] else 0),
                 key="wiki_editor_kind",
+                format_func=lambda value: option_label(KIND_LABELS, value),
             )
             editor_status = st.selectbox(
-                "status",
+                "상태",
                 ["draft", "reviewed", "stable", "archived"],
                 index=max(0, ["draft", "reviewed", "stable", "archived"].index(default_page.get("status", "draft"))
                       if default_page.get("status", "draft") in ["draft", "reviewed", "stable", "archived"] else 0),
                 key="wiki_editor_status",
+                format_func=lambda value: option_label(STATUS_LABELS, value),
             )
-            tags = st.text_input("tags", value=", ".join(default_page.get("tags", [])))
+            tags = st.text_input("태그", value=", ".join(default_page.get("tags", [])))
             summary = st.text_area("요약", value=default_page.get("summary", ""), height=130)
             body = st.text_area("본문", value=default_page.get("body", ""), height=220)
-            source_refs = st.text_input("source refs", value=", ".join(default_page.get("source_refs", [])))
+            source_refs = st.text_input("출처", value=", ".join(default_page.get("source_refs", [])))
+            parsed_refs = [item.strip() for item in source_refs.replace(";", ",").split(",") if item.strip()]
+            guardrail = promotion_guardrail(editor_status, parsed_refs)
+            if not guardrail.get("allowed"):
+                st.warning(
+                    f"승격 불가: {guardrail.get('message')} "
+                    f"저장 시 {option_label(STATUS_LABELS, guardrail.get('downgraded_to'))}로 낮아집니다."
+                )
             if st.form_submit_button("위키 저장", type="primary", width="stretch"):
                 saved = wiki.upsert_page(
                     {
@@ -178,12 +226,16 @@ def render():
                         "tags": [item.strip() for item in tags.replace(";", ",").split(",") if item.strip()],
                         "summary": summary,
                         "body": body,
-                        "source_refs": [item.strip() for item in source_refs.replace(";", ",").split(",") if item.strip()],
+                        "source_refs": parsed_refs,
                         "confidence": default_page.get("confidence", 0.7),
                     }
                 )
                 cached.clear_wiki_caches()
                 st.session_state["wiki_selected_page_id"] = saved.get("id")
+                if saved.get("id"):
+                    st.session_state["_wiki_picker_sync"] = saved.get("id")
+                if saved.get("status") != editor_status:
+                    st.warning(f"상태는 {option_label(STATUS_LABELS, saved.get('status'))}로 저장됐습니다.")
                 st.success("위키 페이지를 저장했습니다.")
                 st.rerun()
 
@@ -213,26 +265,69 @@ def _blank_page(*, query: str = "", surface: str = "market") -> dict:
     }
 
 
+def wiki_page_label(page: dict) -> str:
+    return (
+        f"{page.get('title', '위키')} · {page.get('status', 'draft')} · "
+        f"{page.get('surface', 'wiki')}"
+    )
+
+
+def resolve_wiki_picker(
+    pages: list[dict],
+    *,
+    selected_id: str,
+    picker_label: str | None,
+    sync_id: str | None,
+) -> tuple[dict | None, str | None]:
+    """선택 상자가 보여줄 페이지.
+
+    분할 문서 읽기·새 저장은 `sync_id` 로 연다. 이걸 먼저 적용하지 않으면
+    선택 상자에 남은 이전 라벨이 `index` 를 이기고, 방금 연 문서가 이전 문서로 덮인다.
+    반환의 두 번째 값은 위젯을 만들기 전에 선택 상자에 써 넣을 라벨이다.
+    """
+    if not pages:
+        return None, None
+    labels = [wiki_page_label(page) for page in pages]
+    by_id = {str(page.get("id") or ""): idx for idx, page in enumerate(pages)}
+    if sync_id and sync_id in by_id:
+        idx = by_id[sync_id]
+        return pages[idx], labels[idx]
+    if picker_label in labels:
+        return pages[labels.index(picker_label)], None
+    if selected_id in by_id:
+        return pages[by_id[selected_id]], None
+    return pages[0], None
+
+
 def _select_page(pages: list[dict]) -> dict | None:
-    labels = [
-        f"{page.get('title', '위키')} · {page.get('status', 'draft')} · {page.get('surface', 'wiki')}"
-        for page in pages
-    ]
-    current_id = st.session_state.get("wiki_selected_page_id", "")
-    default_index = 0
-    for idx, page in enumerate(pages):
-        if page.get("id") == current_id:
-            default_index = idx
-            break
+    labels = [wiki_page_label(page) for page in pages]
+    sync_id = st.session_state.pop("_wiki_picker_sync", None)
+    page, forced = resolve_wiki_picker(
+        pages,
+        selected_id=str(st.session_state.get("wiki_selected_page_id") or ""),
+        picker_label=st.session_state.get("wiki_page_picker"),
+        sync_id=str(sync_id) if sync_id else None,
+    )
+    if forced:
+        st.session_state["wiki_page_picker"] = forced
+    default_index = labels.index(forced) if forced and forced in labels else 0
+    if not forced:
+        current_id = str(st.session_state.get("wiki_selected_page_id") or "")
+        for idx, item in enumerate(pages):
+            if item.get("id") == current_id:
+                default_index = idx
+                break
     selected_label = st.selectbox("페이지 선택", labels, index=default_index, key="wiki_page_picker")
-    return pages[labels.index(selected_label)] if selected_label in labels else pages[default_index]
+    if selected_label in labels:
+        return pages[labels.index(selected_label)]
+    return page or pages[default_index]
 
 
 def _page_card(page: dict):
     title = escape(str(page.get("title") or "위키 페이지"))
-    status = escape(str(page.get("status") or "draft"))
-    surface = escape(str(page.get("surface") or "wiki"))
-    kind = escape(str(page.get("kind") or "note"))
+    status = escape(option_label(STATUS_LABELS, page.get("status") or "draft"))
+    surface = escape(option_label(SURFACE_LABELS, page.get("surface") or "wiki"))
+    kind = escape(option_label(KIND_LABELS, page.get("kind") or "note"))
     summary = escape(str(page.get("summary") or ""))
     st.markdown(
         f"""
@@ -252,29 +347,33 @@ def _page_card(page: dict):
     if page.get("merge_history") or page.get("merged_into"):
         st.markdown("##### 병합/아카이브 기록")
         if page.get("merged_into"):
-            st.caption(f"이 문서는 {page['merged_into']}에 병합되어 보관 중입니다.")
+            st.caption(f"이 문서는 {page_display_name(page['merged_into'])}에 병합되어 보관 중입니다.")
         for event in page.get("merge_history") or []:
-            sources = ", ".join(event.get("source_titles") or event.get("source_ids") or [])
-            st.caption(f"{event.get('occurred_at', '')} · {event.get('action', 'merge')} · 원본: {sources or 'unknown'}")
+            st.caption(merge_event_caption(event))
             if event.get("reason"):
                 st.write(event["reason"])
     split_children = wiki.split_children_for_page(page)
     if split_children:
         st.markdown("##### 분할된 세부 문서")
-        for child in split_children[:6]:
+        for idx, child in enumerate(split_children[:6]):
             with st.container(border=True):
                 st.markdown(f"**{child.get('title', '세부 문서')}**")
-                st.caption(f"{child.get('surface', 'wiki')} · {child.get('kind', 'note')} · {child.get('status', 'draft')}")
+                st.caption(f"{option_label(SURFACE_LABELS, child.get('surface', 'wiki'))} · {option_label(KIND_LABELS, child.get('kind', 'note'))} · {option_label(STATUS_LABELS, child.get('status', 'draft'))}")
                 if child.get("summary"):
                     st.caption(str(child["summary"])[:180])
-                if st.button("읽기", key=f"ai_wiki_split_child_{child.get('id')}", width="stretch"):
-                    st.session_state["wiki_selected_page_id"] = child.get("id")
-                    st.rerun()
+                child_id = str(child.get("id") or "")
+                if st.button("읽기", key=f"ai_wiki_split_child_{child_id or idx}", width="stretch"):
+                    if not child_id:
+                        st.toast("문서를 열지 못했습니다.")
+                    else:
+                        st.session_state["wiki_selected_page_id"] = child_id
+                        st.session_state["_wiki_picker_sync"] = child_id
+                        st.rerun()
     meta = pd.DataFrame([
         {"필드": "생성", "값": page.get("created_at", "")},
         {"필드": "수정", "값": page.get("updated_at", "")},
         {"필드": "신뢰도", "값": f"{float(page.get('confidence', 0.5)):.2f}"},
-        {"필드": "source refs", "값": ", ".join(page.get("source_refs", [])) or "—"},
+        {"필드": "출처", "값": ", ".join(display_source_ref(item) for item in page.get("source_refs", [])) or "-"},
     ])
     st.dataframe(meta, hide_index=True, width="stretch")
 
@@ -298,8 +397,9 @@ def _pending_curation_section() -> None:
             ids = [plan.get("target_id"), plan.get("target_page_id"), plan.get("source_page_id"),
                    *(plan.get("source_page_ids") or [])]
             ids = [i for i in ids if i]
+            names = [page_display_name(i) for i in ids]
             with st.container(border=True):
-                st.markdown(f"**{_ACTION_LABEL.get(action, action)}** · {', '.join(f'`{i}`' for i in ids) or '대상 없음'}")
+                st.markdown(f"**{_ACTION_LABEL.get(action, '변경')}** · {', '.join(names) or '대상 없음'}")
                 if plan.get("reason"):
                     st.caption(f"사유: {plan['reason']}")
                 if prop.get("question"):
