@@ -234,6 +234,51 @@ def test_plan_buys_top_n_equal_weight():
     assert by["005930"]["qty"] == 21                                     # floor(1.5M/70000)
 
 
+
+def test_weighted_plan_uses_the_book_and_leaves_the_rest_in_cash():
+    import kiwoom_mock_track as kt
+    signals = [_sig("005930", "강한 매수후보", 99, 50000)]
+    book = {
+        "weights": {"000660": 0.5},
+        "prices": {"000660": 100000},
+    }
+    merged = kt._merge_advantage(signals, book)
+    orders = kt.plan_rebalance(
+        merged, {}, budget_krw=1_000_000, max_positions=1,
+        target_weights=book["weights"],
+    )
+    assert orders == [{
+        "code": "000660", "side": "buy", "qty": 5,
+        "reason": "장점앙상블", "stub": False,
+    }]
+
+
+def test_weighted_plan_sells_a_held_name_that_the_book_dropped():
+    import kiwoom_mock_track as kt
+    orders = kt.plan_rebalance(
+        [{"code": "000660", "price": 100000, "is_buy": True}],
+        {"005930": {"shares": 4, "cur_price": 70000}},
+        budget_krw=1_000_000, max_positions=5,
+        target_weights={"000660": 1.0},
+    )
+    by = {o["code"]: o for o in orders}
+    assert by["005930"]["side"] == "sell" and by["005930"]["qty"] == 4
+    assert by["000660"]["side"] == "buy"
+
+
+def test_empty_advantage_book_sells_instead_of_using_the_ranker():
+    import kiwoom_mock_track as kt
+    orders = kt.plan_rebalance(
+        [_sig("005930", "강한 매수후보", 99, 50000)],
+        {"005930": {"shares": 3, "cur_price": 50000}},
+        budget_krw=1_000_000, max_positions=5,
+        target_weights={},
+    )
+    assert orders == [{
+        "code": "005930", "side": "sell", "qty": 3,
+        "reason": "타깃이탈", "stub": False,
+    }]
+
 def test_plan_sells_position_off_target():
     import kiwoom_mock_track as kt
     signals = [_sig("035720", "강한 매수후보", 90, 50000)]
@@ -498,6 +543,7 @@ def test_main_dry_run_places_no_orders(monkeypatch):
         "ok": True, "positions": {}, "pos_value": 0.0, "cash_krw": 10_000_000, "nav": 10_000_000, "raw": {}})
     monkeypatch.setattr(kt, "compute_kr_signals",
                         lambda limit=20: [_sig("005930", "강한 매수후보", 80, 50000)])
+    monkeypatch.setattr(kt, "advantage_book", lambda: {"ok": False, "error": "test"})
     ordered = {"n": 0}
     monkeypatch.setattr(kiwoom_mock, "place_order", lambda *a, **k: ordered.__setitem__("n", ordered["n"] + 1))
     assert kt.main(["--dry-run"]) == 0
