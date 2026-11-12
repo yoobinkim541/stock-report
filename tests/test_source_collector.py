@@ -672,6 +672,34 @@ def test_expected_sources_include_kalshi():
     assert "kalshi" in sc.expected_sources()
 
 
+def test_rss_items_from_xml_reads_rss_and_atom():
+    rss = """<rss><channel><item>
+      <title>Fed holds rates</title>
+      <link>https://www.federalreserve.gov/newsevents/pressreleases/monetary20261027a.htm</link>
+      <description>&lt;p&gt;The Committee decided to maintain the target range.&lt;/p&gt;</description>
+      <pubDate>Mon, 27 Oct 2026 18:00:00 GMT</pubDate>
+    </item></channel></rss>"""
+    atom = """<feed xmlns="http://www.w3.org/2005/Atom"><entry>
+      <title>8-K - EXAMPLE INC</title>
+      <link href="https://www.sec.gov/Archives/edgar/data/1/0001.htm"/>
+      <summary>Item 2.02 results</summary>
+      <updated>2026-10-27T12:00:00-04:00</updated>
+    </entry></feed>"""
+    fed = sc.rss_items_from_xml(rss)
+    filing = sc.rss_items_from_xml(atom)
+    assert fed[0]["title"] == "Fed holds rates"
+    assert fed[0]["url"].startswith("https://www.federalreserve.gov/")
+    assert "target range" in fed[0]["body"]
+    assert "<p>" not in fed[0]["body"]
+    assert filing[0]["title"].startswith("8-K")
+    assert filing[0]["url"].startswith("https://www.sec.gov/")
+
+
+def test_expected_sources_include_public_rss():
+    sources = sc.expected_sources()
+    assert "rss:fed" in sources and "rss:yonhap" in sources and "rss:sec" in sources
+
+
 def test_polymarket_keyword_matching_uses_word_boundaries():
     event = {"title": "Will Gedion Timothewos be the next Prime Minister of Ethiopia?", "category": "Politics"}
     market = {"question": "Will Gedion Timothewos be the next Prime Minister of Ethiopia?"}

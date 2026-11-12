@@ -66,6 +66,25 @@ def test_build_wiki_graph_model_groups_nodes_by_theme_with_separated_clusters():
     assert min(gap(r, g) for r in ("r1", "r2") for g in ("g1", "g2")) > gap("r1", "r2")
 
 
+def test_build_wiki_graph_model_keeps_surface_on_nodes_and_groups_by_theme():
+    pages = [
+        {"id": "m1", "title": "시장 1", "summary": "시장", "surface": "market", "kind": "note", "tags": ["market"], "source_refs": []},
+        {"id": "m2", "title": "시장 2", "summary": "시장", "surface": "market", "kind": "note", "tags": ["market"], "source_refs": []},
+        {"id": "p1", "title": "포트폴리오 1", "summary": "포트폴리오", "surface": "portfolio", "kind": "note", "tags": ["portfolio"], "source_refs": []},
+        {"id": "t1", "title": "티커 1", "summary": "티커", "surface": "ticker", "kind": "note", "tags": ["ticker"], "source_refs": []},
+    ]
+
+    model = wiki_mesh.build_wiki_graph_model(pages, selected_page_id="", depth=1, max_nodes=10)
+    by_id = {node["id"]: node for node in model["nodes"]}
+    groups = {group["surface"]: group for group in model["groups"]}
+
+    assert by_id["m1"]["surface_color"] == wiki_mesh.SURFACE_COLORS["market"]
+    assert by_id["p1"]["group"] == "portfolio"
+    assert model["positions"]["m1"] != model["positions"]["p1"]
+    assert groups["기타 지식"]["count"] == 3
+    assert groups["종목전략·플레이북 (Single Stock Strategies)"]["count"] == 1
+    assert set(groups) <= set(wiki_mesh.THEME_COLORS)
+
 
 def test_build_wiki_graph_model_respects_max_nodes():
     pages = [
@@ -323,3 +342,52 @@ def test_declutter_labeled_positions_noop_when_already_spread_out():
     positions = {"hub-a": (0.0, 0.0), "hub-b": (3.0, 3.0)}
     result = wiki_mesh._declutter_labeled_positions(positions, {"hub-a", "hub-b"}, min_separation=0.16)
     assert result == positions
+
+
+def test_index_category_feeds_graph_theme_colors():
+    """그래프 레이아웃이 부르는 분류가 없으면 위키 브라우저 전체가 죽는다."""
+    from agent_console import wiki
+
+    assert wiki._index_category({"kind": "source_digest", "title": "원문"}) == wiki._INDEX_SOURCE
+    assert wiki._index_category({"title": "중동 지정학 점검", "kind": "note"}) == (
+        "정치·지정학 (Politics & Geopolitics)"
+    )
+    assert wiki._index_category({"surface": "ticker", "title": "메모", "kind": "note"}) == wiki._INDEX_PLAYBOOK
+    assert wiki._index_category(None) == wiki._INDEX_OTHER
+    labels = {wiki._index_category(page) for page in [
+        {"id": "a", "title": "반도체 실적", "summary": "가이던스", "kind": "note", "surface": "wiki", "tags": []},
+    ]}
+    assert labels <= set(wiki_mesh.THEME_COLORS)
+
+
+def test_node_hover_and_network_tooltip_use_korean_labels():
+    text = wiki_mesh._node_hover({
+        "title": "반도체",
+        "surface": "portfolio",
+        "kind": "note",
+        "status": "draft",
+        "verification_status": "unverified",
+        "lint_issue_count": 1,
+        "degree": 3,
+        "source_refs": ["source:a"],
+        "summary": "요약",
+        "tags": ["실적"],
+    })
+    assert "포트폴리오" in text and "메모" in text and "초안" in text and "미확인" in text
+    assert "verification" not in text and "degree" not in text and "portfolio" not in text
+    html = wiki_mesh.build_obsidian_network_html({
+        "nodes": [{
+            "id": "p1", "title": "반도체", "surface": "portfolio", "status": "draft", "degree": 2,
+        }],
+        "edges": [],
+    }, selected_id="p1")
+    assert "화면: 포트폴리오" in html and "상태: 초안" in html
+    assert "상태: draft" not in html
+
+
+def test_mesh_stats_caption_hides_filter_keys():
+    text = wiki_mesh.mesh_stats_caption(3, 2, 1, "portfolio", "draft")
+    assert text == "노드 3 · 연결 2 · 묶음 1 · 화면 포트폴리오 · 상태 초안"
+    assert "surface" not in text and "status" not in text and "nodes" not in text
+    whole = wiki_mesh.mesh_stats_caption(0, 0, 0, "all", "all")
+    assert "화면 전체" in whole and "상태 전체" in whole

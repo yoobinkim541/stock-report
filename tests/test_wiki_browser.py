@@ -97,6 +97,16 @@ def test_select_page_id_falls_back_to_first_visible_page():
     assert selected == "p2"
 
 
+def test_select_page_id_keeps_cited_page_outside_filter():
+    selected = wiki_browser.select_page_id(
+        PAGES,
+        selected_page_id="p1",
+        query="없는검색어",
+        surface="all",
+        status="all",
+    )
+    assert selected == "p1"
+
 def test_build_browser_model_related_pages_use_full_corpus_not_visible_slice():
     model = wiki_browser.build_browser_model(
         PAGES,
@@ -230,7 +240,6 @@ def test_promotion_guardrail_blocks_promoted_conversation_only_pages():
 
     assert blocked["allowed"] is False
     assert blocked["downgraded_to"] == "draft"
-    assert "source ref" in blocked["message"]
     assert allowed["allowed"] is True
 
 
@@ -392,3 +401,26 @@ def test_cached_wiki_snapshot_reuses_list_pages_across_reruns(monkeypatch):
     pages2, _, _ = wiki_browser._cached_wiki_snapshot()  # 무관한 rerun 재현
     assert calls["n"] == 1
     assert pages1 == pages2 == [{"id": "p1", "title": "A"}]
+
+
+def test_display_source_ref_hides_storage_keys():
+    assert wiki_browser.display_source_ref("conversation:002") == "대화"
+    assert wiki_browser.display_source_ref("source:saveticker:2026") == "📰 SaveTicker"
+    assert wiki_browser.display_source_ref("https://example.com/fomc") == "https://example.com/fomc"
+    assert wiki_browser.display_source_ref("/tmp/nvda.txt") == "파일"
+    assert wiki_browser.display_source_ref("전자공시") == "전자공시"
+    assert ":" not in wiki_browser.display_source_ref("news:alpha")
+
+
+def test_merge_event_caption_hides_ids_and_action_codes():
+    caption = wiki_browser.merge_event_caption(
+        {"action": "merge", "occurred_at": "2026-09-05T00:00:00+00:00", "source_ids": ["p1"], "source_titles": ["옛 카드"]},
+    )
+    assert caption == "2026-09-05T00:00:00+00:00 · 병합 · 원본: 옛 카드"
+    assert "merge" not in caption and "p1" not in caption
+    missing = wiki_browser.merge_event_caption(
+        {"action": "split", "source_ids": ["abc123"]},
+        lookup=lambda page_id: {"title": "분할 원본"} if page_id == "abc123" else None,
+    )
+    assert missing == "분할 · 원본: 분할 원본"
+    assert wiki_browser.page_display_name("missing", lookup=lambda _page_id: None) == "다른 문서"

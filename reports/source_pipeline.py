@@ -59,7 +59,7 @@ def default_registry() -> list[ProviderSpec]:
             source_collector.fetch_telegram_channel_events,
             retries=1,
         ),
-                ProviderSpec(
+        ProviderSpec(
             "news_rss",
             tuple(f"rss:{key}" for key, _url, _label in source_collector.NEWS_RSS_FEEDS),
             "news",

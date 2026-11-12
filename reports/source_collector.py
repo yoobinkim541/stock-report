@@ -118,7 +118,6 @@ NEWS_RSS_FEEDS = (
     ("yonhap", "https://www.yna.co.kr/rss/economy.xml", "연합뉴스"),
     ("sec", "https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=8-K&company=&dateb=&owner=include&start=0&count=15&output=atom", "SEC 8-K"),
 )
-
 NEWS_THEME_KEYWORDS = {
     "중동/전쟁": ("이스라엘", "이란", "가자", "하마스", "우크라이나", "러시아", "전쟁", "군", "미사일", "핵"),
     "금리/채권": ("금리", "국채", "채권", "연준", "fed", "treasury", "yield"),
@@ -1422,6 +1421,7 @@ def fetch_telegram_channel_events(channels: list[str] = TELEGRAM_NEWS_CHANNELS) 
             })
     return [_classify_event(event) for event in events]
 
+
 def _xml_local(tag: str) -> str:
     return str(tag or "").rsplit("}", 1)[-1]
 
@@ -1515,7 +1515,6 @@ def fetch_news_rss_events(feeds=NEWS_RSS_FEEDS) -> list[dict]:
     if errors and not events:
         raise RuntimeError("RSS fetch failed: " + "; ".join(errors[:4]))
     return [_classify_event(event) for event in events]
-
 
 
 def _pct(current: float | None, base: float | None) -> float | None:
@@ -2105,6 +2104,7 @@ def expected_sources() -> list[str]:
     """수집기가 시도해야 하는 소스 전체 (텔레그램은 채널별 분리 — 채널 단위 공백 감지)."""
     return (["saveticker", "yahoo_headline", "arca"]
             + [f"telegram:{c}" for c in TELEGRAM_NEWS_CHANNELS]
+            + [f"rss:{key}" for key, _url, _label in NEWS_RSS_FEEDS]
             + ["yahoo_finance", "fred", "worldgovernmentbonds", "polymarket", "kalshi", "economic_calendar"])
 
 
@@ -2317,7 +2317,7 @@ def collect_once(cache_dir: Path | str = DEFAULT_CACHE_DIR, now: datetime | None
             fetch_telegram_channel_events,
             retries=1,
         ),
-                ProviderSpec(
+        ProviderSpec(
             "news_rss",
             tuple(f"rss:{key}" for key, _url, _label in NEWS_RSS_FEEDS),
             "news",

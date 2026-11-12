@@ -54,6 +54,9 @@ finally:
     assert "탐색기" in body  # Obsidian 식 좌측 파일 트리 패널 헤더
     assert "문서 읽기" in body
     assert "관련 문서" in body
+    labels = [m.label for m in at.metric]
+    assert "출처 확인" in labels and "열린 질문" in labels
+    assert "qmd files" not in labels and "source-backed" not in labels
     surface_filter = at.selectbox(key="agent_wiki_surface_filter")
     assert surface_filter.value == "all"
 
@@ -166,6 +169,9 @@ finally:
     )
     assert "문서 읽기" in body
     assert "[FULL_BODY_TAIL]" in body
+    assert "포트폴리오" in body and "메모" in body and "검토됨" in body and "미확인" in body
+    assert "verification:" not in body and "source ref" not in body
+    assert "원문 ·" in body and "conversation:" not in body and "source ref" not in body
 
 
 def test_wiki_browser_shows_recent_merge_log():
@@ -219,7 +225,7 @@ finally:
     expander_labels = " ".join(str(getattr(exp, "label", "")) for exp in at.expander)
     assert "최근 병합 이력" in expander_labels
     assert "옛 카드" in body and "새 카드" in body
-    assert "같은 판단" in body
+    assert "같은 판단" in body and "병합" in body and "merge" not in body
 
 
 def test_wiki_browser_toggle_switches_center_pane_between_read_and_edit():
