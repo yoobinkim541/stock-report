@@ -1284,9 +1284,10 @@ def chart_fundamentals(ticker: str) -> dict:
 # ── 수집 뉴스 (시장·캘린더 — 출처별·중요도순) ─────────────────────────────────
 
 # 출처 표시 순서·라벨 (뉴스성 소스 우선, 수치성 스냅샷 후순위)
-NEWS_SOURCE_ORDER = ["saveticker", "telegram", "arca", "rss", "fred", "worldgovernmentbonds", "yahoo_finance"]
+NEWS_SOURCE_ORDER = ["saveticker", "yahoo_headline", "telegram", "arca", "rss", "fred", "worldgovernmentbonds", "yahoo_finance"]
 NEWS_SOURCE_LABEL = {
     "saveticker": "📰 SaveTicker",
+    "yahoo_headline": "📰 Yahoo 헤드라인",
     "telegram": "✈️ 텔레그램",
     "arca": "💬 아카라이브",
     "rss": "🗞️ 통신·공시",

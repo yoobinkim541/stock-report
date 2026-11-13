@@ -72,5 +72,23 @@ def test_blocked_provider_error_is_logged_once_per_cooldown(monkeypatch, tmp_pat
     assert state_file.exists()
 
 
+def test_ended_provider_error_is_logged_once_per_cooldown(monkeypatch, tmp_path, caplog):
+    class EndedProviderError(RuntimeError):
+        availability = "unavailable"
+        status_code = None
+
+    state_file = tmp_path / "ended-provider-error.json"
+    monkeypatch.setattr(N, "PROVIDER_ERROR_STATE_FILE", state_file)
+    monkeypatch.setattr(N, "PROVIDER_ERROR_COOLDOWN_HOURS", 6)
+    now = datetime(2026, 11, 13, 2, 0, tzinfo=timezone.utc)
+    exc = EndedProviderError("SaveTicker news API ended: legacy-news-sunset-notice")
+
+    with caplog.at_level("ERROR"):
+        N._log_collection_failure(exc, now)
+        N._log_collection_failure(exc, now)
+
+    assert caplog.text.count("수집 종료") == 1
+    assert "수집 실패" not in caplog.text
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

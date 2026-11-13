@@ -128,6 +128,7 @@ NEWS_THEME_KEYWORDS = {
 
 SOURCE_CLASSIFICATION = {
     "saveticker": {"family": "news", "kind": "article", "trust": "B", "horizon": "1d"},
+    "yahoo_headline": {"family": "news", "kind": "headline", "trust": "B", "horizon": "1d"},
     "saveticker_report_pdf": {"family": "report", "kind": "report", "trust": "B", "horizon": "1w"},
     "arca": {"family": "community", "kind": "community_signal", "trust": "C", "horizon": "intraday"},
     "telegram": {"family": "community", "kind": "community_signal", "trust": "C", "horizon": "intraday"},
@@ -314,6 +315,15 @@ _LAST_APPEND_STATS: dict[str, dict] = {}
 # 재시도로 해결되지 않는 운영 상태. 일반 수집 오류와 분리해 헬스 경보가
 # 법적 지역 제한을 장애로 반복 보고하지 않게 한다.
 _SOURCE_AVAILABILITY: dict[str, dict[str, str]] = {}
+
+
+class SourceProviderUnavailable(RuntimeError):
+    """이미 분류된 수집 중단. availability 는 헬스·워커 JSON 으로 전달된다."""
+
+    def __init__(self, message: str, *, availability: str = "unavailable", status_code: int | None = None):
+        super().__init__(message)
+        self.availability = availability
+        self.status_code = status_code
 
 
 def _note_error(source: str, err) -> None:
@@ -819,10 +829,18 @@ def _saveticker_max_pages() -> int:
         return 3
 
 
+def _saveticker_sunset_item(item) -> bool:
+    if not isinstance(item, dict):
+        return False
+    blob = " ".join(str(item.get(key) or "") for key in ("id", "title"))
+    return "legacy-news-sunset-notice" in blob
+
+
 def fetch_saveticker_events() -> list[dict]:
     from reports.raw_archive import load_dedupe_index, save_dedupe_index
 
-    base = os.getenv("SAVE_TICKER_API_BASE", "https://saveticker.com/api").rstrip("/")
+    _SOURCE_AVAILABILITY.pop("saveticker", None)
+    base = os.getenv("SAVE_TICKER_API_BASE", "https://api.saveticker.com/api").rstrip("/")
     paths = [("news/top-stories", None)]
     paths.extend(
         ("news/list", {"page": page, "page_size": 30, "sort": "created_at_desc"})
@@ -833,17 +851,28 @@ def fetch_saveticker_events() -> list[dict]:
     dedupe_index = load_dedupe_index()
     dedupe_dirty = False
     now_iso = datetime.now(KST).isoformat(timespec="seconds")
+    saw_sunset = False
+    errors: list[str] = []
     for path, params in paths:
         try:
             resp = requests.get(f"{base}/{path}", headers=HEADERS, params=params, timeout=12)
             resp.raise_for_status()
             data = resp.json()
-        except Exception:
+        except Exception as exc:
+            errors.append(f"{path} {type(exc).__name__}")
             continue
         items = data.get("news_list") or data.get("data") or []
+        if (isinstance(data, dict) and "legacy-news-sunset-notice" in str(data.get("id") or "")) or (
+            items and all(_saveticker_sunset_item(item) for item in items)
+        ):
+            saw_sunset = True
+            continue
         if params and not items:
             break
         for item in items:
+            if _saveticker_sunset_item(item):
+                saw_sunset = True
+                continue
             title = item.get("title") or ""
             if not title:
                 continue
@@ -887,6 +916,130 @@ def fetch_saveticker_events() -> list[dict]:
             })
     if dedupe_dirty:
         save_dedupe_index(dedupe_index, now=datetime.now(KST))
+    if not events and saw_sunset:
+        reason = "SaveTicker news API ended: legacy-news-sunset-notice"
+        _SOURCE_AVAILABILITY["saveticker"] = {
+            "availability": "unavailable",
+            "availability_reason": reason,
+        }
+        _note_error("saveticker", reason)
+        raise SourceProviderUnavailable(reason, availability="unavailable")
+    if errors and not events:
+        reason = "SaveTicker fetch failed: " + "; ".join(errors[:3])
+        _SOURCE_AVAILABILITY["saveticker"] = {
+            "availability": "error",
+            "availability_reason": reason,
+        }
+        _note_error("saveticker", reason)
+        raise SourceProviderUnavailable(reason, availability="error")
+    return [_classify_event(event) for event in events]
+
+
+YAHOO_HEADLINE_RSS = "https://feeds.finance.yahoo.com/rss/2.0/headline"
+
+
+def _yahoo_headline_symbol(value: str) -> str:
+    symbol = str(value or "").strip().upper()
+    if not re.fullmatch(r"[A-Z][A-Z0-9.-]{0,9}", symbol):
+        return ""
+    suffix = symbol.rsplit(".", 1)[-1] if "." in symbol else ""
+    if suffix in {"KS", "KQ", "T", "HK", "L"}:
+        return ""
+    return symbol
+
+
+def yahoo_headline_symbols(tickers=None) -> list[str]:
+    """미국 상장 심볼만. 환경변수 목록이 있으면 보유 종목보다 우선한다."""
+    raw = os.getenv("STOCK_COLLECTOR_YAHOO_HEADLINE_SYMBOLS", "").strip()
+    values = [part.strip() for part in raw.split(",") if part.strip()] if raw else (
+        list(PORTFOLIO_TICKERS) if tickers is None else list(tickers)
+    )
+    out: list[str] = []
+    for value in values:
+        symbol = _yahoo_headline_symbol(value)
+        if symbol and symbol not in out:
+            out.append(symbol)
+    try:
+        cap = int(os.getenv("STOCK_COLLECTOR_YAHOO_HEADLINE_MAX", "8"))
+    except (TypeError, ValueError):
+        cap = 8
+    return out[: max(1, min(cap, 40))]
+
+
+def _rss_published_at(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        from email.utils import parsedate_to_datetime
+        parsed = parsedate_to_datetime(text)
+    except (TypeError, ValueError, IndexError, OverflowError):
+        return text
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(KST).isoformat(timespec="seconds")
+
+
+def fetch_yahoo_headline_events(symbols=None, *, get=None) -> list[dict]:
+    """SaveTicker 뉴스 API 대체. 공개 Yahoo 헤드라인 RSS의 제목·링크·요약만 저장한다."""
+    _SOURCE_AVAILABILITY.pop("yahoo_headline", None)
+    chosen = yahoo_headline_symbols(symbols)
+    if not chosen:
+        reason = "Yahoo headline symbols empty"
+        _SOURCE_AVAILABILITY["yahoo_headline"] = {
+            "availability": "disabled",
+            "availability_reason": reason,
+        }
+        raise SourceProviderUnavailable(reason, availability="disabled")
+    getter = get
+    events = []
+    seen: set[str] = set()
+    errors: list[str] = []
+    for symbol in chosen:
+        url = f"{YAHOO_HEADLINE_RSS}?s={symbol}&region=US&lang=en-US"
+        try:
+            if getter is None:
+                resp = _bounded_get(url, timeout=5, headers=PLAIN_HEADERS)
+                payload = getattr(resp, "_content", None)
+                xml_text = payload.decode("utf-8-sig", errors="replace") if isinstance(payload, bytes) else resp.text
+            else:
+                xml_text = getter(url, symbol)
+            items = rss_items_from_xml(xml_text, limit=6)
+        except Exception as exc:
+            errors.append(f"{symbol} {type(exc).__name__}")
+            _note_error("yahoo_headline", exc)
+            continue
+        if not items:
+            errors.append(f"{symbol} empty")
+            continue
+        for item in items:
+            key = str(item.get("url") or item.get("title") or "").strip().lower()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            body = item.get("body") or ""
+            events.append({
+                "source": "yahoo_headline",
+                "source_url": url,
+                "title": item.get("title") or "",
+                "url": item.get("url") or "",
+                "published_at": _rss_published_at(item.get("published_at") or ""),
+                "body_raw": body,
+                "body": body,
+                "body_excerpt": body[:500],
+                "tickers": [symbol],
+                "tags": ["Yahoo"],
+                "fulltext_status": "feed_blurb",
+                "body_raw_source": "rss_description",
+            })
+    if not events:
+        reason = "Yahoo headline RSS failed: " + "; ".join(errors[:3])
+        _SOURCE_AVAILABILITY["yahoo_headline"] = {
+            "availability": "error",
+            "availability_reason": reason,
+        }
+        raise SourceProviderUnavailable(reason, availability="error")
+    _LAST_ERRORS.pop("yahoo_headline", None)
     return [_classify_event(event) for event in events]
 
 def _parse_arca_html(html_text: str) -> list[tuple[str, str]]:
@@ -1840,6 +1993,7 @@ HEALTH_FILE = "source_health.json"
 # 소스별 "이만큼 수집 0이면 비정상" 임계(시간) — 크론 30분 주기 기준·주말 여유
 SOURCE_STALE_HOURS = {
     "saveticker": 3,
+    "yahoo_headline": 6,
     "arca": 24,
     "telegram:*": 12,
     "rss:fed": 96,
@@ -1856,7 +2010,7 @@ SOURCE_STALE_HOURS = {
 
 def expected_sources() -> list[str]:
     """수집기가 시도해야 하는 소스 전체 (텔레그램은 채널별 분리 — 채널 단위 공백 감지)."""
-    return (["saveticker", "arca"]
+    return (["saveticker", "yahoo_headline", "arca"]
             + [f"telegram:{c}" for c in TELEGRAM_NEWS_CHANNELS]
             + [f"rss:{key}" for key, _url, _label in NEWS_RSS_FEEDS]
             + ["yahoo_finance", "fred", "worldgovernmentbonds", "polymarket", "kalshi", "economic_calendar"])
@@ -1907,7 +2061,7 @@ def update_source_health(events: list[dict], cache_dir: Path | str = DEFAULT_CAC
             availability = (_SOURCE_AVAILABILITY.get(src)
                             or _SOURCE_AVAILABILITY.get(src.split(":", 1)[0]))
             stats_availability = str(stats.get("availability") or "")
-            if not availability and stats_availability in {"blocked", "disabled"}:
+            if not availability and stats_availability in {"blocked", "disabled", "unavailable"}:
                 availability = {
                     "availability": stats_availability,
                     "availability_reason": str(stats.get("availability_reason") or stats.get("error") or ""),
@@ -1915,7 +2069,7 @@ def update_source_health(events: list[dict], cache_dir: Path | str = DEFAULT_CAC
             availability_name = str((availability or {}).get("availability") or stats_availability or "")
             fetch_success_value = stats.get("fetch_success")
             if fetch_success_value is None:
-                fetch_success = not bool(stats.get("error")) and availability_name not in {"error", "blocked", "disabled"}
+                fetch_success = not bool(stats.get("error")) and availability_name not in {"error", "blocked", "disabled", "unavailable"}
             else:
                 fetch_success = bool(fetch_success_value)
             persist_success_value = stats.get("persist_success")
@@ -2030,7 +2184,7 @@ def stale_sources(health: dict | None = None, now: datetime | None = None,
 
     out = []
     for src, rec in sorted(health.items()):
-        if rec.get("availability") in {"blocked", "disabled"}:
+        if rec.get("availability") in {"blocked", "disabled", "unavailable"}:
             continue
         limit = th.get(src) or th.get(f"{src.split(':')[0]}:*") or th.get(src.split(":")[0]) or 24
         last_ok = rec.get("last_success")
@@ -2053,6 +2207,14 @@ def collect_once(cache_dir: Path | str = DEFAULT_CACHE_DIR, now: datetime | None
 
     registry = [
         ProviderSpec("saveticker", ("saveticker",), "news", fetch_saveticker_events, retries=1),
+        ProviderSpec(
+            "yahoo_headline",
+            ("yahoo_headline",),
+            "news",
+            fetch_yahoo_headline_events,
+            timeout_seconds=45,
+            retries=1,
+        ),
         ProviderSpec(
             "arca",
             ("arca",),

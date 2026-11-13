@@ -38,6 +38,14 @@ def default_registry() -> list[ProviderSpec]:
     return [
         ProviderSpec("saveticker", ("saveticker",), "news", source_collector.fetch_saveticker_events, retries=1),
         ProviderSpec(
+            "yahoo_headline",
+            ("yahoo_headline",),
+            "news",
+            source_collector.fetch_yahoo_headline_events,
+            timeout_seconds=45,
+            retries=1,
+        ),
+        ProviderSpec(
             "arca",
             ("arca",),
             "news",

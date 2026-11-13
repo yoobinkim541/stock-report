@@ -7,6 +7,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import source_collector as sc
+import pytest
 
 KST = timezone(timedelta(hours=9))
 
@@ -1277,6 +1278,8 @@ def test_collect_once_isolates_source_crash(tmp_path, monkeypatch):
     monkeypatch.setattr(sc, "fetch_world_gov_bond_events", lambda: [])
     monkeypatch.setattr(sc, "fetch_polymarket_events", lambda: [])
     monkeypatch.setattr(sc, "fetch_kalshi_events", lambda: [])
+    monkeypatch.setattr(sc, "fetch_yahoo_headline_events", lambda: [])
+    monkeypatch.setattr(sc, "fetch_news_rss_events", lambda: [])
     fetched, written = sc.collect_once(cache_dir=tmp_path / "cache")
     assert fetched == 1 and written == 1
     h = sc.load_source_health(tmp_path / "cache")
@@ -1294,6 +1297,8 @@ def test_collect_once_includes_polymarket(tmp_path, monkeypatch):
     monkeypatch.setattr(sc, "fetch_polymarket_events",
                         lambda: [{"source": "polymarket", "title": "Fed cut odds", "url": "https://polymarket.com/event/fed"}])
     monkeypatch.setattr(sc, "fetch_kalshi_events", lambda: [])
+    monkeypatch.setattr(sc, "fetch_yahoo_headline_events", lambda: [])
+    monkeypatch.setattr(sc, "fetch_news_rss_events", lambda: [])
 
     fetched, written = sc.collect_once(cache_dir=tmp_path / "cache")
 
@@ -1310,6 +1315,8 @@ def test_collect_once_includes_kalshi(tmp_path, monkeypatch):
     monkeypatch.setattr(sc, "fetch_fred_macro_events", lambda: [])
     monkeypatch.setattr(sc, "fetch_world_gov_bond_events", lambda: [])
     monkeypatch.setattr(sc, "fetch_polymarket_events", lambda: [])
+    monkeypatch.setattr(sc, "fetch_yahoo_headline_events", lambda: [])
+    monkeypatch.setattr(sc, "fetch_news_rss_events", lambda: [])
     monkeypatch.setattr(
         sc,
         "fetch_kalshi_events",
@@ -1332,6 +1339,8 @@ def test_collect_once_uses_provider_runner_and_writes_manifests(tmp_path, monkey
     monkeypatch.setattr(sc, "fetch_world_gov_bond_events", lambda: [])
     monkeypatch.setattr(sc, "fetch_polymarket_events", lambda: [])
     monkeypatch.setattr(sc, "fetch_kalshi_events", lambda: [])
+    monkeypatch.setattr(sc, "fetch_yahoo_headline_events", lambda: [])
+    monkeypatch.setattr(sc, "fetch_news_rss_events", lambda: [])
 
     sc.collect_once(cache_dir=tmp_path / "cache")
 
@@ -1340,8 +1349,10 @@ def test_collect_once_uses_provider_runner_and_writes_manifests(tmp_path, monkey
     runs = load_source_runs(tmp_path / "cache", hours=1)
     assert {row["provider"] for row in runs} == {
         "saveticker",
+        "yahoo_headline",
         "arca",
         "telegram",
+        "news_rss",
         "yahoo_finance",
         "fred",
         "worldgovernmentbonds",
@@ -1349,6 +1360,55 @@ def test_collect_once_uses_provider_runner_and_writes_manifests(tmp_path, monkey
         "kalshi",
     }
 
+
+def test_fetch_saveticker_sunset_only_is_unavailable(monkeypatch):
+    class FakeResponse:
+        def __init__(self, payload):
+            self._payload = payload
+            self.status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    notice = {"id": "legacy-news-sunset-notice", "title": "서비스 종료", "news_list": [
+        {"id": "legacy-news-sunset-notice", "title": "서비스 종료"}
+    ]}
+    monkeypatch.setattr(sc.requests, "get", lambda *a, **k: FakeResponse(notice))
+    with pytest.raises(sc.SourceProviderUnavailable) as exc_info:
+        sc.fetch_saveticker_events()
+    assert exc_info.value.availability == "unavailable"
+    assert "legacy-news-sunset-notice" in str(exc_info.value)
+
+
+def test_unavailable_sunset_is_not_a_stale_gap():
+    now = datetime(2026, 11, 13, 11, 0, tzinfo=KST)
+    health = {
+        "saveticker": {
+            "availability": "unavailable",
+            "availability_reason": "SaveTicker news API ended: legacy-news-sunset-notice",
+            "last_error": "SaveTicker news API ended: legacy-news-sunset-notice",
+            "last_success": "2026-11-11T10:35:01+09:00",
+        }
+    }
+    assert sc.stale_sources(health, now=now) == []
+
+
+def test_yahoo_headline_events_tag_symbol_and_skip_kr(monkeypatch):
+    assert sc.yahoo_headline_symbols(["005930.KS", "NVDA", "brk.b"]) == ["NVDA", "BRK.B"]
+    xml = """<?xml version="1.0"?><rss version="2.0"><channel><item>
+      <title>Nvidia raises guidance</title>
+      <link>https://finance.yahoo.com/news/nvda-guidance</link>
+      <pubDate>Thu, 12 Nov 2026 14:04:03 +0000</pubDate>
+      <description>Shares rose.</description>
+    </item></channel></rss>"""
+    events = sc.fetch_yahoo_headline_events(["NVDA"], get=lambda url, symbol: xml)
+    assert events[0]["tickers"] == ["NVDA"]
+    assert events[0]["source"] == "yahoo_headline"
+    assert "속보" not in events[0]["tags"]
+    assert events[0]["published_at"].endswith("+09:00")
 
 # ── 죽은 출처 복구 — 직접 폴백·FRED API·오류 원인 기록 ───────────────────────
 
