@@ -281,6 +281,51 @@ def test_auth_cookie_html_injection_safe():
     assert "SameSite=Lax" in html
 
 
+def test_login_throttle_schedule():
+    """3회까지는 바로 다시 시도, 이후 1분부터 두 배씩 늘고 1시간에서 멈춘다."""
+    assert [auth.lockout_seconds(n) for n in (0, 1, 2)] == [0, 0, 0]
+    assert [auth.lockout_seconds(n) for n in (3, 4, 5)] == [60, 120, 240]
+    assert auth.lockout_seconds(50) == auth.MAX_LOCK_S
+
+
+def test_login_throttle_is_per_ip_not_global():
+    """남이 틀려도 소유자 IP 는 막히지 않는다 (전역 잠금 = 소유자 서비스 거부)."""
+    state, now = {}, 1_800_000_000.0
+    for _ in range(5):
+        auth.record_failure(state, "203.0.113.9", now)
+    assert auth.throttle_remaining(state, "203.0.113.9", now) == 240
+    assert auth.throttle_remaining(state, "198.51.100.7", now) == 0
+    assert auth.throttle_remaining(state, "203.0.113.9", now + 240) == 0
+
+
+def test_login_throttle_success_and_expiry_reset():
+    state, now = {}, 1_800_000_000.0
+    for _ in range(3):
+        auth.record_failure(state, "203.0.113.9", now)
+    auth.record_success(state, "203.0.113.9")
+    assert auth.throttle_remaining(state, "203.0.113.9", now) == 0
+    for _ in range(3):
+        auth.record_failure(state, "203.0.113.9", now)
+    later = now + auth.FAIL_MEMORY_S + 1
+    assert auth.record_failure(state, "203.0.113.9", later) == 1   # 하루 지난 기록은 잊는다
+
+
+def test_login_throttle_client_ip():
+    assert auth.client_ip({"cf-connecting-ip": "203.0.113.9"}) == "203.0.113.9"
+    assert auth.client_ip({"CF-Connecting-IP": " 2001:db8::1 "}) == "2001:db8::1"
+    assert auth.client_ip({}) == "local"                         # 터널 밖(로컬) 접속
+    assert auth.client_ip({"Cf-Connecting-Ip": "evil, 1.2.3.4"}) == "unknown"
+
+
+def test_login_throttle_file_roundtrip(tmp_path):
+    path = str(tmp_path / "fails.json")
+    assert auth._with_failures(lambda s: auth.record_failure(s, "203.0.113.9", 1_800_000_000.0), path) == 1
+    assert auth._with_failures(lambda s: auth.record_failure(s, "203.0.113.9", 1_800_000_000.0), path) == 2
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("{broken")
+    assert auth._with_failures(lambda s: auth.throttle_remaining(s, "203.0.113.9", 1_800_000_000.0), path) == 0
+
+
 # ── 포맷터 (스케일 명시 — 부호/스케일 버그 차단) ─────────────────────────────
 def test_formatters_scale():
     assert data.f_ratio(22.227) == "22.2"

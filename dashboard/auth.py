@@ -102,6 +102,117 @@ def _set_cookie_html(token: str, ttl_s: int = TOKEN_TTL_S) -> str:
             f"window.parent.document.cookie=s;}})();</script>")
 
 
+# ── 로그인 실패 제한 (IP별 점증 대기) ────────────────────────────────────────
+# 전역(계정 단위) 잠금은 쓰지 않는다: 소유자 한 명뿐인 계정이라, 아무나 틀린 비번을
+# 세 번 넣는 것만으로 소유자를 잠가 버리는 서비스 거부가 된다. 그래서 IP별로 세고,
+# 고정 잠금 대신 실패할수록 대기 시간을 늘린다(3회까지 무료, 이후 1분→2분→4분…최대 1시간).
+# 대시보드는 127.0.0.1 에만 바인딩되고 Cloudflare 터널로만 들어오므로 앱에는 모든 요청이
+# 127.0.0.1 로 보인다 → 실제 IP 는 Cloudflare 가 덮어쓰는 CF-Connecting-IP 헤더로 본다.
+# Streamlit 세션은 새로고침마다 새로 생기므로 횟수는 세션이 아니라 서버 파일에 둔다.
+_FAIL_PATH = os.path.expanduser("~/.cache/dashboard_auth_failures.json")
+FREE_ATTEMPTS = 3
+BASE_LOCK_S = 60
+MAX_LOCK_S = 3600
+FAIL_MEMORY_S = 86400          # 마지막 실패 후 하루가 지나면 그 IP 기록을 잊는다
+
+
+def lockout_seconds(fail_count: int) -> int:
+    """실패 누적 횟수 → 다음 시도까지 기다릴 초 (순수). 3회 미만은 0."""
+    if fail_count < FREE_ATTEMPTS:
+        return 0
+    return min(MAX_LOCK_S, BASE_LOCK_S * 2 ** (fail_count - FREE_ATTEMPTS))
+
+
+def throttle_remaining(state: dict, ip: str, now: float) -> float:
+    """이 IP 가 지금 더 기다려야 하는 초 (순수). 기록 없음·대기 끝남 = 0."""
+    entry = state.get(ip)
+    if not entry:
+        return 0.0
+    wait_until = float(entry.get("last", 0)) + lockout_seconds(int(entry.get("count", 0)))
+    return max(0.0, wait_until - now)
+
+
+def record_failure(state: dict, ip: str, now: float) -> int:
+    """실패 1회 기록 (state 갱신) → 이 IP 의 누적 실패 횟수."""
+    prune_failures(state, now)
+    entry = state.setdefault(ip, {"count": 0, "last": 0.0})
+    entry["count"] = int(entry.get("count", 0)) + 1
+    entry["last"] = now
+    return entry["count"]
+
+
+def record_success(state: dict, ip: str) -> None:
+    """로그인 성공 → 이 IP 의 실패 기록을 지운다."""
+    state.pop(ip, None)
+
+
+def prune_failures(state: dict, now: float) -> None:
+    """마지막 실패가 FAIL_MEMORY_S 보다 오래된 IP 를 지운다 (파일이 끝없이 커지지 않게)."""
+    for ip in [k for k, v in state.items() if now - float(v.get("last", 0)) > FAIL_MEMORY_S]:
+        state.pop(ip, None)
+
+
+def client_ip(headers) -> str:
+    """요청 헤더 → 클라이언트 IP. CF-Connecting-IP(대소문자 무관)가 없으면 'local',
+    IP 형식이 아니면 'unknown' — 둘 다 하나의 묶음으로 세어 우회 통로가 되지 않게 한다."""
+    import ipaddress
+
+    value = None
+    try:
+        for k, v in dict(headers or {}).items():
+            if str(k).lower() == "cf-connecting-ip":
+                value = str(v).strip()
+                break
+    except Exception:
+        value = None
+    if not value:
+        return "local"
+    try:
+        return str(ipaddress.ip_address(value))
+    except ValueError:
+        return "unknown"
+
+
+def _with_failures(update, path: str = _FAIL_PATH):
+    """실패 기록 파일을 잠근 채 읽고 update(state) 결과를 돌려준다. state 가 바뀌면 원자적으로 쓴다.
+    파일이 깨졌으면 빈 기록으로 본다(실패 제한이 풀릴 뿐, 비밀번호 검사는 그대로다)."""
+    import fcntl
+    import json
+
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path + ".lock", "a", encoding="utf-8") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            with open(path, encoding="utf-8") as f:
+                state = json.load(f)
+            if not isinstance(state, dict):
+                state = {}
+        except (FileNotFoundError, ValueError):
+            state = {}
+        before = json.dumps(state, sort_keys=True)
+        result = update(state)
+        if json.dumps(state, sort_keys=True) != before:
+            tmp = f"{path}.{os.getpid()}.tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(state, f)
+            os.replace(tmp, path)
+        return result
+
+
+def _alert_lockout(ip: str, count: int) -> None:
+    """IP 가 처음 잠기면 텔레그램으로 알린다. 로그인 화면을 붙잡지 않게 백그라운드로 보낸다."""
+    import threading
+
+    def send():
+        try:
+            from lib.cron_common import send_cron_telegram
+            send_cron_telegram(f"🔒 퀀트 대시보드 로그인 {count}회 실패 — IP {ip} 대기 시작", timeout=5)
+        except Exception:
+            pass
+
+    threading.Thread(target=send, daemon=True).start()
+
+
 def password_gate() -> bool:
     """streamlit 비번 게이트. 인증되면 True. (env DASHBOARD_PASSWORD)
 
@@ -123,9 +234,20 @@ def password_gate() -> bool:
         st.session_state["_authed"] = True
         return True
 
+    ip = "local"
+    try:
+        ip = client_ip(st.context.headers)
+    except Exception:
+        pass
+    wait = _with_failures(lambda s: throttle_remaining(s, ip, time.time()))
+    if wait > 0:
+        st.error(f"로그인 실패가 많아 잠시 막았습니다. {max(1, int(-(-wait // 60)))}분 뒤에 다시 시도하세요.")
+        return False
+
     pw = st.text_input("비밀번호", type="password", key="_pw")
     if pw:
         if verify_password(pw, secret):
+            _with_failures(lambda s: record_success(s, ip))
             st.session_state["_authed"] = True
             # 서명 토큰 쿠키 발급 — 이후 네비게이션/리로드는 무입력 재인증
             try:
@@ -134,8 +256,21 @@ def password_gate() -> bool:
             except Exception:
                 pass                             # 쿠키 실패해도 이번 세션은 인증됨
             return True
-        st.error("비밀번호가 틀렸습니다." if secret
-                 else "DASHBOARD_PASSWORD 미설정 — 접근 차단(.env 에 설정 필요)")
+        if not secret:
+            st.error("DASHBOARD_PASSWORD 미설정 — 접근 차단(.env 에 설정 필요)")
+            return False
+        # text_input 값은 rerun 마다 남아 있으므로, 같은 입력을 rerun 마다 다시 세지 않는다.
+        attempt = hashlib.sha256(pw.encode()).hexdigest()
+        if st.session_state.get("_pw_counted") != attempt:
+            st.session_state["_pw_counted"] = attempt
+            count = _with_failures(lambda s: record_failure(s, ip, time.time()))
+            if count == FREE_ATTEMPTS:
+                _alert_lockout(ip, count)
+            if lockout_seconds(count) > 0:
+                st.error(f"비밀번호가 {count}회 틀렸습니다. "
+                         f"{max(1, lockout_seconds(count) // 60)}분 뒤에 다시 시도하세요.")
+                return False
+        st.error("비밀번호가 틀렸습니다.")
     return False
 
 
