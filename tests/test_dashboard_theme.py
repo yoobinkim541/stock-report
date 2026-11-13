@@ -430,7 +430,7 @@ def test_light_override_covers_native_surfaces():
     """라이트 오버라이드 — 앱/사이드바/메트릭/입력 등 네이티브 표면 재도색 규칙 존재."""
     ov = theme._LIGHT_OVERRIDE
     for sel in ('.stApp {', '[data-testid="stSidebar"]', '[data-testid="stMetric"]',
-                '[data-baseweb="select"]', "#f7f8fa"):
+                '[data-baseweb="select"]', "#f2f4f6"):
         assert sel in ov, f"누락: {sel}"
 
 
