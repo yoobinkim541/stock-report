@@ -85,11 +85,27 @@ def update_page(page_id: str, blocks: list[dict]) -> bool:
             logger.error("블록 추가 실패 %s: %s — 기존 대시보드 보존", r2.status_code, r2.text[:200])
             return False
 
-    # ③ 구 블록 삭제 (child_database 는 영속 — 제외)
+    # ③ 구 블록 삭제 (child_database 는 영속 — 제외).
+    # 한 건의 ReadTimeout 이 크론 전체를 죽이지 않게 재시도 후 경고만 남긴다.
+    import time
+    from requests.exceptions import RequestException
     for bid, btype in old:
         if btype == "child_database":
             continue
-        requests.delete(f"https://api.notion.com/v1/blocks/{bid}", headers=headers, timeout=8)
+        for attempt in range(3):
+            try:
+                r = requests.delete(
+                    f"https://api.notion.com/v1/blocks/{bid}", headers=headers, timeout=20)
+                if r.status_code in (200, 400, 404) or r.ok:
+                    break
+                if r.status_code not in (429, 500, 502, 503, 504) or attempt == 2:
+                    logger.warning("블록 삭제 실패 %s %s", bid, r.status_code)
+                    break
+            except RequestException as exc:
+                if attempt == 2:
+                    logger.warning("블록 삭제 타임아웃 %s: %s", bid, exc)
+                    break
+            time.sleep(1.5 * (attempt + 1))
     return True
 
 

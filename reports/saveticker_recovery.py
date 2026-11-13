@@ -69,6 +69,42 @@ def _send(send_fn,text,markup=None):
     except Exception:
         return False
 
+SUNSET_MARK = 'legacy-news-sunset-notice'
+
+
+def news_api_ended(health=None) -> bool:
+    """Public news API sunset is not a browser challenge the operator can clear."""
+    row = (health or {}).get('saveticker') or {}
+    blob = ' '.join(str(row.get(key) or '') for key in ('availability_reason', 'last_error', 'error'))
+    return row.get('availability') == 'unavailable' and SUNSET_MARK in blob
+
+
+def close_ended_recovery(state_path=DEFAULT_STATE, *, send_fn, now=None, health=None):
+    """Stop browser prompts once the news API has ended. Returns None if still recoverable."""
+    if not news_api_ended(health):
+        return None
+    now = time.time() if now is None else now
+    state_path = Path(state_path)
+    with safe_io.file_write_lock(str(state_path)):
+        state = read_state(state_path)
+        if state.get('phase') == 'ended' and state.get('reason') == 'sunset':
+            return {'phase': 'ended'}
+        state['phase'] = 'ended'
+        state['reason'] = 'sunset'
+        state.pop('remote_url', None)
+        state.pop('access_expires_at', None)
+        if not state.get('ended_notice_sent_at'):
+            message = (
+                'SaveTicker 뉴스 API가 종료되어 브라우저 복구를 멈췄습니다.\n'
+                '보안 확인으로는 뉴스가 돌아오지 않습니다. '
+                '미국 종목 헤드라인은 Yahoo RSS로 수집 중입니다.'
+            )
+            if _send(send_fn, message):
+                state['ended_notice_sent_at'] = now
+        safe_io.atomic_write_json(str(state_path), state)
+        return {'phase': 'ended'}
+
+
 
 def _auth_notice(state,remote_fn,send_fn,now,persist):
     state.setdefault('access_expires_at',now+7200)
@@ -78,9 +114,19 @@ def _auth_notice(state,remote_fn,send_fn,now,persist):
         url = _private_url(remote_fn(max_seconds=remaining)) if remaining>=60 else None
     except Exception:
         url = None
-    message = ('SaveTicker 재인증이 필요합니다.\n'
-               '노트북에서 Tailscale을 켜고 서버 브라우저의 보안 확인을 직접 완료해주세요.\n'
-               '완료 후 아래 확인 버튼을 누르면 저장된 로그인 정보로 로그인과 원문 수집을 검증합니다.\n')
+    blocked = state.get('reason') == 'blocked'
+    if blocked:
+        message = ('SaveTicker 보안 정책에 의해 접근이 차단되어 수집을 중지했습니다.\n'
+                   '보안 확인 버튼이 있으면 서버 브라우저에서 직접 완료해주세요.\n'
+                   '"Sorry, you have been blocked" 화면에 확인 버튼이 없으면 '
+                   '로그인으로 해결되지 않습니다. 사이트 운영자에게 차단 화면의 Ray ID와 '
+                   '발생 시각·URL을 전달해 차단 해제를 요청해야 합니다.\n'
+                   '접근이 정상화된 뒤에만 아래 복구 확인 버튼을 눌러주세요. '
+                   '자동 재시도와 비밀번호 입력은 대기 중입니다.\n')
+    else:
+        message = ('SaveTicker 재인증이 필요합니다.\n'
+                   '노트북에서 Tailscale을 켜고 서버 브라우저의 보안 확인을 직접 완료해주세요.\n'
+                   '완료 후 아래 확인 버튼을 누르면 저장된 로그인 정보로 로그인과 원문 수집을 검증합니다.\n')
     rows = []
     if url:
         message += '\n원격 화면: ' + url
@@ -90,7 +136,8 @@ def _auth_notice(state,remote_fn,send_fn,now,persist):
         message += '\n원격 화면이 만료되었거나 준비되지 않았습니다. 아래 화면 다시 열기 버튼을 사용해주세요.'
         state.pop('remote_url',None)
         rows.append([{'text':'원격 화면 다시 열기','callback_data':'saveopen:'+state['incident_id']}])
-    rows.append([{'text':'보안 확인 완료 · 복구 확인','callback_data':'savecheck:'+state['incident_id']}])
+    rows.append([{'text':'접근 정상화 후 · 복구 확인' if blocked else '보안 확인 완료 · 복구 확인',
+                  'callback_data':'savecheck:'+state['incident_id']}])
     if not url and state.get('auth_notice_sent_at') and remaining>=60:
         return
     persist()

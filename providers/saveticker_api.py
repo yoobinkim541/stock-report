@@ -1,11 +1,10 @@
 """providers/saveticker_api.py — SaveTicker 공개 API 호스트 단일 진실원.
 
-2026-10-23 실측:
+2026-11-12 실측:
 - ``https://saveticker.com/api/*`` 는 Cloudflare 챌린지로 403(HTML)을 돌려준다.
-- ``https://api.saveticker.com/api`` 는 인증 없이 200 JSON — ``news/top-stories``
-  (최근 기사 묶음)와 ``calendar/events`` 가 정상 응답한다.
-- 같은 호스트의 ``news/list`` 는 어떤 파라미터(page·page_size·tickers)든 서비스 종료
-  공지(``id=legacy-news-sunset-notice``) 1건만 반환한다. 이 공지를 기사로 저장하면 안 된다.
+- ``https://api.saveticker.com/api/calendar/events`` 는 아직 일정 JSON을 돌려준다.
+- 같은 호스트의 ``news/top-stories`` 와 ``news/list`` 는 서비스 종료
+  공지(``id=legacy-news-sunset-notice``)만 반환한다. 이 공지를 기사로 저장하면 안 된다.
 
 ``SAVE_TICKER_API_BASE`` 환경변수로 기본 호스트를 바꿀 수 있다.
 """

@@ -1126,6 +1126,101 @@ def test_fetch_saveticker_reports_failure_instead_of_silent_zero(monkeypatch):
     assert "news/top-stories" in str(exc_info.value)
 
 
+def test_fetch_saveticker_sunset_only_is_unavailable(monkeypatch, tmp_path):
+    """종료 공지만 오면 정상 0건이 아니라 뉴스 API 종료로 남긴다."""
+    class FakeResponse:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    notice = {"id": "legacy-news-sunset-notice", "title": "새로워진 세이브 뉴스로 업데이트해 주세요",
+              "content": "", "created_at": "2026-07-07T09:00:00+09:00"}
+
+    monkeypatch.setenv("STOCK_REPORT_REPORTS_DIR", str(tmp_path / "reports"))
+    monkeypatch.setattr(sc.requests, "get", lambda url, **kwargs: FakeResponse({"news_list": [notice]}))
+
+    with pytest.raises(sc.SourceProviderUnavailable) as exc_info:
+        sc.fetch_saveticker_events()
+
+    assert exc_info.value.availability == "unavailable"
+    assert "legacy-news-sunset-notice" in str(exc_info.value)
+
+
+def test_yahoo_headline_symbols_skip_kr_listings(monkeypatch):
+    monkeypatch.delenv("STOCK_COLLECTOR_YAHOO_HEADLINE_SYMBOLS", raising=False)
+    monkeypatch.delenv("STOCK_COLLECTOR_YAHOO_HEADLINE_MAX", raising=False)
+    assert sc.yahoo_headline_symbols(["nvda", "005930.KS", "BRK.B", "", "123"]) == ["NVDA", "BRK.B"]
+
+
+def test_yahoo_headline_events_tag_queried_symbol_and_skip_article_html(monkeypatch):
+    xml = """<?xml version="1.0"?>
+    <rss version="2.0"><channel><item>
+      <title>Nvidia raises guidance</title>
+      <link>https://finance.yahoo.com/news/nvda-guidance</link>
+      <pubDate>Thu, 12 Nov 2026 14:04:03 +0000</pubDate>
+      <description>Shares rose after the company raised its outlook.</description>
+    </item></channel></rss>"""
+    calls = []
+
+    def fake_get(url, symbol):
+        calls.append((url, symbol))
+        return xml
+
+    monkeypatch.delenv("STOCK_COLLECTOR_YAHOO_HEADLINE_SYMBOLS", raising=False)
+    events = sc.fetch_yahoo_headline_events(["NVDA"], get=fake_get)
+
+    assert calls == [("https://feeds.finance.yahoo.com/rss/2.0/headline?s=NVDA&region=US&lang=en-US", "NVDA")]
+    assert events[0]["tickers"] == ["NVDA"]
+    assert events[0]["source"] == "yahoo_headline"
+    assert events[0]["published_at"] == "2026-11-12T23:04:03+09:00"
+    assert events[0]["body_raw_source"] == "rss_description"
+    assert "속보" not in events[0]["tags"]
+    assert events[0]["source_family"] == "news"
+
+
+def test_yahoo_headline_all_failures_are_not_a_successful_zero(monkeypatch):
+    monkeypatch.delenv("STOCK_COLLECTOR_YAHOO_HEADLINE_SYMBOLS", raising=False)
+
+    def fail(url, symbol):
+        raise TimeoutError("slow")
+
+    with pytest.raises(sc.SourceProviderUnavailable) as exc_info:
+        sc.fetch_yahoo_headline_events(["NVDA"], get=fail)
+
+    assert exc_info.value.availability == "error"
+    assert "NVDA" in str(exc_info.value)
+
+
+def test_unavailable_sunset_is_not_a_successful_fetch(tmp_path):
+    now = datetime(2026, 11, 12, 23, 5, tzinfo=KST)
+    reason = "SaveTicker news API ended: legacy-news-sunset-notice"
+    health = sc.update_source_health(
+        [],
+        cache_dir=tmp_path / "cache",
+        now=now,
+        attempted_sources=["saveticker"],
+        run_stats={"saveticker": {
+            "fetched": 0,
+            "persisted": 0,
+            "availability": "unavailable",
+            "availability_reason": reason,
+            "error": reason,
+        }},
+    )
+    row = health["saveticker"]
+    assert row["fetch_success"] is False
+    assert row["availability"] == "unavailable"
+    assert row["last_error"] == reason
+    stale = sc.stale_sources(health, now=now + timedelta(hours=48))
+    assert "saveticker" not in {item["source"] for item in stale}
+
+
+
 
 # ── 소스별 수집 헬스 (수집 공백 가시화) ──────────────────────────────────────
 
@@ -1576,3 +1671,21 @@ def test_health_records_error_and_grace(tmp_path):
     h2 = sc.update_source_health([{"source": "fred", "title": "x"}], cache_dir=cache,
                                  now=t0 + timedelta(hours=8))
     assert "last_error" not in h2["fred"] and h2["fred"]["first_run"] == h["fred"]["first_run"]
+
+
+def test_load_recent_events_fields_projection_drops_heavy_payload_but_keeps_digest_inputs(tmp_path):
+    cache_dir = tmp_path / "cache"
+    now = datetime(2026, 6, 4, 8, 0, tzinfo=KST)
+    sc.append_events([{"source": "polymarket", "title": "snap", "url": "https://e/snap",
+                       "tickers": ["QQQ"], "classification": {"kind": "prediction_market"},
+                       "body": "텍스트", "snapshot": {"orderbook": list(range(5000))}}],
+                     cache_dir=cache_dir, now=now)
+
+    full = sc.load_recent_events(cache_dir=cache_dir, now=now, hours=24)
+    slim = sc.load_recent_events(cache_dir=cache_dir, now=now, hours=24, fields=sc.DIGEST_FIELDS)
+
+    assert "snapshot" in full[0]
+    assert "snapshot" not in slim[0]
+    assert slim[0]["id"] == full[0]["id"] and slim[0]["collected_at"] == full[0]["collected_at"]
+    assert {"source", "title", "url", "tickers", "classification", "body"} <= set(slim[0])
+    assert sc.build_digest(slim) == sc.build_digest(full)

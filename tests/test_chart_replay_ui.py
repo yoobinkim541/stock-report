@@ -76,9 +76,23 @@ chart_replay_ui.render_terminal(context)
     at.run()
     assert not at.exception, str(at.exception)
     assert [tab.label for tab in at.tabs] == [
-        "Replay", "Orders", "Positions", "Strategy", "Events", "Diagnostics",
+        "리플레이", "주문", "포지션", "전략", "이벤트", "진단",
     ]
     assert any(button.label == "주문 제출" for button in at.button)
+    price = next(widget for widget in at.number_input if widget.label == "주문가")
+    assert price.disabled is True
+    kind = next(widget for widget in at.segmented_control if widget.label == "유형")
+    kind.set_value("지정가").run()
+    price = next(widget for widget in at.number_input if widget.label == "주문가")
+    assert price.disabled is False
+    stop = next(widget for widget in at.number_input if widget.label == "손절가")
+    target = next(widget for widget in at.number_input if widget.label == "목표가")
+    assert stop.disabled is True and target.disabled is True
+    bracket = next(widget for widget in at.toggle if widget.label == "손절·목표 동시 설정")
+    bracket.set_value(True).run()
+    stop = next(widget for widget in at.number_input if widget.label == "손절가")
+    target = next(widget for widget in at.number_input if widget.label == "목표가")
+    assert stop.disabled is False and target.disabled is False
 
 
 def test_batch_advance_evaluates_rules_at_every_intermediate_bar():
@@ -99,3 +113,15 @@ def test_batch_advance_evaluates_rules_at_every_intermediate_bar():
     decisions = [event for event in advanced["events"] if event.get("type") == "rule_decision"]
     assert [event["cursor"] for event in decisions] == [1, 2, 3, 4]
     assert advanced["orders"][-1]["submitted_cursor"] == 3
+
+
+def test_cancel_labels_describe_orders_instead_of_raw_ids():
+    rows = [
+        {"id": "abc123def456", "side": "buy", "type": "limit", "qty": 2, "price": 100},
+        {"id": "fff999aaa111", "side": "buy", "type": "limit", "qty": 2, "price": 100},
+    ]
+    labels = chart_replay_ui._cancel_labels(rows)
+    assert labels["abc123def456"] == "매수 지정가 2주 · 100 · abc123"
+    assert "abc123def456" not in labels["abc123def456"]
+    solo = chart_replay_ui._cancel_labels(rows[:1])
+    assert solo["abc123def456"] == "매수 지정가 2주 · 100"

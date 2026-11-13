@@ -156,7 +156,10 @@ def _summarize_source_pipeline_health(now: datetime | None = None) -> dict[str, 
         if name == "public" and journal["present"]:
             journal["automatic_latest"] = _summarize_automatic_latest(root / directory / AUTOMATIC_LATEST_NAME, now)
         journals[name] = journal
-        if journal["compile_failed"]:
+        latest = journal.get("automatic_latest") or {}
+        runner_current = latest.get("state") == "ok" and not latest.get("stale")
+        # Failed receipts stay in the runner retry queue. Count them only when the runner is down.
+        if journal["compile_failed"] and not runner_current:
             detail = _top_codes(Counter(journal["error_codes"]))
             reasons.append(f"{name}: compile 실패 {journal['compile_failed']}건" + (f" ({detail})" if detail else ""))
         if journal["operations_pending"]:

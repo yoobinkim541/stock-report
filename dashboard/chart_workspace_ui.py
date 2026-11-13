@@ -35,7 +35,40 @@ _TF_LABEL = {
     "1wk": "주",
     "1mo": "월",
 }
-_KIND_LABEL = {"line": "라인", "candle": "캔들", "heikin_ashi": "HA"}
+_KIND_LABEL = {**chart_workbench_ui.CHART_TYPE_LABELS, "candle": "캔들"}
+_DRAWING_LABELS = {"off": "끄기", "layout_symbol": "이 레이아웃", "global_symbol": "모든 레이아웃"}
+_RENDER_WARNINGS = {
+    "Compare mode does not support sequence-based synthetic prices; normalized line comparison was used.": "비교 모드에서는 변환 차트 대신 맞춘 라인 비교를 표시합니다.",
+    "Replay order and position overlays are hidden in normalized compare mode.": "비교 모드에서는 리플레이 주문과 포지션을 숨깁니다.",
+    "Synthetic prices use the OHLCV close path; SourceTimestamp is an anchor, not tick-level precision.": "변환 가격은 봉의 종가 경로로 다시 만든 값입니다. 체결가가 아닙니다.",
+    "Synthetic prices are reconstructed from OHLCV bars and are not executable prices.": "변환 가격은 봉으로 다시 만든 값이라 체결가가 아닙니다.",
+}
+_FREQ_LABEL = {"once": "한 번", "per_bar": "봉마다"}
+
+
+def _user_warning(text: str) -> str | None:
+    raw = str(text or "").strip()
+    if not raw:
+        return None
+    mapped = _RENDER_WARNINGS.get(raw)
+    if mapped:
+        return mapped
+    if raw.isascii():
+        return None
+    return raw
+
+
+def _sync_caption(ws: dict[str, Any]) -> str:
+    sync = ws.get("sync") or {}
+    parts = [name for name, on in (("심볼", sync.get("symbol")), ("봉", sync.get("interval")), ("기간", sync.get("range"))) if on]
+    lead = f"{'·'.join(parts)}은 켜진 항목만 같은 그룹에 전파됩니다." if parts else "심볼·봉·기간 동기화는 꺼져 있습니다."
+    extra = []
+    if sync.get("crosshair"):
+        extra.append("십자선은 브라우저에서 맞춥니다.")
+    if sync.get("range"):
+        extra.append("보이는 시간 범위는 기간 동기화가 켜져 있을 때만 맞춥니다.")
+    extra.append(f"드로잉은 {_DRAWING_LABELS.get(str(sync.get('drawings') or 'off'), '끄기')}입니다.")
+    return " ".join([lead, *extra])
 _ALERT_INDICATOR_LABELS = {
     "rsi_14": "RSI(14)",
     "macd": "MACD",
@@ -168,6 +201,15 @@ def _drawing_sync_url(ws: dict[str, Any], store_key: str | None) -> str | None:
     return f"{base.rstrip('/')}/api/chart-workspaces/{safe_workspace}/drawings"
 
 
+def compare_history_period(view_days: int | None) -> str:
+    """비교 시리즈도 view_window의 5배 팬 버퍼와 250봉 워밍업을 보존한다."""
+    if view_days is None or view_days > 365:
+        return "max"
+    if view_days > 180:
+        return "10y"
+    return "5y"
+
+
 def _load_panel_hist(panel: dict[str, Any]):
     ticker = panel["ticker"]
     tf = panel["timeframe"]
@@ -217,12 +259,12 @@ def _render_panel_chart(
     if replay_until is not None:
         hist = hist[hist.index <= replay_until]
     if hist is None or getattr(hist, "empty", True):
-        st.info(f"{panel['ticker']} replay 구간에 데이터가 없습니다.")
+        st.info(f"{panel['ticker']} 다시보기 구간에 데이터가 없습니다.")
         return
     compare = {}
     if not compact:
         for ticker in panel.get("compare") or []:
-            cmp_hist = cached.ohlc(ticker, "max") if panel["timeframe"] == "1d" else cached.ohlc_tf(ticker, panel["timeframe"])
+            cmp_hist = cached.ohlc(ticker, compare_history_period(view_days)) if panel["timeframe"] == "1d" else cached.ohlc_tf(ticker, panel["timeframe"])
             if cmp_hist is not None and not getattr(cmp_hist, "empty", True) and "Close" in cmp_hist.columns:
                 series = charts.view_window(cmp_hist["Close"], view_days)
                 if replay_until is not None:
@@ -286,7 +328,9 @@ def _render_panel_chart(
     )
     fig = rendered.figure
     for warning in rendered.warnings:
-        st.caption(warning)
+        shown = _user_warning(warning)
+        if shown:
+            st.caption(shown)
     fig.update_layout(
         height=height,
         showlegend=not compact,
@@ -316,7 +360,7 @@ def _render_panel_chart(
         range_sync_key=range_sync_key,
         light=theme.is_light(),
     )
-    st.caption(prepared.status if not compact else prepared.decision.backend.upper())
+    st.caption(prepared.status if not compact else ("고성능" if prepared.decision.backend == "canvas" else "분석"))
     if prepared.decision.backend == "canvas":
         st.iframe(prepared.html, height=prepared.component_height)
     else:
@@ -378,6 +422,7 @@ def render_chart_workspace(
         "드로잉",
         ["off", "layout_symbol", "global_symbol"],
         index=["off", "layout_symbol", "global_symbol"].index(ws["sync"].get("drawings", "layout_symbol")),
+        format_func=lambda value: _DRAWING_LABELS.get(value, value),
         key=f"_cw_sync_drawings_{workspace_widget_scope}",
     )
     with c7.popover("AI"):
@@ -402,7 +447,7 @@ def render_chart_workspace(
                 st.session_state.pop("_cw_patch_preview", None)
                 st.toast("차트 워크스페이스 패치를 적용했습니다.")
                 st.rerun()
-    st.caption("심볼·봉·기간은 전체 또는 같은 링크 그룹에 전파됩니다. 십자선과 보이는 시간 범위는 브라우저에서 즉시 동기화됩니다.")
+    st.caption(_sync_caption(ws))
     ws = _render_workspace_library_bar(ws)
     ws = _render_template_library_bar(ws)
 
@@ -531,7 +576,7 @@ def _render_template_library_bar(ws: dict[str, Any]) -> dict[str, Any]:
         "이름",
         value=default_name,
         key=f"_cw_tpl_name_{save_kind_choice}_{ws.get('id', 'default')}",
-        placeholder="예: Trend Clean / Volume Focus / NVDA 5m",
+        placeholder="예: 추세 정리 / 거래량 / NVDA 5분",
     )
     if save_btn.button("현재 저장", key=f"_cw_tpl_save_{save_kind_choice}_{ws.get('id', 'default')}", width="stretch"):
         try:
@@ -546,8 +591,8 @@ def _render_template_library_bar(ws: dict[str, Any]) -> dict[str, Any]:
             st.toast(f"{chart_workspace.template_kind_label(save_kind_choice)} 템플릿을 저장했습니다.")
             if saved:
                 st.session_state["_cw_last_template"] = saved.get("id")
-        except Exception as exc:
-            st.error(f"템플릿 저장 실패: {exc}")
+        except Exception:
+            st.error("템플릿을 저장하지 못했습니다. 이름과 종류를 확인한 뒤 다시 시도하세요.")
 
     apply_kind, apply_target, apply_btn = st.columns([0.9, 1.3, 0.8], vertical_alignment="bottom")
     apply_kind_choice = apply_kind.selectbox(
@@ -591,8 +636,8 @@ def _render_template_library_bar(ws: dict[str, Any]) -> dict[str, Any]:
                 st.session_state["_cw_workspace"] = ws
                 st.toast(f"{_template_label(chosen)} 적용 완료")
                 st.rerun()
-            except Exception as exc:
-                st.error(f"템플릿 적용 실패: {exc}")
+            except Exception:
+                st.error("템플릿을 적용하지 못했습니다. 다시 시도하세요.")
     else:
         apply_target.caption("저장된 템플릿이 없습니다.")
 
@@ -619,7 +664,7 @@ def _render_alert_manager(ws: dict[str, Any], panels: list[dict[str, Any]]) -> N
     if not active_panel:
         return
     st.markdown("##### 알림 매니저")
-    st.caption("활성 패널 기준으로 가격 crossing 알림을 저장합니다. 서버 평가 API는 가격·인디케이터·드로잉 라인·멀티컨디션 알림까지 처리할 수 있습니다.")
+    st.caption("활성 패널 기준으로 가격 돌파 알림을 저장합니다. 서버 평가는 가격·지표·드로잉 선·여러 조건 알림까지 처리합니다.")
     st.caption("수동 실행으로 저장된 알림을 즉시 평가하고 최근 실행 결과를 갱신할 수 있습니다.")
     try:
         rules = views.chart_alert_rules(workspace_id, limit=20) if workspace_id else []
@@ -633,8 +678,8 @@ def _render_alert_manager(ws: dict[str, Any], panels: list[dict[str, Any]]) -> N
             result = views.chart_alert_run_once(workspace_id, notify=notify_now)
             st.toast(f"알림 평가 완료: 트리거 {result.get('event_count', 0)}건")
             st.rerun()
-        except Exception as exc:
-            st.error(f"알림 평가 실패: {exc}")
+        except Exception:
+            st.error("알림을 평가하지 못했습니다. 다시 시도하세요.")
 
     with st.expander("가격 알림 만들기", expanded=False):
         c1, c2, c3, c4 = st.columns([1.0, 1.1, 0.9, 1.0], vertical_alignment="bottom")
@@ -649,7 +694,7 @@ def _render_alert_manager(ws: dict[str, Any], panels: list[dict[str, Any]]) -> N
         threshold = c2.number_input("가격", min_value=0.0, value=0.0, step=1.0, key=f"_cw_alert_value_{workspace_id}_{active_id}")
         frequency = c3.selectbox("빈도", ["once", "per_bar"], format_func=lambda v: "한 번" if v == "once" else "봉마다", key=f"_cw_alert_freq_{workspace_id}_{active_id}")
         name = c4.text_input("이름", value=f"{symbol} {_alert_operator_label(operator)}", key=f"_cw_alert_name_{workspace_id}_{active_id}")
-        message = st.text_input("메시지", value=f"{symbol} {operator} {threshold:g}", key=f"_cw_alert_msg_{workspace_id}_{active_id}")
+        message = st.text_input("메시지", value=f"{symbol} {_alert_operator_label(operator)} {threshold:g}", key=f"_cw_alert_msg_{workspace_id}_{active_id}")
         r1, r2, r3, r4 = st.columns([0.75, 1.15, 1.0, 1.0], vertical_alignment="bottom")
         indicator_enabled = r1.checkbox("보조 조건", value=False, key=f"_cw_alert_indicator_enabled_{workspace_id}_{active_id}")
         indicator_field = r2.selectbox(
@@ -674,11 +719,13 @@ def _render_alert_manager(ws: dict[str, Any], panels: list[dict[str, Any]]) -> N
             disabled=not indicator_enabled,
         )
         store_key = _drawing_store_key(ws, active_panel, compare=bool(active_panel.get("compare")))
-        if st.button("알림 저장", key=f"_cw_alert_save_{workspace_id}_{active_id}", width="stretch", disabled=not bool(workspace_id and store_key and threshold > 0)):
+        if not store_key:
+            st.caption("드로잉이 꺼져 있어 가격 알림만 저장됩니다.")
+        if st.button("알림 저장", key=f"_cw_alert_save_{workspace_id}_{active_id}", width="stretch", disabled=not bool(workspace_id and threshold > 0)):
             try:
                 views.chart_alert_rule_save({
                     "workspace_id": workspace_id,
-                    "store_key": store_key,
+                    "store_key": store_key or f"cw:price:{symbol}:{timeframe}",
                     "symbol": symbol,
                     "timeframe": timeframe,
                     "name": name,
@@ -696,8 +743,8 @@ def _render_alert_manager(ws: dict[str, Any], panels: list[dict[str, Any]]) -> N
                 })
                 st.toast("차트 알림을 저장했습니다.")
                 st.rerun()
-            except Exception as exc:
-                st.error(f"알림 저장 실패: {exc}")
+            except Exception:
+                st.error("알림을 저장하지 못했습니다. 가격을 확인한 뒤 다시 시도하세요.")
 
     if rules:
         st.dataframe(
@@ -706,7 +753,7 @@ def _render_alert_manager(ws: dict[str, Any], panels: list[dict[str, Any]]) -> N
                 "종목": row.get("symbol"),
                 "봉": row.get("timeframe"),
                 "조건": _alert_rule_label(row),
-                "빈도": "한 번" if row.get("frequency") == "once" else row.get("frequency"),
+                "빈도": _FREQ_LABEL.get(row.get("frequency"), "한 번"),
                 "상태": "켜짐" if row.get("enabled") else "꺼짐",
                 "최근": (row.get("last_state") or {}).get("last_checked_at") or "—",
             } for row in rules]),
@@ -896,7 +943,7 @@ def _render_workspace_library_bar(ws: dict[str, Any]) -> dict[str, Any]:
     st.markdown("##### 저장된 레이아웃")
     st.caption(f"저장 {saved_count}개 · 레이아웃, 패널, 비교종목, 지표, AI 패치 결과를 버전으로 남깁니다.")
     c1, c2, c3, c4, c5 = st.columns([1.2, 1.3, 0.8, 0.8, 0.9], vertical_alignment="bottom")
-    ws["name"] = c1.text_input("이름", value=str(ws.get("name") or "Workspace"), key=f"_cw_name_{ws.get('id', 'default')}")
+    ws["name"] = c1.text_input("이름", value=str(ws.get("name") or "작업공간"), key=f"_cw_name_{ws.get('id', 'default')}")
 
     picked_idx = None
     if workspaces:
@@ -966,8 +1013,8 @@ def _render_analysis_rail(
 
     try:
         hist = _load_panel_hist(panel)
-    except Exception as exc:
-        st.warning(f"{panel['ticker']} 분석 데이터 로딩 실패: {exc}")
+    except Exception:
+        st.warning(f"{panel['ticker']} 분석 데이터를 불러오지 못했습니다.")
         return
     if hist is None or getattr(hist, "empty", True):
         st.info(f"{panel['ticker']} 분석 데이터 없음")
@@ -975,7 +1022,7 @@ def _render_analysis_rail(
     if replay_until is not None:
         hist = hist[hist.index <= replay_until]
         if hist is None or getattr(hist, "empty", True):
-            st.info(f"{panel['ticker']} replay 구간에 분석 데이터가 없습니다.")
+            st.info(f"{panel['ticker']} 다시보기 구간에 분석 데이터가 없습니다.")
             return
 
     document = chart_document.normalize_chart_document(
@@ -1032,8 +1079,9 @@ def _benchmark_ticker(panel: dict[str, Any]) -> str:
     compare = [str(x).strip().upper() for x in panel.get("compare") or [] if str(x).strip()]
     if compare:
         return compare[0]
-    ticker = str(panel.get("ticker") or "").upper()
-    if ticker.endswith((".KS", ".KQ")) or (ticker.isdigit() and len(ticker) == 6):
+    import ticker_names
+    ticker = str(panel.get("ticker") or "")
+    if ticker_names.is_kr_listing(ticker):
         return "^KS11"
     return "QQQ"
 
@@ -1160,8 +1208,8 @@ def _load_workspace_record(workspace_id: str, *, version: int | None = None) -> 
     except Exception:
         try:
             row = views.chart_workspace_detail(workspace_id, version=version)
-        except Exception as exc:
-            st.error(f"레이아웃 불러오기 실패: {exc}")
+        except Exception:
+            st.error("레이아웃을 불러오지 못했습니다. 다시 시도하세요.")
             return None
     workspace = row.get("workspace") if isinstance(row, dict) else None
     if not isinstance(workspace, dict):
@@ -1176,8 +1224,8 @@ def _load_workspace_record(workspace_id: str, *, version: int | None = None) -> 
 def _save_workspace(ws: dict[str, Any]) -> dict[str, Any] | None:
     try:
         saved = views.chart_workspace_save(ws)
-    except Exception as exc:
-        st.error(f"레이아웃 저장 실패: {exc}")
+    except Exception:
+        st.error("레이아웃을 저장하지 못했습니다. 다시 시도하세요.")
         return None
     _refresh_workspace_caches()
     workspace = saved.get("workspace") if isinstance(saved, dict) else None
@@ -1212,7 +1260,7 @@ def _workspace_index(rows: list[dict[str, Any]], workspace_id: str) -> int:
 
 
 def _workspace_label(row: dict[str, Any]) -> str:
-    return f"{row.get('name') or 'Workspace'} · {row.get('layout') or '1'} · v{row.get('version') or 0}"
+    return f"{row.get('name') or '작업공간'} · {row.get('layout') or '1'} · v{row.get('version') or 0}"
 
 
 def _template_label(row: dict[str, Any]) -> str:

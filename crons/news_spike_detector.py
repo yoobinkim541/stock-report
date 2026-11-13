@@ -95,7 +95,7 @@ def _log_collection_failure(exc: BaseException, now: datetime) -> None:
     """
     availability = str(getattr(exc, "availability", "") or "").lower()
     status_code = getattr(exc, "status_code", None)
-    if availability != "blocked" and status_code not in {403, 451}:
+    if availability not in {"blocked", "unavailable"} and status_code not in {403, 451}:
         logger.error("수집 실패: %s", exc)
         return
 
@@ -104,7 +104,7 @@ def _log_collection_failure(exc: BaseException, now: datetime) -> None:
         state = json.loads(PROVIDER_ERROR_STATE_FILE.read_text(encoding="utf-8"))
     except Exception:
         state = {}
-    key = f"{status_code or 'blocked'}:{str(exc)[:180]}"
+    key = f"{status_code or availability or 'blocked'}:{str(exc)[:180]}"
     now_ts = now.timestamp()
     last_ts = float(state.get(key, 0) or 0)
     if now_ts - last_ts < PROVIDER_ERROR_COOLDOWN_HOURS * 3600:
@@ -113,8 +113,9 @@ def _log_collection_failure(exc: BaseException, now: datetime) -> None:
     tmp = PROVIDER_ERROR_STATE_FILE.with_suffix(".tmp")
     tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(PROVIDER_ERROR_STATE_FILE)
-    logger.error("수집 차단(%s): %s — %d시간 동안 동일 오류 로그 생략",
-                 status_code or availability, exc, PROVIDER_ERROR_COOLDOWN_HOURS)
+    label = "수집 종료" if availability == "unavailable" else "수집 차단"
+    logger.error("%s(%s): %s — %d시간 동안 동일 오류 로그 생략",
+                 label, status_code or availability, exc, PROVIDER_ERROR_COOLDOWN_HOURS)
 
 
 def _prune_state(state: dict, now: datetime) -> None:

@@ -7,6 +7,7 @@
 - 표시명: US=영문(EN), 한국 상장주(.KS)=한글(KR). 큐레이트 시드 미스 시 yfinance longName
   디스크캐시(offline-safe·graceful None) 폴백.
 - 검색: 한글명·영문명·티커 어느 것으로도 → 티커. 역인덱스(KO 별칭 + EN + KR).
+- 언급: `mentions_in` — 뉴스 제목의 종목 언급 → 티커. 무네트워크.
 - 경량: import-time 순수 stdlib. yfinance 는 캐시 미스 시에만 lazy import(봇 hermes/대시보드
   .venv 모두 보유). 네트워크 실패·미설치도 예외 없이 None.
 
@@ -331,7 +332,7 @@ def display_name(ticker: str, allow_net: bool = True) -> str | None:
     if not t:
         return None
     tu = t.upper()
-    if _KR_CODE_RE.match(tu):  # 6자리 국내 코드도 .KS 로 정규화해 표시명 복원
+    if _KR_CODE_RE.match(tu):  # 접미사 없는 국내 코드도 .KS 로 정규화해 표시명 복원
         norm = normalize_input(tu)
         if norm:
             t = norm
@@ -414,7 +415,22 @@ def macro_unit(ticker: str) -> str:
 
 
 _US_TICKER_RE = re.compile(r"^[A-Z]{1,5}([.\-][A-Z]{1,2})?$")
-_KR_CODE_RE = re.compile(r"^(?:A)?(\d{6})(?:\.(KS|KQ))?$", re.IGNORECASE)
+# 암호화폐 페어. 클래스주(BRK-B)는 위 식. 접미 3~4자는 접두로 자르지 않는다.
+_PAIR_TICKER_RE = re.compile(r"^[A-Z]{1,5}-[A-Z]{3,4}$")
+# 숫자만(005930)과 문자 혼합(0167A0) 모두. 숫자 없는 6글자는 US 롱테일이므로 제외.
+_KR_CODE_RE = re.compile(
+    r"^(?:A)?(?=[0-9A-Z]*\d)([0-9A-Z]{6})(?:\.(KS|KQ))?$",
+    re.IGNORECASE,
+)
+
+
+def is_kr_listing(ticker: str) -> bool:
+    """국내 상장 코드 여부. 005930·0167A0·.KS/.KQ 를 포함한다."""
+    raw = str(ticker or "").strip()
+    if not raw:
+        return False
+    norm = normalize_input(raw) or raw.upper()
+    return norm.upper().endswith((".KS", ".KQ"))
 
 
 def normalize_input(query: str) -> str | None:
@@ -433,7 +449,7 @@ def normalize_input(query: str) -> str | None:
     if km:
         suffix = km.group(2) or "KS"
         return f"{km.group(1)}.{suffix.upper()}"
-    if _US_TICKER_RE.match(qu):
+    if _US_TICKER_RE.match(qu) or _PAIR_TICKER_RE.match(qu):
         if qu in _ALL_TICKERS:
             return qu
         return _INDEX.get(_norm(q)) or qu   # 이름 정확매칭 없으면 리터럴 티커로 통과
@@ -475,3 +491,183 @@ def search_label(ticker: str) -> str:
     if ko and ko[0] and ko[0] not in base:
         return f"{base} · {ko[0]}"
     return base
+
+
+# 뉴스 제목에서 종목으로 오인하기 쉬운 짧은 별칭. 이 표제어만 빼고, 더 긴 별칭
+# (비트코인·다우존스·금 선물·골드만 등)은 그대로 매칭한다.
+_MENTION_ALIAS_BLOCK = frozenset({
+    "금", "은", "비트", "다우", "환율", "이더", "골드", "실버", "달러",
+    "eth", "btc", "유가",
+})
+# 본문 티커 뒤에 붙는 조사. "NVDA는"은 단어이고 "IT서비스"는 한 단어라 조사 외의
+# 한글이 바로 붙으면 티커로 보지 않는다.
+_MENTION_PARTICLE = r"(?:으로|에서|에게|은|는|이|가|을|를|도|만|의|과|와|로|께)?"
+# `$` 뒤 토큰 전체. `-` `.` `=` 가 이어지면 접두($SOL, $BRK, $GC)로 끊지 않는다.
+# 문장 부호 `$NVDA.` 는 토큰에 넣지 않는다.
+_CASHTAG_RE = re.compile(
+    r"\$(?P<raw>[A-Za-z0-9^]+(?:[.\-=][A-Za-z0-9]+)*)"
+    r"(?![A-Za-z0-9]|[.\-=][A-Za-z0-9])",
+    re.IGNORECASE,
+)
+_CASHTAG_SHAPE = re.compile(
+    r"^(?:[A-Z]{1,5}(?:[.\-][A-Z]{1,2})?|[A-Z]{1,5}-[A-Z]{3,4}|[A-Z]{1,4}=[A-Z])$"
+)
+_BODY_EDGE = r"(?![A-Za-z0-9가-힣]|[.\-=][A-Za-z0-9])"
+_BODY_TICKER_RE = re.compile(
+    r"(?<![A-Za-z0-9$])"
+    r"(?P<raw>[A-Z]{2,5}(?:[.\-][A-Z]{1,4})?)"
+    + _MENTION_PARTICLE +
+    _BODY_EDGE
+)
+_BODY_CODE_RE = re.compile(
+    r"(?<![A-Za-z0-9$])"
+    r"(?P<raw>(?:A)?(?=[0-9A-Za-z]*\d)[0-9A-Za-z]{6}(?:\.(?:KS|KQ))?)"
+    + _MENTION_PARTICLE +
+    _BODY_EDGE,
+    re.IGNORECASE,
+)
+
+
+def _fold_1to1(s: str) -> str:
+    """대소문자만 접고 글자 수는 유지한다. 별칭 위치와 원문 인덱스를 맞춘다."""
+    out = []
+    for ch in s:
+        folded = ch.casefold()
+        out.append(folded if len(folded) == 1 else ch)
+    return "".join(out)
+
+
+def _mention_aliases() -> tuple[tuple[str, str], ...]:
+    """(접힌 별칭, 티커). 같은 표기는 먼저 등록된 티커(큐레이트 우선)만 남긴다."""
+    found: list[tuple[str, str]] = []
+    seen: set[str] = set()
+
+    def add(alias: str, ticker: str) -> None:
+        cleaned = " ".join((alias or "").split())
+        if len(cleaned) < 2:
+            return
+        key = _fold_1to1(cleaned)
+        if key in _MENTION_ALIAS_BLOCK or key in seen:
+            return
+        seen.add(key)
+        found.append((key, ticker))
+
+    for ticker, aliases in KO.items():
+        for alias in aliases:
+            add(alias, ticker)
+    for ticker, name in KR.items():
+        add(name, ticker)
+    for ticker, name in EN.items():
+        add(name, ticker)
+    for ticker, name in _SP500.items():
+        add(name, ticker)
+    for ticker, name in _KR_ETF.items():
+        add(name, ticker)
+    return tuple(found)
+
+
+_MENTION_ALIASES = _mention_aliases()
+
+
+def _canon_kr_code(raw: str) -> str | None:
+    m = _KR_CODE_RE.match((raw or "").upper())
+    if not m:
+        return None
+    suffix = (m.group(2) or "KS").upper()
+    return f"{m.group(1)}.{suffix}"
+
+
+def _cashtag_symbol(raw: str) -> str | None:
+    """캐시태그 토큰 전체만 티커로. 접두·부분 일치는 버린다."""
+    token = (raw or "").upper()
+    if not token:
+        return None
+    code = _canon_kr_code(token)
+    if code:
+        return code
+    if token in _ALL_TICKERS:
+        return token
+    key = _fold_1to1(token)
+    if key not in _MENTION_ALIAS_BLOCK:
+        hit = _INDEX.get(_norm(token))
+        if hit:
+            return hit
+    if _CASHTAG_SHAPE.match(token):
+        return token
+    return None
+
+
+def _alias_span_ok(text: str, start: int, end: int, alias: str) -> bool:
+    """별칭이 더 긴 영숫자·한글 단어 중간에 끼면 버린다. 한글 별칭 뒤의 조사는 허용."""
+    if start > 0:
+        before = text[start - 1]
+        if (("A" <= before <= "Z") or ("a" <= before <= "z") or ("0" <= before <= "9")
+                or ("가" <= before <= "힣")):
+            return False
+    if "가" <= alias[-1] <= "힣":
+        return True
+    if end < len(text):
+        after = text[end]
+        if ("A" <= after <= "Z") or ("a" <= after <= "z") or ("0" <= after <= "9"):
+            return False
+    return True
+
+
+def _overlaps(start: int, end: int, spans: list[tuple[int, int]]) -> bool:
+    return any(start < stop and end > begin for begin, stop in spans)
+
+
+def mentions_in(text: str, *, limit: int = 6) -> list[str]:
+    """뉴스 제목의 종목 언급을 티커로 뽑는다. 등장 순서·중복 제거·무네트워크.
+
+    `$TICKER` 는 토큰 전체를 본다. `$SOL-USD`·`$BRK-B`·`$GC=F` 를 접두로 자르지
+    않고, 형식이 아닌 캐시태그 안에서는 별칭을 찾지 않는다. 1글자 티커는 `$` 가
+    있을 때만. 본문 단어 티커는 대문자이고 길이 2 이상인 알려진 심볼만. 6자리
+    코드(0167A0 포함)는 `005930.KS`(또는 `.KQ`)로 정규화한다. 한글·영문 별칭은
+    길이 2 이상이고 제목에 포함될 때만. 오탐 별칭(금·은·비트·다우·환율·이더·
+    골드·실버·달러·eth·btc·유가)은 제외한다. limit 가 0 이하이면 빈 목록.
+    """
+    if not isinstance(text, str) or not text or limit <= 0:
+        return []
+    hits: list[tuple[int, int, str]] = []
+    blocked: list[tuple[int, int]] = []
+    for m in _CASHTAG_RE.finditer(text):
+        sym = _cashtag_symbol(m.group("raw"))
+        if sym:
+            hits.append((m.start(), m.end(), sym))
+        else:
+            blocked.append((m.start(), m.end()))
+    for m in _BODY_TICKER_RE.finditer(text):
+        raw = m.group("raw")
+        if raw in _ALL_TICKERS:
+            hits.append((m.start(), m.end(), raw))
+    for m in _BODY_CODE_RE.finditer(text):
+        code = _canon_kr_code(m.group("raw"))
+        if code:
+            hits.append((m.start(), m.end(), code))
+    folded = _fold_1to1(text)
+    for alias, ticker in _MENTION_ALIASES:
+        start = 0
+        while True:
+            i = folded.find(alias, start)
+            if i < 0:
+                break
+            end = i + len(alias)
+            if _alias_span_ok(text, i, end, alias):
+                hits.append((i, end, ticker))
+            start = i + 1
+    hits.sort(key=lambda item: (item[0], -(item[1] - item[0])))
+    out: list[str] = []
+    seen: set[str] = set()
+    spans: list[tuple[int, int]] = list(blocked)
+    for start, end, ticker in hits:
+        if _overlaps(start, end, spans):
+            continue
+        spans.append((start, end))
+        if ticker in seen:
+            continue
+        seen.add(ticker)
+        out.append(ticker)
+        if len(out) >= limit:
+            break
+    return out

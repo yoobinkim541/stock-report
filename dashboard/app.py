@@ -41,21 +41,20 @@ if not getattr(st, "_tn_df_patched", False):
         try:
             if theme.is_light() and isinstance(data, _pd.DataFrame):
                 data = data.style.set_properties(
-                    **{"background-color": "#ffffff", "color": "#1a2233"})
+                    **{"background-color": "#ffffff", "color": "#191f28"})
         except Exception:
             pass
         return _orig_dataframe(data, *a, **k)
 
     st.dataframe = _themed_dataframe
     st._tn_df_patched = True
-# 선택 지속 — 매 런 쿠키를 현재 모드로 동기화 (다음 전체 새로고침에서 무플래시 복원 근접)
+# 테마 쿠키 + 재기동 워치독은 iframe 하나 — 매 rerun 마운트를 줄인다.
 st.iframe(
     "<script>parent.document.cookie='tn_theme="
     + ("light" if st.session_state["tn_light"] else "dark")
-    + "; path=/; max-age=31536000; SameSite=Lax'</script>", height=1)
-
-# 서버 재기동 감지 워치독 — 배포/재시작 후 좀비 탭이 자동 새로고침 → 로그인 게이트
-st.iframe(auth.reconnect_watchdog_html(), height=1)
+    + "; path=/; max-age=31536000; SameSite=Lax'</script>"
+    + auth.reconnect_watchdog_html(),
+    height=1)
 
 if not auth.password_gate():
     st.stop()
@@ -84,7 +83,7 @@ if _qtk:
             st.session_state["_nav_to_ticker"] = True  # st.navigation 이후 switch_page (기존 경로)
 
 with st.sidebar:
-    st.markdown("### 🔎 종목")
+    st.markdown("### 종목")
     _cur = st.session_state["ticker"]
     # 옵션 = 보유 우선 + 전체 유니버스. 현재 종목/정규화 가능한 대기입력이 유니버스 밖이면 앞에 보장.
     # accept_new_options 로 새로 입력한 티커(예: RIVN)가 아래 reconciliation 의 `_tsel not in _opts`
@@ -140,13 +139,21 @@ with st.sidebar:
     _tc.toggle("☀️ 라이트" if st.session_state.get("tn_light") else "🌙 다크",
                key="tn_light", help="라이트/다크 모드 전환 (선택은 이 브라우저에 기억)")
 
-    # 보유 종목 워치리스트 (터미널 레일 — 무네트워크: 스냅샷 수익률)
-    _wl = sorted(_holdings, key=lambda h: h.get("value", 0) or 0, reverse=True)
-    if _wl:
+    # 보유 워치 — 미국북·국내북 평가액·수익률. 국내 코드는 클릭 가능한 .KS/.KQ.
+    try:
+        _kr_book = (cached.kr_holdings() or {}).get("rows") or []
+    except Exception:
+        _kr_book = []
+    _us_hold, _kr_hold = theme.sidebar_holding_rails(_holdings, _kr_book)
+    if _us_hold or _kr_hold:
         st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
-        theme.render(theme.watchlist_html(
-            [{"symbol": h["ticker"], "name": h.get("name"), "last": h.get("value"), "chg_pct": h.get("ret")}
-             for h in _wl if h.get("ticker")], title="보유 종목 · 평가액($) · 수익률"))
+        if _us_hold:
+            theme.render(theme.watchlist_html(
+                _us_hold, title="보유 · 미국 · 평가액·수익률", money="$"))
+        if _kr_hold:
+            theme.render(theme.watchlist_html(
+                _kr_hold, title="보유 · 국내 · 평가액·수익률", money="₩", decimals=0))
+        st.caption("종목을 누르면 분석으로 이동합니다")
 
     # 🧪 모의투자 레일 (KR·US 자동 페이퍼트레이딩 — EOD 스냅샷 초경량·무네트워크)
     _pg = cached.paper_glance()
@@ -154,7 +161,7 @@ with st.sidebar:
         st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
         theme.render(theme.paper_rail_html(_pg))
         if st.button("🧪 모의투자 상세", width="stretch", key="_paper_btn",
-                     help="계좌 현황·NAV 곡선·판단근거 원장"):
+                     help="계좌 현황·순자산 곡선·판단근거 원장"):
             st.session_state["_nav_to_paper"] = True   # 페이지 객체 생성 후 switch (아래)
 
     # 💰 주식 모으기 레일 — 주문서 계산은 QQQ/VIX/환율·종목가 네트워크를 사용하므로
@@ -214,10 +221,7 @@ try:
     _tape = _theme.market_tape_html(_tape_items)
     if _tape:
         st.markdown(_tape, unsafe_allow_html=True)
-        _tape_meta = _tape_items[0] if _tape_items else {}
-        _tape_source = _tape_meta.get("source") or "미상"
-        _tape_freshness = _tape_meta.get("freshness") or "미상"
-        _tape_asof = _tape_meta.get("asof") or "기준 시각 미상"
-        st.caption(f"시장 마퀴 · source={_tape_source} · freshness={_tape_freshness} · {_tape_asof}")
-except Exception:
-    pass
+except Exception as _tape_err:
+    import logging as _logging
+    _logging.getLogger(__name__).warning("시장 마퀴 렌더 실패: %s", _tape_err)
+    st.caption("시장 마퀴를 불러오지 못했습니다 (데이터 소스 일시 장애)")

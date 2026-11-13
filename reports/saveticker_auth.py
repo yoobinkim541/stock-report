@@ -12,8 +12,8 @@ def _origin(page):
 
 
 def _blocked(page):
-    return page.evaluate('''() => !!document.querySelector('#challenge-running, #cf-challenge-running, [id^="cf-chl-"]') ||
-        /just a moment|checking your browser|verify you are human/i.test(document.title)''')
+    return page.evaluate('''() => !!document.querySelector('#cf-error-details, #challenge-running, #cf-challenge-running, [id^="cf-chl-"]') ||
+        /just a moment|attention required.*cloudflare|checking your browser|verify you are human/i.test(document.title)''')
 
 
 def _authenticated(page):
@@ -26,6 +26,8 @@ def _authenticated(page):
 def _login(page,vault):
     secret = None
     try:
+        if _origin(page) == ORIGIN and _blocked(page):
+            return {'status': 'blocked'}
         page.goto(ORIGIN+'/news',wait_until='domcontentloaded',timeout=30000)
         page.bring_to_front()
         page.wait_for_timeout(700)

@@ -648,57 +648,68 @@ def main(argv: list[str] | None = None) -> int:
         positions, cash, nav = {}, SEED_USD, SEED_USD    # dry-run: 시드 가정 미리보기
 
     signals = compute_us_signals()
-    if not signals:
+    sweet_orders = None
+    if os.getenv("MOCK_SWEET_SPOT", "1") != "0":
+        from ml.data_pipeline import fetch_prices
+        from ml.mock_sweet_spot import etf_orders, us_n_weights
+        loaded = fetch_prices(["QQQ", "QLD", "SGOV", "GLD", "^VIX", "^VIX3M"], days=400)
+        closes = {t: df["Close"] for t, df in loaded.items()
+                  if df is not None and not getattr(df, "empty", True) and "Close" in df.columns}
+        weights = us_n_weights(closes)
+        prices = {t: float(s.dropna().iloc[-1]) for t, s in closes.items() if t in weights and len(s.dropna())}
+        if weights:
+            sweet_orders = etf_orders(weights, positions, nav * INVEST, prices, band=REBAL_BAND)
+            logger.info("스위트스팟 US N: %s",
+                        " ".join(f"{k} {v:.0%}" for k, v in weights.items()))
+    if sweet_orders is not None:
+        plan = sweet_orders
+        logger.info("리밸런스 계획 %d건 (스위트스팟 ETF)", len(plan))
+    elif not signals:
         logger.warning("US 신호 0건 — 종료")
         return 0
-    leverage_symbols = set(leverage_universe())
-
-    # ★Tier3 구조레버 슬리브 (모의 한정) — 게이트 GO·신선 시 NAV×(reco−1) 을 2x ETF 로.
-    # 슬리브 종목은 선택 로직 대상에서 제외(positions 분리 — '타깃이탈' 오청산 방지).
-    sleeve_frac, sleeve_orders = 0.0, []
-    positions_stock = {k: v for k, v in positions.items() if k != LEV_SLEEVE_SYMBOL}
-    sleeve_mode = leverage_sleeve_mode()
-    if sleeve_mode != "off":
-        reco = load_lev_shadow()
-        lev_px = _rt_best(LEV_SLEEVE_SYMBOL, "buy") or (kis_mock.get_price(LEV_SLEEVE_SYMBOL) if not dry else None)
-        shadow_frac, shadow_orders = sleeve_plan(reco, nav, positions, lev_px,
-                                                 band=REBAL_BAND, symbol=LEV_SLEEVE_SYMBOL)
-        if sleeve_mode == "paper":
-            sleeve_frac, sleeve_orders = shadow_frac, shadow_orders
-        logger.info("슬리브[%s]: reco=%s → 비중 %.0f%% · 주문 %d건",
-                    sleeve_mode, reco, shadow_frac * 100, len(shadow_orders))
-
-    budget = nav * INVEST * (1.0 - sleeve_frac)
-    trade_signals = [
-        s for s in signals
-        if not (sleeve_mode == "paper" and s.get("ticker") == LEV_SLEEVE_SYMBOL)
-    ]
-    effective_cash_buffer = CASH_BUFFER_DERIVED if cash_derived else CASH_BUFFER
-    target_multipliers = {
-        s["ticker"]: float(s.get("momentum_multiplier", 1.0) or 1.0)
-        for s in trade_signals if s.get("ticker")
-    }
-    plan = plan_rebalance(trade_signals, positions_stock, budget, MAX_POS, cash_usd=cash,
-                          slippage=SLIPPAGE, quote_fn=_rt_best, cash_buffer=effective_cash_buffer,
-                          rebal_band=REBAL_BAND, exit_buffer=EXIT_BUFFER,
-                          leverage_symbols=leverage_symbols,
-                          leverage_max_positions=LEV_ETF_MAX_POS,
-                          leverage_budget_frac=LEV_ETF_MAX_WEIGHT,
-                          min_cash_usd=MIN_CASH_USD, target_multipliers=target_multipliers)
-    # ★분할매수/매도: 종목 주문을 회당 목표의 1/N 로 상한 (슬리브는 별도 — 제외)
-    if TRANCHES > 1 and plan:
-        from lib.tranche import plan_tranches
-        _px = {s["ticker"]: s.get("price") for s in signals if s.get("ticker")}
-        for sym, p in positions_stock.items():
-            _px.setdefault(sym, p.get("cur_price"))
-        plan = plan_tranches(plan, budget / max(MAX_POS, 1), lambda s: _px.get(s), TRANCHES,
-                             id_key="symbol")
-    # 실행 순서: 매도(현금 확보) → 슬리브 → 매수
-    plan = ([o for o in plan if o["side"] == "sell"] + sleeve_orders
-            + [o for o in plan if o["side"] == "buy"])
-    logger.info("리밸런스 계획 %d건 (예산 $%.0f·목표 %d종목·레버ETF 최대 %d개/%.0f%%·슬리브 %.0f%%·%d분할)",
-                len(plan), budget, MAX_POS, LEV_ETF_MAX_POS, LEV_ETF_MAX_WEIGHT * 100,
-                sleeve_frac * 100, TRANCHES)
+    else:
+        leverage_symbols = set(leverage_universe())
+        sleeve_frac, sleeve_orders = 0.0, []
+        positions_stock = {k: v for k, v in positions.items() if k != LEV_SLEEVE_SYMBOL}
+        sleeve_mode = leverage_sleeve_mode()
+        if sleeve_mode != "off":
+            reco = load_lev_shadow()
+            lev_px = _rt_best(LEV_SLEEVE_SYMBOL, "buy") or (kis_mock.get_price(LEV_SLEEVE_SYMBOL) if not dry else None)
+            shadow_frac, shadow_orders = sleeve_plan(reco, nav, positions, lev_px,
+                                                     band=REBAL_BAND, symbol=LEV_SLEEVE_SYMBOL)
+            if sleeve_mode == "paper":
+                sleeve_frac, sleeve_orders = shadow_frac, shadow_orders
+            logger.info("슬리브[%s]: reco=%s → 비중 %.0f%% · 주문 %d건",
+                        sleeve_mode, reco, shadow_frac * 100, len(shadow_orders))
+        budget = nav * INVEST * (1.0 - sleeve_frac)
+        trade_signals = [
+            s for s in signals
+            if not (sleeve_mode == "paper" and s.get("ticker") == LEV_SLEEVE_SYMBOL)
+        ]
+        effective_cash_buffer = CASH_BUFFER_DERIVED if cash_derived else CASH_BUFFER
+        target_multipliers = {
+            s["ticker"]: float(s.get("momentum_multiplier", 1.0) or 1.0)
+            for s in trade_signals if s.get("ticker")
+        }
+        plan = plan_rebalance(trade_signals, positions_stock, budget, MAX_POS, cash_usd=cash,
+                              slippage=SLIPPAGE, quote_fn=_rt_best, cash_buffer=effective_cash_buffer,
+                              rebal_band=REBAL_BAND, exit_buffer=EXIT_BUFFER,
+                              leverage_symbols=leverage_symbols,
+                              leverage_max_positions=LEV_ETF_MAX_POS,
+                              leverage_budget_frac=LEV_ETF_MAX_WEIGHT,
+                              min_cash_usd=MIN_CASH_USD, target_multipliers=target_multipliers)
+        if TRANCHES > 1 and plan:
+            from lib.tranche import plan_tranches
+            _px = {s["ticker"]: s.get("price") for s in signals if s.get("ticker")}
+            for sym, p in positions_stock.items():
+                _px.setdefault(sym, p.get("cur_price"))
+            plan = plan_tranches(plan, budget / max(MAX_POS, 1), lambda s: _px.get(s), TRANCHES,
+                                 id_key="symbol")
+        plan = ([o for o in plan if o["side"] == "sell"] + sleeve_orders
+                + [o for o in plan if o["side"] == "buy"])
+        logger.info("리밸런스 계획 %d건 (예산 $%.0f·목표 %d종목·레버ETF 최대 %d개/%.0f%%·슬리브 %.0f%%·%d분할)",
+                    len(plan), budget, MAX_POS, LEV_ETF_MAX_POS, LEV_ETF_MAX_WEIGHT * 100,
+                    sleeve_frac * 100, TRANCHES)
 
     if dry:
         for o in plan:

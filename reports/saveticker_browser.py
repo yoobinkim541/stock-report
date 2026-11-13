@@ -19,8 +19,8 @@ from reports.saveticker_hermes_collector import (
     CollectionError, DOM_CAPTURE, ORIGIN, _article_url, _check_access, extract_article,
 )
 
-ACCESS_PROBE = """({blocked: /just a moment/i.test(document.title) ||
- !!document.querySelector('#challenge-running,#cf-challenge-running,[id^="cf-chl-"]'),
+ACCESS_PROBE = """({blocked: /just a moment|attention required.*cloudflare/i.test(document.title) ||
+ !!document.querySelector('#cf-error-details,#challenge-running,#cf-challenge-running,[id^="cf-chl-"]'),
  reauth_required: !!document.querySelector('input[type="password"]') ||
  Array.from(document.querySelectorAll('button')).some(b=>b.textContent.trim()==='로그인')})"""
 

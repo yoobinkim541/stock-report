@@ -86,24 +86,24 @@ def risk_report_text(weights: dict) -> str:
     """포트폴리오 리스크 리포트 (format_risk_report → HTML 태그 제거 평문)."""
     from ml import risk_model
     if not weights:
-        return "보유 데이터 없음 — portfolio_snapshot 확인 필요"
+        return "보유 데이터가 없습니다. 잔고를 동기화한 뒤 다시 열어 주세요."
     try:
         summ = risk_model.portfolio_risk_summary(weights)
         return _strip_html(risk_model.format_risk_report(summ))
-    except Exception as e:
-        return f"리스크 분석 실패: {e}"
+    except Exception:
+        return "리스크 분석을 불러오지 못했습니다."
 
 
 def risk_summary(weights: dict) -> dict:
     """구조화 리스크 요약 (위험기여·팩터β·레버리지 — 차트용). graceful."""
     from ml import risk_model
     if not weights:
-        return {"error": "보유 데이터 없음 — portfolio_snapshot 확인 필요"}
+        return {"error": "보유 데이터가 없습니다. 잔고를 동기화한 뒤 다시 열어 주세요."}
     try:
         summ = risk_model.portfolio_risk_summary(weights)
         return summ if isinstance(summ, dict) else {"error": "리스크 계산 데이터 부족"}
-    except Exception as e:
-        return {"error": str(e)}
+    except Exception:
+        return {"error": "리스크 분석을 불러오지 못했습니다."}
 
 
 def strategy_studio_catalog(limit: int = 50) -> dict[str, Any]:
@@ -200,8 +200,8 @@ def news_digest(ticker: str, hours: int = 72, limit: int = 10) -> str:
                    if ticker in (e.get("symbols") or e.get("tickers") or [])]
             ev = rel or ev
         return source_collector.build_digest(ev, limit=limit)
-    except Exception as e:
-        return f"뉴스 로드 실패: {e}"
+    except Exception:
+        return "뉴스를 불러오지 못했습니다."
 
 
 def earnings_calendar(ticker: str) -> dict:
@@ -222,11 +222,13 @@ def intrinsic_value(ticker: str) -> dict:
         return {"error": str(e)}
 
 
-def econ_events(days: int = 14) -> list[dict]:
-    """경제 일정 (saveticker /calendar/events, QT2)."""
+def econ_events(days: int = 14, start: str | None = None) -> list[dict]:
+    """경제 일정 (saveticker /calendar/events, QT2). start 는 YYYY-MM-DD."""
+    from datetime import date
     from providers import econ_calendar
     try:
-        return econ_calendar.upcoming_events(days=days)
+        start_date = date.fromisoformat(start) if start else None
+        return econ_calendar.upcoming_events(days=days, start=start_date)
     except Exception:
         return []
 
@@ -1282,14 +1284,20 @@ def chart_fundamentals(ticker: str) -> dict:
 # ── 수집 뉴스 (시장·캘린더 — 출처별·중요도순) ─────────────────────────────────
 
 # 출처 표시 순서·라벨 (뉴스성 소스 우선, 수치성 스냅샷 후순위)
-NEWS_SOURCE_ORDER = ["saveticker", "telegram", "arca", "fred", "worldgovernmentbonds", "yahoo_finance"]
+NEWS_SOURCE_ORDER = ["saveticker", "yahoo_headline", "telegram", "arca", "rss", "fred", "worldgovernmentbonds", "yahoo_finance"]
 NEWS_SOURCE_LABEL = {
     "saveticker": "📰 SaveTicker",
+    "yahoo_headline": "🗞️ Yahoo 헤드라인",
     "telegram": "✈️ 텔레그램",
     "arca": "💬 아카라이브",
+    "rss": "🗞️ 통신·공시",
     "fred": "🏛️ FRED 매크로",
     "worldgovernmentbonds": "🏦 국채금리",
     "yahoo_finance": "📈 시장 스냅샷",
+    "polymarket": "🎲 예측시장",
+    "kalshi": "🎲 예측시장",
+    "economic_calendar": "📅 경제 일정",
+    "fed": "🏛️ 연준",
 }
 
 
@@ -1344,7 +1352,8 @@ def group_news(events: list, label_by_id: dict | None = None, score_fn=None) -> 
                 score = max(int(score), 3 + s)
             except (TypeError, ValueError):
                 pass
-        tickers = [str(t).lstrip("$") for t in (e.get("tags") or []) if str(t).startswith("$")]
+        from providers.news_labels import _event_tickers
+        tickers = sorted(_event_tickers(e))[:4]
         pub = str(e.get("published_at") or "")
         groups.setdefault(news_source_key(e.get("source")), []).append({
             "title": title, "url": e.get("url"), "score": int(score), "reason": reason,
@@ -2093,7 +2102,8 @@ def trendlines_for(ticker: str, tf: str = "1d", *, lines: bool = True,
 _TAPE_SYMS = [("^VIX", "VIX", 2), ("DX-Y.NYB", "달러 인덱스", 2), ("KRW=X", "달러 환율", 2),
               ("^KS11", "코스피", 2), ("^KQ11", "코스닥", 2), ("^IXIC", "나스닥", 2),
               ("^GSPC", "S&P500", 2), ("NQ=F", "나스닥100 선물", 1), ("ES=F", "S&P 선물", 1),
-              ("GC=F", "금", 1), ("BTC-USD", "비트코인", 0), ("^TNX", "미10년물", 2)]
+              ("GC=F", "금", 1), ("BTC-USD", "비트코인", 0), ("ETH-USD", "이더리움", 0),
+              ("XRP-USD", "XRP", 2), ("SOL-USD", "솔라나", 2), ("^TNX", "미10년물", 2)]
 
 _TAPE_SNAP = os.path.expanduser("~/reports/ml-cache/market_tape.json")
 _TAPE_MAX_AGE_S = 900

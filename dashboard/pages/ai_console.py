@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 import ticker_names
 from agent_console import agent, context, storage
 from agent_console import portfolio_matrix_dsl
-from dashboard import cached, chat_feedback, chat_references, data, strategy_studio, wiki_browser
+from dashboard import cached, chat_feedback, chat_references, data, strategy_studio, ui_actions, wiki_browser
 
 
 _SURFACES = {
@@ -68,7 +68,7 @@ def render():
         """
         <div class="codex-console-title">
           <div>
-            <div class="codex-kicker">stock-report agent</div>
+            <div class="codex-kicker">퀀트 터미널</div>
             <h1>AI 콘솔</h1>
           </div>
           <span>그냥 질문하세요. 맥락은 자동으로 잡고, 답변 아래에 참고 위키·출처·검토 경로를 남깁니다.</span>
@@ -211,15 +211,22 @@ def _rail_status_items(surface: str, pack: dict) -> list[dict]:
     snapshot = pack.get("market_snapshot") or {}
     detail = str(st.session_state.get("agent_auto_detail") or _SURFACES.get(surface, surface))
     engine = str(st.session_state.get("agent_last_engine") or "대기")
+    status = {
+        "partial": "일부",
+        "unavailable": "없음",
+        "ok": "정상",
+        "ready": "준비",
+        "empty": "비어 있음",
+    }.get(str(snapshot.get("status") or "unavailable"), str(snapshot.get("status") or "없음"))
     return [
         {"label": "맥락", "value": _SURFACES.get(surface, surface)},
         {"label": "세부", "value": detail},
         {"label": "엔진", "value": engine},
-        {"label": "events", "value": _count_value(sources.get("events") or [], cap=40)},
-        {"label": "memory", "value": _count_value(pack.get("memory") or [], cap=50)},
-        {"label": "models", "value": _count_value((pack.get("models") or {}).get("items") or [])},
-        {"label": "quotes", "value": _count_value(snapshot.get("quotes") or [])},
-        {"label": "실시간", "value": str(snapshot.get("status") or "unavailable")},
+        {"label": "이벤트", "value": _count_value(sources.get("events") or [], cap=40)},
+        {"label": "기억", "value": _count_value(pack.get("memory") or [], cap=50)},
+        {"label": "모델", "value": _count_value((pack.get("models") or {}).get("items") or [])},
+        {"label": "시세", "value": _count_value(snapshot.get("quotes") or [])},
+        {"label": "실시간", "value": status},
     ]
 
 
@@ -253,21 +260,24 @@ def _chat_tab(surface: str, pack: dict):
 
         pending = _quick_prompts()
         if pending:
-            try:
-                _run_agent_question_auto(pending, pack)
-            except BaseException as exc:
-                import traceback
-                print(f"[DEBUG_CHAT] BASEEXCEPTION in _run_agent_question_auto: type={type(exc)} {exc}\n{traceback.format_exc()}", flush=True)
-                raise
+            _run_agent_question_auto(pending, pack)
 
-        print(f"[DEBUG_CHAT] rendering loop. chat_key={chat_key} id(session_state)={id(st.session_state)} len={len(st.session_state[chat_key])}", flush=True)
-        for idx, msg in enumerate(st.session_state[chat_key][-16:]):
+        messages = st.session_state[chat_key]
+        visible = messages[-16:]
+        hidden = len(messages) - len(visible)
+        if hidden:
+            st.caption(f"이전 {hidden}개 숨김")
+        for idx, msg in enumerate(visible):
             role_raw = str(msg.get("role", "assistant")).strip().lower()
             role = "user" if role_raw in {"user", "human"} else "assistant"
             with st.chat_message(role):
-                st.markdown(msg.get("content", ""))
-                if msg.get("meta"):
-                    st.caption(msg["meta"])
+                content = str(msg.get("content") or "").replace("$", r"\$")
+                if msg.get("meta") == "error":
+                    st.error(content)
+                else:
+                    st.markdown(content)
+                    if msg.get("meta"):
+                        st.caption(str(msg["meta"]))
                 if role == "assistant":
                     if msg.get("references"):
                         _render_reference_panel(msg["references"], key_prefix=f"{chat_key}_{idx}")
@@ -302,7 +312,7 @@ def _ensure_chat_state(surface: str):
     st.session_state[key] = [{
         "role": "assistant",
         "content": "그냥 질문하시면 됩니다. 질문 내용에 따라 시장·포트폴리오·종목·모의투자·전략 맥락을 자동으로 잡아 답합니다.",
-        "meta": "local context ready · 맥락 자동",
+        "meta": "로컬 맥락 준비 · 맥락 자동",
     }]
 
 
@@ -382,7 +392,7 @@ def _run_agent_question_auto(question: str, pack: dict | None = None):
         surface = agent.infer_surface(question, default=prev)
     st.session_state["agent_auto_surface"] = surface
     st.session_state["agent_auto_detail"] = _infer_context_detail(question, surface)
-    if pack is None:
+    if pack is None or str(pack.get("surface") or "") != surface:
         pack = _safe_context(surface, int(st.session_state.get("agent_hours", 72)))
     _run_agent_question(question, surface, pack, chat_key=_chat_key(_AUTO_CHAT))
 
@@ -432,11 +442,11 @@ def _answer_and_append(question: str, surface: str, pack: dict | None, chat_key:
             "wiki": len(references.get("wiki") or []),
             "sources": len(references.get("sources") or []),
         }
-        meta = f"맥락 {_SURFACES.get(surface, surface)}"
+        meta = f"맥락 {_SURFACES.get(surface, '기타')}"
         if ctx:
-            meta += f" · events {ctx.get('event_count', 0)} · memory {ctx.get('memory_count', 0)}"
+            meta += f" · 사건 {ctx.get('event_count', 0)} · 기억 {ctx.get('memory_count', 0)}"
             if ctx.get("market_quote_count") is not None:
-                meta += f" · quotes {ctx.get('market_quote_count', 0)}"
+                meta += f" · 시세 {ctx.get('market_quote_count', 0)}"
             if ctx.get("as_of"):
                 meta += f" · 기준 {str(ctx['as_of']).replace('T', ' ')[:19]}"
         engine = str(ctx.get("engine") or "")
@@ -444,12 +454,13 @@ def _answer_and_append(question: str, surface: str, pack: dict | None, chat_key:
             st.session_state["agent_last_engine"] = "규칙" if engine == "local-rules" else engine
             meta += f" · 엔진 {'규칙' if engine == 'local-rules' else engine}"
         post = (ctx.get("postprocess") or {}).get("wiki_autocurate")
+        _post_label = {"queued": "대기", "disabled": "꺼짐", "done": "완료", "none": "없음"}
         if post:
-            meta += f" · 후처리 {post}"
+            meta += f" · 후처리 {_post_label.get(str(post), '진행')}"
         if ref_counts["wiki"] or ref_counts["sources"]:
             meta += f" · 참고 위키 {ref_counts['wiki']} · 출처 {ref_counts['sources']}"
         if ctx.get("context_error"):
-            meta = f"{meta} · context fallback" if meta else "context fallback"
+            meta = f"{meta} · 일부 맥락 대체" if meta else "일부 맥락 대체"
         st.session_state[chat_key].append({
             "role": "assistant",
             "content": answer,
@@ -478,31 +489,43 @@ def _open_wiki_reference(page_id: str | None) -> None:
     page_id = str(page_id or "").strip()
     if page_id:
         st.session_state["agent_wiki_selected_page_id"] = page_id
+        st.session_state["wiki_selected_page_id"] = page_id
+        st.session_state.pop("wiki_page_picker", None)
     wiki_page = st.session_state.get("_wiki_page")
     if wiki_page is not None:
         st.switch_page(wiki_page)
+        return
+    st.session_state["_ai_console_section"] = "AI 위키"
+    st.rerun()
 
 
 def _render_reference_panel(references: dict, key_prefix: str) -> None:
     wiki_refs = list(references.get("wiki") or [])
     source_refs = list(references.get("sources") or [])
     if not wiki_refs and not source_refs:
+        st.caption("이번 답변에 연결된 위키·출처가 없습니다.")
         return
 
-    with st.expander(f"참고 자료 · 위키 {len(wiki_refs)} · 출처 {len(source_refs)}", expanded=False):
+    with st.expander(f"참고 자료 · 위키 {len(wiki_refs)} · 출처 {len(source_refs)}",
+                     expanded=bool(wiki_refs)):
         if wiki_refs:
             st.markdown("##### 참고 위키")
             for idx, ref in enumerate(wiki_refs):
                 with st.container(border=True):
                     st.markdown(wiki_browser.safe_markdown_bold(_esc(ref.get("title") or "위키 페이지")))
                     st.caption(
-                        f"{_esc(ref.get('surface') or 'wiki')} · {_esc(ref.get('page_kind') or 'note')} · "
-                        f"{_esc(ref.get('status') or 'draft')} · {_esc(ref.get('verification_status') or 'unverified')}"
+                        " · ".join([
+                            wiki_browser.option_label(wiki_browser.SURFACE_LABELS, ref.get("surface") or "wiki"),
+                            wiki_browser.option_label(wiki_browser.KIND_LABELS, ref.get("page_kind") or "note"),
+                            wiki_browser.option_label(wiki_browser.STATUS_LABELS, ref.get("status") or "draft"),
+                            wiki_browser.option_label(wiki_browser.VERIFY_LABELS, ref.get("verification_status") or "unverified"),
+                        ])
                     )
                     if ref.get("summary"):
                         st.write(ref["summary"])
                     if ref.get("source_refs"):
-                        st.caption("원문 단서: " + " · ".join(str(item) for item in ref.get("source_refs")[:4]))
+                        clues = [wiki_browser.display_source_ref(item) for item in ref.get("source_refs")[:4]]
+                        st.caption("원문 단서: " + " · ".join(clues))
                     if st.button("AI 위키에서 열기", key=f"{key_prefix}_wiki_{idx}_{ref.get('id')}", width="stretch"):
                         _open_wiki_reference(ref.get("id"))
 
@@ -511,7 +534,8 @@ def _render_reference_panel(references: dict, key_prefix: str) -> None:
             for idx, ref in enumerate(source_refs):
                 with st.container(border=True):
                     st.markdown(wiki_browser.safe_markdown_bold(_esc(ref.get("title") or "원문 출처")))
-                    meta_bits = [ref.get("source"), ref.get("published_at")]
+                    source_label = wiki_browser.display_source_ref(ref.get("source")) if ref.get("source") else ""
+                    meta_bits = [source_label, ref.get("published_at")]
                     st.caption(" · ".join(str(item) for item in meta_bits if item))
                     if ref.get("summary"):
                         st.write(ref["summary"])
@@ -520,9 +544,9 @@ def _render_reference_panel(references: dict, key_prefix: str) -> None:
                     if url:
                         st.markdown(f"[원문 열기]({url})")
                     elif path:
-                        st.caption(f"파일 경로: {path}")
+                        st.caption("출처 · 파일")
                     else:
-                        st.caption(ref.get("reason") or "출처 정보")
+                        st.caption(wiki_browser.display_source_ref(ref.get("reason")) if ref.get("reason") else "출처 정보")
 
 
 def _render_trace_panel(trace: dict, key_prefix: str) -> None:
@@ -563,7 +587,7 @@ def _render_feedback_controls(msg: dict, surface: str, key_prefix: str) -> None:
 
 
 def _chat_context_rail(surface: str, pack: dict):
-    st.markdown("##### Context")
+    st.markdown("##### 맥락")
     sources = pack.get("sources") or {}
     events = sources.get("events") or []
     memory = pack.get("memory") or []
@@ -591,7 +615,7 @@ def _chat_context_rail(surface: str, pack: dict):
             key="agent_hours",
         )
         if st.button("메모리 적재", width="stretch"):
-            with st.spinner("최근 컨텍스트를 World Memory에 적재 중..."):
+            with st.spinner("최근 컨텍스트를 시장 기억에 적재 중..."):
                 result = context.ingest_recent_memory(hours=int(st.session_state.get("agent_hours", 72)))
             _context_pack.clear()
             st.toast(f"메모리 {result.get('changed', 0)}건 반영")
@@ -607,7 +631,7 @@ def _chat_context_rail(surface: str, pack: dict):
     if st.session_state.get(prompt_key):
         st.code(agent.build_context_prompt(surface), language="text")
 
-    st.markdown("##### Events")
+    st.markdown("##### 이벤트")
     for item in events[:7]:
         title = item.get("title") or item.get("summary") or "제목 없음"
         st.markdown(
@@ -617,27 +641,27 @@ def _chat_context_rail(surface: str, pack: dict):
     if not events:
         st.caption("최근 이벤트 없음")
 
-    st.markdown("##### Memory")
+    st.markdown("##### 기억")
     for item in memory[:5]:
         st.markdown(
             f"<div class='codex-feed-item'><b>{_esc(item.get('kind', 'memory'))}</b><span>{_esc(item.get('title', '제목 없음'))}</span></div>",
             unsafe_allow_html=True,
         )
     if not memory:
-        st.caption("World Memory 비어 있음")
+        st.caption("시장 기억이 비어 있습니다.")
     if reports:
-        st.caption(f"latest report: {reports[0].get('name')}")
+        st.caption(f"최근 리포트: {reports[0].get('name')}")
     if pack.get("context_error"):
-        st.warning(f"컨텍스트 일부를 불러오지 못했습니다: {pack['context_error']}")
+        st.warning(ui_actions.user_message(pack.get("context_error"), "컨텍스트 일부를 불러오지 못했습니다."))
 
 
 def _memory_tab(surface: str):
-    st.markdown("##### World Memory")
+    st.markdown("##### 시장 기억")
     st.caption("뉴스·텔레그램·리포트·대화가 쌓이는 단일 기억층입니다.")
     with st.form("agent_memory_add", clear_on_submit=True):
         c1, c2 = st.columns([1.2, 0.8])
         title = c1.text_input("제목")
-        symbols = c2.text_input("심볼/태그", placeholder="QQQ, NVDA, oil")
+        symbols = c2.text_input("심볼/태그", placeholder="QQQ, NVDA, 005930")
         body = st.text_area("관찰 내용", height=100)
         submitted = st.form_submit_button("수동 기억 추가", type="primary")
         if submitted:
@@ -706,7 +730,7 @@ def _wiki_pipeline_health_panel():
 
     st.markdown("##### 파이프라인 헬스")
     if health.get("error"):
-        st.warning(f"헬스 리포트 로드 실패: {health['error']}")
+        st.warning(ui_actions.user_message(health.get("error"), "헬스 리포트를 불러오지 못했습니다."))
         return
 
     cols = st.columns(5)
@@ -717,21 +741,21 @@ def _wiki_pipeline_health_panel():
         f"{overall.get('gap_sources', overall.get('stale_sources', 0))}",
         help=("수집이 멈춘 소스: " + ", ".join(gap_names)) if gap_names else "수집이 멈춘 소스 없음",
     )
-    cols[2].metric("source-backed", f"{wiki_section.get('source_backed_count', 0)}")
+    cols[2].metric("출처 확인", f"{wiki_section.get('source_backed_count', 0)}")
     cols[3].metric("미검증", f"{wiki_section.get('unverified_count', 0)}")
-    cols[4].metric("미연결 digest", f"{curation_section.get('source_digest_unlinked_count', 0)}")
+    cols[4].metric("미연결 요약", f"{curation_section.get('source_digest_unlinked_count', 0)}")
 
     st.caption(
-        f"stale pages {wiki_section.get('stale_count', 0)} · "
-        f"unused {wiki_section.get('unused_count', 0)} · "
-        f"open Q {wiki_section.get('open_question_count', 0)}"
+        f"오래된 문서 {wiki_section.get('stale_count', 0)} · "
+        f"미사용 {wiki_section.get('unused_count', 0)} · "
+        f"열린 질문 {wiki_section.get('open_question_count', 0)}"
     )
     recs = health.get("recommendations") or []
     if recs:
         st.markdown("**권장 액션**")
         for rec in recs[:3]:
             st.markdown(
-                f"- [{_esc(rec.get('category', 'unknown'))}] {_esc(rec.get('title', '—'))} — {_esc(rec.get('detail', '—'))}"
+                f"- [{_esc(rec.get('category', '기타'))}] {_esc(rec.get('title', '—'))} — {_esc(rec.get('detail', '—'))}"
             )
     else:
         st.caption("즉시 조치가 필요한 항목이 없습니다.")
@@ -964,12 +988,13 @@ def _render_canvas_chat(current: dict) -> None:
         history.append({"role": "user", "content": prompt})
         try:
             reply = agent.answer(prompt, "lab", async_postprocess=True)
-            answer_text = reply.get("answer", "") if reply.get("ok") else reply.get("error", "응답 실패")
-            meta = f"엔진 {reply.get('context', {}).get('engine', 'unknown')}"
+            engine = str((reply.get("context") or {}).get("engine") or "")
+            answer_text = reply.get("answer", "") if reply.get("ok") else "응답을 받지 못했습니다."
+            meta = f"엔진 {engine if engine and engine != 'unknown' else '확인 불가'}"
             llm_ok = bool(reply.get("ok"))
-        except Exception as exc:
-            answer_text = f"AI 응답 실패: {exc}"
-            meta = "error"
+        except Exception:
+            answer_text = "AI 응답을 받지 못했습니다. 잠시 후 다시 시도하세요."
+            meta = "응답 실패"
             llm_ok = False
 
         try:
@@ -1099,31 +1124,31 @@ def _connectors_tab():
     st.markdown("##### 로컬 커넥터")
     c1, c2 = st.columns(2)
     with c1:
-        st.markdown("**Arca — 서버 SOCKS 터널**")
+        st.markdown("**아카 — 서버 터널**")
         proxy = os.getenv("STOCK_COLLECTOR_ARCA_PROXY", "socks5://127.0.0.1:1080")
         try:
             from reports import source_collector
             status = source_collector.arca_proxy_status(proxy)
-        except Exception as exc:
-            status = {"reachable": False, "proxy": proxy, "error": str(exc)}
-        st.metric("터널", "UP" if status.get("reachable") else "DOWN", help=status.get("proxy") or proxy)
+        except Exception:
+            status = {"reachable": False, "proxy": proxy, "error": "unavailable"}
+        st.metric("터널", "연결" if status.get("reachable") else "끊김", help="로컬 터널")
         if status.get("error"):
-            st.caption(f"상태: {status['error']}")
+            st.caption("터널 상태를 확인하지 못했습니다.")
         pages = st.number_input("조회 페이지", min_value=1, max_value=5, value=2, step=1, key="arca_proxy_pages")
-        if st.button("Arca 프록시 수집", type="primary", width="stretch"):
-            with st.spinner("Arca를 SOCKS 터널로 조회 중..."):
+        if st.button("아카 수집", type="primary", width="stretch"):
+            with st.spinner("아카를 터널로 조회 중..."):
                 result = context.ingest_arca_proxy(max_pages=int(pages), proxy=proxy)
             _context_pack.clear()
             if result.get("ok"):
                 st.success(f"수집 {result.get('fetched', 0)}건 · 캐시 {result.get('written', 0)}건 · 메모리 {result.get('changed', 0)}건")
             else:
-                st.warning(f"Arca 수집 실패: {result.get('error') or 'unknown'}")
+                st.warning("아카 수집에 실패했습니다. 잠시 후 다시 시도하세요.")
     with c2:
-        st.markdown("**Toss — 로컬 스냅샷 예정**")
-        st.markdown("- 읽기 전용 자산 스냅샷\n- 주문/매매 연결 없음\n- 보유·현금·거래내역 요약만 Context Layer에 반영")
+        st.markdown("**토스 — 로컬 스냅샷 예정**")
+        st.markdown("- 읽기 전용 자산 스냅샷\n- 주문/매매 연결 없음\n- 보유·현금·거래내역 요약만 맥락 층에 반영")
     st.code(
-        "Arca: 서버 SOCKS 127.0.0.1:1080 -> source-cache + World Memory\n"
-        "Toss: 노트북 local snapshot -> ~/reports/local-connectors/*.json",
+        "아카: 서버 터널 127.0.0.1:1080 → 소스 캐시 + 시장 기억\n"
+        "토스: 노트북 로컬 스냅샷 → ~/reports/local-connectors/*.json",
         language="text",
     )
 

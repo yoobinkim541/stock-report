@@ -23,7 +23,7 @@ _REASON_LABELS = {
     "advanced_overlays": "고급 오버레이",
     "unsupported_chart_type": "미지원 차트 유형",
     "below_auto_threshold": "고밀도 기준 미만",
-    "canvas_prepare_error": "Canvas 준비 실패",
+    "canvas_prepare_error": "고성능 준비 실패",
 }
 
 
@@ -38,13 +38,13 @@ class RendererDecision:
 
 def canvas_error_fallback(decision: RendererDecision, message: str = "") -> RendererDecision:
     """Convert a selected Canvas backend into a typed, user-visible Plotly fallback."""
-    detail = f" ({str(message)[:60]})" if message else ""
+    del message
     return RendererDecision(
         "plotly",
         decision.requested,
         decision.automatic,
         ("canvas_prepare_error",),
-        f"분석 Plotly · Canvas 준비 실패{detail}",
+        "분석 차트 · 고성능 준비 실패",
     )
 
 
@@ -83,7 +83,7 @@ def select_renderer(
     requested = str((doc.get("renderer") or {}).get("preferred") or "auto")
     automatic = requested == "auto"
     if requested == "plotly":
-        return RendererDecision("plotly", requested, False, (), "분석 Plotly")
+        return RendererDecision("plotly", requested, False, (), "분석 차트")
 
     reasons: list[str] = []
     chart_type = str((doc.get("chart") or {}).get("type") or "")
@@ -104,12 +104,12 @@ def select_renderer(
     if reasons:
         labels = ", ".join(_REASON_LABELS[reason] for reason in reasons)
         return RendererDecision(
-            "plotly", requested, automatic, tuple(reasons), f"분석 Plotly · {labels}",
+            "plotly", requested, automatic, tuple(reasons), f"분석 차트 · {labels}",
         )
 
     if automatic and not compact and _frame_size(frame) < AUTO_CANVAS_BAR_THRESHOLD:
         return RendererDecision(
             "plotly", requested, True, ("below_auto_threshold",),
-            "분석 Plotly · 고밀도 기준 미만",
+            "분석 차트 · 고밀도 기준 미만",
         )
-    return RendererDecision("canvas", requested, automatic, (), "고성능 Canvas")
+    return RendererDecision("canvas", requested, automatic, (), "고성능 차트")

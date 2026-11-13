@@ -217,7 +217,7 @@ def default_workspace(ticker: str = "MSFT") -> dict[str, Any]:
     tk = _norm_ticker(ticker)
     return {
         "id": "default",
-        "name": "Default Workspace",
+        "name": "기본 작업공간",
         "layout": "1",
         "active_panel": "p1",
         "maximized_panel": None,

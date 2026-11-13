@@ -9,7 +9,7 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 
-from dashboard import chart_conditions, chart_document, chart_orderflow, chart_studies, chart_vision
+from dashboard import chart_conditions, chart_document, chart_orderflow, chart_studies, chart_vision, ui_actions
 
 
 CHART_TYPE_GROUPS = {
@@ -29,6 +29,27 @@ def _orderflow_empty_message(reason: str) -> str:
         "capture_empty": "현재 세션에 저장된 원천 이벤트 없음 · 장 상태·구독·수집 상태 확인",
     }
     return messages.get(reason, f"오더플로 원천 이벤트 없음 · {reason}")
+
+
+_QUALITY_LABELS = {
+    "fresh": "최신",
+    "stale": "오래됨",
+    "unavailable": "없음",
+    "unknown": "미상",
+    "realtime": "실시간",
+    "delayed": "지연",
+    "snapshot": "스냅샷",
+    "yfinance": "시세",
+    "kis_ws": "KIS 실시간",
+    "kis_rest": "KIS",
+    "provider-dependent": "공급자 기준",
+    "indicative": "참고",
+}
+
+
+def _quality_label(value, fallback: str = "미상") -> str:
+    raw = str(value or "").strip()
+    return _QUALITY_LABELS.get(raw, raw or fallback)
 CHART_TYPE_LABELS = {
     "candlestick": "캔들",
     "hollow_candle": "할로우 캔들",
@@ -268,7 +289,48 @@ def render_condition_builder(document, *, key_prefix: str = "chart") -> dict[str
     ))
     st.caption(chart_conditions.explain_condition(condition))
     st.caption("필요 데이터: " + ", ".join(f"{symbol} {timeframe}" for symbol, timeframe in requirements))
+    # 위젯 기본값(가격 0)은 매 렌더마다 유효 조건이 된다. 반환하면 호출부가
+    # session_state 에 등록 없이 저장한다. 버튼이 눌린 실행에서만 반환한다.
+    if not st.button(
+        "조건 등록",
+        key=f"{key_prefix}_condition_register",
+        help="기본값은 저장하지 않습니다. 이 버튼을 누를 때만 차트 조건으로 등록됩니다.",
+    ):
+        return None
     return condition
+
+
+_VISION_KIND = {
+    "triangle_convergence": "삼각수렴",
+    "elliott_wave": "엘리엇 파동",
+    "head_and_shoulders": "헤드앤숄더",
+    "double_top": "더블탑",
+    "double_bottom": "더블바텀",
+    "flag_pennant": "깃발·페넌트",
+    "wedge": "쐐기형",
+}
+_VISION_REASON = {
+    "image_render_failed": "차트 이미지를 만들지 못했습니다. 다시 시도하세요.",
+    "invalid_llm_response": "분석 결과를 읽지 못했습니다. 다시 시도하세요.",
+}
+
+
+def _vision_kind(kind: object) -> str:
+    key = str(kind or "").strip()
+    if key in _VISION_KIND:
+        return _VISION_KIND[key]
+    if any("\uac00" <= ch <= "\ud7a3" for ch in key):
+        return key
+    return "고전 패턴"
+
+
+def _vision_failure(reason: object) -> str:
+    key = str(reason or "").strip()
+    if key in _VISION_REASON:
+        return _VISION_REASON[key]
+    if any("\uac00" <= ch <= "\ud7a3" for ch in key):
+        return ui_actions.user_message(key, "시각 분석을 끝내지 못했습니다. 다시 시도하세요.")
+    return "시각 분석을 끝내지 못했습니다. 다시 시도하세요."
 
 
 _VISION_CACHE_KEY = "_chart_vision_results"
@@ -349,7 +411,10 @@ def _render_vision_pattern_section(snapshot: Mapping[str, Any], hist) -> None:
     )
     if not cached_result.get("ok"):
         reason = str(cached_result.get("reason", "unknown"))
-        st.warning(f"분석 실패: {_VISION_FAILURE_LABELS.get(reason, reason)}")
+        if reason in _VISION_FAILURE_LABELS:
+            st.warning(f"분석 실패: {_VISION_FAILURE_LABELS.get(reason, reason)}")
+        else:
+            st.warning(_vision_failure(cached_result.get("reason")))
         return
 
     facts = cached_result.get("facts") or {}
@@ -378,7 +443,7 @@ def _render_vision_pattern_section(snapshot: Mapping[str, Any], hist) -> None:
         return
     for pattern in patterns:
         with st.container(border=True):
-            st.markdown(f"**{pattern.get('kind', '?')}** · 신뢰도 {float(pattern.get('confidence') or 0):.2f}")
+            st.markdown(f"**{_vision_kind(pattern.get('kind'))}** · 신뢰도 {float(pattern.get('confidence') or 0):.2f}")
             if pattern.get("description"):
                 st.caption(pattern["description"])
             if pattern.get("implication"):
@@ -391,7 +456,9 @@ def render_analysis_rail(snapshot: Mapping[str, Any], *, hist=None) -> None:
     quality = snapshot.get("data_quality") or {}
     st.caption(
         f"{snapshot.get('symbol')} · 기준 {snapshot.get('benchmark')} · "
-        f"{quality.get('source', 'unknown')} · {quality.get('freshness', 'unknown')} · {quality.get('as_of') or '시각 미상'}"
+        f"출처 {_quality_label(quality.get('source'))} · "
+        f"신선도 {_quality_label(quality.get('freshness'))} · "
+        f"{quality.get('as_of') or '시각 미상'}"
     )
     tabs = st.tabs(["추세", "패턴", "멀티봉", "계절성", "상대강도", "오더플로", "펀더멘털", "알림", "데이터"])
     trend = snapshot.get("trend") or {}
@@ -449,7 +516,7 @@ def render_analysis_rail(snapshot: Mapping[str, Any], *, hist=None) -> None:
                 st.caption(
                     f"최근 {int(storage_window.get('returned_events') or 0):,}건 창 · {scope} · "
                     f"{int(storage_window.get('scanned_bytes') or 0):,} / "
-                    f"{int(storage_window.get('file_bytes') or 0):,} bytes 읽음"
+                    f"{int(storage_window.get('file_bytes') or 0):,}바이트 읽음"
                 )
                 capture_status = storage_window.get("capture_status") or {}
                 quality_notes = []
@@ -470,7 +537,7 @@ def render_analysis_rail(snapshot: Mapping[str, Any], *, hist=None) -> None:
                 figures[1].plotly_chart(chart_orderflow.volume_profile_figure(orderflow), width="stretch", config={"displayModeBar": False})
             capabilities = coverage.get("capabilities") or {}
             if not capabilities.get("footprint"):
-                st.caption("풋프린트·매수/매도 체결 델타: 원천 aggressor side가 없어 비활성화됨")
+                st.caption("풋프린트·매수/매도 체결 델타: 매수·매도 구분 정보가 없어 쓸 수 없습니다.")
     with tabs[6]:
         fundamentals = snapshot.get("fundamentals") or {}
         st.json(fundamentals) if fundamentals else st.caption("펀더멘털 데이터 없음")
@@ -478,6 +545,7 @@ def render_analysis_rail(snapshot: Mapping[str, Any], *, hist=None) -> None:
         alerts = snapshot.get("alerts") or []
         st.dataframe(pd.DataFrame(alerts), hide_index=True, width="stretch") if alerts else st.caption("등록된 조건 알림 없음")
     with tabs[8]:
+        st.caption("아래는 원본 상태값입니다. 위의 출처·신선도는 한글로 보입니다.")
         st.json({"quality": quality, "errors": snapshot.get("errors") or {}})
 
 

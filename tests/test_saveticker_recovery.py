@@ -84,6 +84,34 @@ def test_notification_failure_retries_without_repeating_browser_fetch(tmp_path):
     module().tick(**args,now=1060)
     assert len(sends)==2
 
+def test_sunset_closes_browser_prompt_without_remote_access(tmp_path):
+    sent = []
+    health = {
+        'saveticker': {
+            'availability': 'unavailable',
+            'availability_reason': 'SaveTicker news API ended: legacy-news-sunset-notice',
+            'last_error': 'SaveTicker news API ended: legacy-news-sunset-notice',
+        }
+    }
+    outcome = module().close_ended_recovery(
+        tmp_path / 'state.json', now=1000, health=health,
+        send_fn=lambda text, **kw: (sent.append(text), True)[1])
+    assert outcome == {'phase': 'ended'}
+    state = json.loads((tmp_path / 'state.json').read_text())
+    assert state['phase'] == 'ended' and state['reason'] == 'sunset'
+    assert sent and '브라우저 복구를 멈췄습니다' in sent[0]
+    again = module().close_ended_recovery(
+        tmp_path / 'state.json', now=2000, health=health,
+        send_fn=lambda *a, **kw: pytest.fail('no repeat notice'))
+    assert again == {'phase': 'ended'}
+
+
+def test_recoverable_block_is_not_closed_as_sunset(tmp_path):
+    assert module().close_ended_recovery(
+        tmp_path / 'state.json', now=1000, health={'saveticker': {'availability': 'blocked'}},
+        send_fn=lambda *a, **kw: pytest.fail('no notice')) is None
+
+
 
 def test_failed_remote_setup_is_retried_without_repeating_broken_link_alerts(tmp_path):
     sent=[]

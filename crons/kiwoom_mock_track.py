@@ -793,7 +793,14 @@ def main(argv: list[str] | None = None) -> int:
 
     budget = nav * INVEST
     held_days = _held_days(positions) if MIN_HOLD_DAYS > 0 else {}
-    plan = plan_rebalance(signals, positions, budget, MAX_POS, cash_krw=cash,
+    pos_n = MAX_POS
+    if os.getenv("MOCK_SWEET_SPOT", "1") != "0":
+        from ml.mock_sweet_spot import apply_kr_signals
+        signals, sweet_n = apply_kr_signals(signals)
+        if sweet_n:
+            pos_n = sweet_n
+            logger.info("스위트스팟 KR: mom12+lowvol 50%% + lowvol+hi52 50%%, 목표 %d종목", sweet_n)
+    plan = plan_rebalance(signals, positions, budget, pos_n, cash_krw=cash,
                           slippage=SLIPPAGE, quote_fn=_rt_best,
                           rebal_band=REBAL_BAND, exit_buffer=EXIT_BUFFER,
                           min_hold_days=MIN_HOLD_DAYS, held_days=held_days,
@@ -804,11 +811,11 @@ def main(argv: list[str] | None = None) -> int:
         _px = {s["code"]: s.get("price") for s in signals if s.get("code")}
         for c, p in positions.items():
             _px.setdefault(c, p.get("cur_price"))
-        plan = plan_tranches(plan, budget / max(MAX_POS, 1), lambda c: _px.get(c), TRANCHES,
+        plan = plan_tranches(plan, budget / max(pos_n, 1), lambda c: _px.get(c), TRANCHES,
                              id_key="code")
     logger.info("리밸런스 계획 %d건 (예산 ₩%s, 현금 %s, 목표 %d종목, %d분할)",
                 len(plan), f"{budget:,.0f}",
-                f"₩{cash:,.0f}" if cash is not None else "미확인", MAX_POS, TRANCHES)
+                f"₩{cash:,.0f}" if cash is not None else "미확인", pos_n, TRANCHES)
 
     if dry:
         logger.info("[DRY-RUN] 주문 미집행 — 계획만 출력:")

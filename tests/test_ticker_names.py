@@ -99,6 +99,8 @@ def test_normalize_input_freeform_literal_ticker():
     assert ticker_names.normalize_input("DDOG") == "DDOG"       # 시드 밖
     assert ticker_names.normalize_input("coin") == "COIN"       # 시드 → 대문자
     assert ticker_names.normalize_input("brk-b") == "BRK-B"
+    assert ticker_names.normalize_input("SOL-USD") == "SOL-USD"
+    assert ticker_names.normalize_input("btc-usd") == "BTC-USD"
 
 
 def test_normalize_input_no_partial_pollution():
@@ -110,6 +112,24 @@ def test_normalize_input_invalid_returns_none():
     for q in ("", "   ", "ㅁㄴㅇㄹ", "123!!", "이건진짜없는종목이름"):
         assert ticker_names.normalize_input(q) is None
 
+
+def test_normalize_input_alphanumeric_kr_code():
+    assert ticker_names.normalize_input("0167A0") == "0167A0.KS"
+    assert ticker_names.normalize_input("0167a0.ks") == "0167A0.KS"
+    assert ticker_names.normalize_input("A0167A0") == "0167A0.KS"
+    assert ticker_names.normalize_input("005930") == "005930.KS"
+    assert ticker_names.normalize_input("ABCDEF") is None
+    assert ticker_names.display_name("0167A0", allow_net=False) == "SOL AI반도체TOP2플러스"
+
+
+
+def test_is_kr_listing_includes_alphanumeric_codes():
+    assert ticker_names.is_kr_listing("0167A0")
+    assert ticker_names.is_kr_listing("005930")
+    assert ticker_names.is_kr_listing("005930.KQ")
+    assert not ticker_names.is_kr_listing("MSFT")
+    assert not ticker_names.is_kr_listing("ABCDEF")
+    assert not ticker_names.is_kr_listing("")
 
 # ── L1 S&P500 유니버스 (미국 시총 상위 ~500 검색) ────────────────────────
 def test_universe_covers_sp500():
@@ -239,3 +259,89 @@ def test_kr_etf_seed_search_and_display():
     assert tn.normalize_input("069500.KS") == "069500.KS"
     hits = dict(tn.search("KODEX", limit=8))
     assert "069500.KS" in hits
+
+
+# ── mentions_in: 뉴스 제목 → 티커 (무네트워크) ──────────────────────────
+def test_mentions_in_cashtag_and_korean_name():
+    assert ticker_names.mentions_in("$NVDA 실적") == ["NVDA"]
+    assert ticker_names.mentions_in("삼성전자 수주") == ["005930.KS"]
+
+
+def test_mentions_in_blocks_false_positive_aliases():
+    assert "GC=F" not in ticker_names.mentions_in("금 가격")
+    blocked = (
+        "금 가격", "은 가격", "비트 급등", "다우 급락", "환율 급등", "이더 급등",
+        "골드 시세", "실버 가격", "달러 강세", "eth 급등", "btc 급등", "유가 상승",
+    )
+    for title in blocked:
+        assert ticker_names.mentions_in(title) == [], title
+
+
+def test_mentions_in_single_letter_only_with_cashtag():
+    assert ticker_names.mentions_in("V") == []
+    assert ticker_names.mentions_in("V 실적") == []
+    assert ticker_names.mentions_in("$V") == ["V"]
+    assert ticker_names.mentions_in("$V 실적") == ["V"]
+
+
+def test_mentions_in_code_word_order_and_limit():
+    assert ticker_names.mentions_in("005930 수주") == ["005930.KS"]
+    assert ticker_names.mentions_in("035720.KQ") == ["035720.KQ"]
+    assert ticker_names.mentions_in("NVDA 실적") == ["NVDA"]
+    assert ticker_names.mentions_in("ZZZZ 상장") == []
+    assert ticker_names.mentions_in("$ZZZZ 상장") == ["ZZZZ"]
+    assert ticker_names.mentions_in("카카오 삼성전자 카카오") == ["035720.KS", "005930.KS"]
+    text = "애플 삼성전자 엔비디아 테슬라 마이크론 카카오 현대차"
+    assert ticker_names.mentions_in(text, limit=2) == ["AAPL", "005930.KS"]
+    assert ticker_names.mentions_in(text) == [
+        "AAPL", "005930.KS", "NVDA", "TSLA", "MU", "035720.KS",
+    ]
+
+
+def test_mentions_in_keeps_longer_aliases():
+    """오탐으로 뺀 짧은 별칭과 앞글자가 겹치는 긴 이름은 그대로 잡는다."""
+    assert ticker_names.mentions_in("비트코인 급등") == ["BTC-USD"]
+    assert ticker_names.mentions_in("다우존스 상승") == ["DIA"]
+    assert ticker_names.mentions_in("골드만삭스 실적") == ["GS"]
+    assert ticker_names.mentions_in("비자 실적") == ["V"]
+    assert ticker_names.mentions_in("금 선물") == ["GC=F"]
+
+
+def test_mentions_in_no_network(monkeypatch):
+    def boom(*_a, **_k):
+        raise AssertionError("network")
+    monkeypatch.setattr(ticker_names, "_yf_name", boom)
+    assert ticker_names.mentions_in("삼성전자 $NVDA 금") == ["005930.KS", "NVDA"]
+
+
+def test_mentions_in_full_cashtag_not_prefix():
+    assert ticker_names.mentions_in("$SOL-USD") == ["SOL-USD"]
+    assert ticker_names.mentions_in("$BRK-B 매수") == ["BRK-B"]
+    assert ticker_names.mentions_in("$BRK.B") == ["BRK.B"]
+    assert ticker_names.mentions_in("$BTC-USD") == ["BTC-USD"]
+    assert ticker_names.mentions_in("$GC=F") == ["GC=F"]
+    assert ticker_names.mentions_in("see $SOL-USD and $BRK-B") == ["SOL-USD", "BRK-B"]
+    assert ticker_names.mentions_in("$SOL-USD.") == ["SOL-USD"]
+    assert "SOL" not in ticker_names.mentions_in("$SOL-USD")
+    assert "BRK" not in ticker_names.mentions_in("$BRK-B")
+    assert "BTC" not in ticker_names.mentions_in("$BTC-USD")
+    assert "GC" not in ticker_names.mentions_in("$GC=F")
+    assert ticker_names.mentions_in("$SOL-USDXYZ") == []
+    assert ticker_names.mentions_in("$NVDAX") == ["NVDAX"]
+    assert "NVDA" not in ticker_names.mentions_in("$NVDAX")
+    assert ticker_names.mentions_in("BTC-USD 급등") == ["BTC-USD"]
+
+
+def test_mentions_in_alphanumeric_kr_and_limits():
+    assert ticker_names.mentions_in("0167A0 상장") == ["0167A0.KS"]
+    assert ticker_names.mentions_in("$0167A0") == ["0167A0.KS"]
+    assert ticker_names.mentions_in("0167A0.KQ") == ["0167A0.KQ"]
+    assert ticker_names.mentions_in("A0167A0") == ["0167A0.KS"]
+    assert ticker_names.mentions_in("$0167A0extra") == []
+    assert ticker_names.mentions_in("삼성전자", limit=0) == []
+    assert ticker_names.mentions_in("삼성전자", limit=-1) == []
+    assert ticker_names.mentions_in("$V 비자 결제") == ["V"]
+    assert "V" not in ticker_names.mentions_in("V 는 문장 첫 글자")
+    assert ticker_names.mentions_in("삼성전자 수주, NVDA 동반") == ["005930.KS", "NVDA"]
+    assert ticker_names.mentions_in("") == []
+    assert ticker_names.mentions_in("아무 관련 없는 문장입니다") == []

@@ -9,7 +9,7 @@ import streamlit as st
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import ticker_names
-from dashboard import cached
+from dashboard import cached, ui_actions
 from dashboard.pages import ticker as ticker_page
 
 try:
@@ -33,8 +33,7 @@ def _default_ticker() -> str:
 
 def render():
     st.title("🇰🇷 국내 ETF")
-    st.subheader("국내 ETF 전용")
-    st.caption("국내 상장 ETF만 모아서 원화 기준으로 봅니다. 표시 전용 · 주문 0")
+    st.caption("국내 ETF 전용 · 상장 ETF만 원화 기준으로 봅니다. 표시 전용 · 주문 0")
 
     if not _KR_TICKERS:
         st.info("국내 ETF 목록을 불러오지 못했습니다.")
@@ -46,7 +45,7 @@ def render():
     except ValueError:
         idx = 0
 
-    ticker = st.selectbox(
+    picked = st.selectbox(
         "국내 ETF 선택",
         _KR_TICKERS,
         index=idx,
@@ -54,27 +53,32 @@ def render():
         key="_kr_etf_ticker",
         help="국내 ETF 전용 보기입니다. 예: 069500.KS · 0167A0.KS",
     )
-
-    st.session_state["ticker"] = ticker
+    # 페이지를 연 것만으로 사이드바 종목을 국내 ETF 기본값으로 바꾸지 않는다.
+    current = ticker_names.normalize_input(str(st.session_state.get("ticker") or ""))
+    previous = st.session_state.get("_kr_etf_applied")
+    if (previous is not None and picked != previous) or current in _KR_TICKERS:
+        st.session_state["ticker"] = picked
+    st.session_state["_kr_etf_applied"] = picked
+    ticker = picked
     st.markdown(f"**{ticker_names.label(ticker, allow_net=False)}**")
 
     etf = cached.etf(ticker) or {}
     if not etf.get("is_etf"):
-        st.info("국내 ETF 데이터를 아직 준비하지 못했습니다.")
+        # 데이터 공백(미지원 종목)과 일시 장애(공급자 타임아웃)를 구분할 수 없으므로
+        # 캐시를 비우고 재조회할 수 있는 경로를 준다 — 종전엔 TTL 만료까지 막혀 있었다.
+        st.info("국내 ETF 데이터를 아직 준비하지 못했습니다 — 데이터 공급자 지연이면 잠시 후 다시 시도하세요.")
+        if st.button("🔄 다시 불러오기", key="_kr_etf_retry"):
+            try:
+                cached.etf.clear()
+            except Exception:
+                pass
+            st.rerun()
         return
     if (etf.get("market_type") or "").lower() != "kr":
-        st.info("해당 종목은 국내 ETF가 아닙니다.")
+        st.info("해당 종목은 국내 ETF가 아닙니다 — 해외 ETF·개별주는 ‘종목 분석’ 페이지에서 보세요.")
+        if st.button("종목 분석으로 이동", key="_kr_etf_to_ticker"):
+            ui_actions.open_ticker(ticker, toast=f"종목 분석 → {ticker}")
         return
 
-    cols = st.columns(5)
-    cols[0].metric("현재가", ticker_page._etf_money(etf, etf.get("price"), 0))
-    cols[1].metric("NAV", ticker_page._etf_money(etf, etf.get("nav"), 0))
-    pm = etf.get("premium_pct")
-    cols[2].metric("괴리율", f"{pm:+.2f}%" if pm is not None else "—")
-    te = etf.get("tracking_error_pct")
-    cols[3].metric("추적오차", f"{te:.2f}%" if te is not None else "—")
-    cols[4].metric("총보수", ticker_page.data.f_frac_pct(etf.get("expense_ratio"))
-                   if etf.get("expense_ratio") is not None else "—")
-
-    st.caption("선택한 ETF의 세부 정보는 아래 원형 뷰와 동일한 기준으로 렌더됩니다.")
+    st.caption("가격·괴리·보수·구성은 아래 한 화면에서 봅니다.")
     ticker_page._etf_sections(ticker, etf, etf.get("price"))

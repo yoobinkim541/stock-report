@@ -34,7 +34,9 @@ def _check_access(snapshot):
     if not isinstance(snapshot, dict):
         raise CollectionError('parse_failed')
     raw = str(snapshot.get('html') or '')
-    if snapshot.get('blocked') or re.search(r'cf-chl-|just a moment|cloudflare challenge', raw, re.I):
+    if (snapshot.get('blocked')
+            or re.search(r'cf-chl-|just a moment|cloudflare challenge', raw, re.I)
+            or re.search(r'<[^>]+\bid=["\']cf-error-details["\']', raw, re.I)):
         raise CollectionError('blocked')
     if snapshot.get('access_required') or re.search(r'subscribe\s+to\s+(?:unlock|read)|구독\s*후\s*(?:열람|이용)', raw, re.I):
         raise CollectionError('access_required')
@@ -275,7 +277,7 @@ DOM_CAPTURE = '''(async () => {
   return {
     url: location.href, html, html_sha256, layout, title: layout ? titles[0] : '',
     links: Array.from(document.querySelectorAll('a[href]')).map(a => a.getAttribute('href')),
-    blocked: !!document.querySelector('#challenge-running, #cf-challenge-running, [id^="cf-chl-"]') || /just a moment/i.test(document.title),
+    blocked: !!document.querySelector('#cf-error-details, #challenge-running, #cf-challenge-running, [id^="cf-chl-"]') || /just a moment|attention required.*cloudflare/i.test(document.title),
     reauth_required: !!document.querySelector('input[type="password"]') ||
       Array.from(document.querySelectorAll('button')).some(b => b.textContent.trim() === '로그인') ||
       /로그인\\s*후\\s*(열람|이용)|sign in to (continue|read)/i.test(document.body ? document.body.innerText : ''),
@@ -286,8 +288,8 @@ DOM_CAPTURE = '''(async () => {
 
 LISTING_DISCOVERY = r'''(async () => {
   const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
-  const blocked = () => /just a moment/i.test(document.title) ||
-    !!document.querySelector('#challenge-running, #cf-challenge-running, [id^="cf-chl-"]');
+  const blocked = () => /just a moment|attention required.*cloudflare/i.test(document.title) ||
+    !!document.querySelector('#cf-error-details, #challenge-running, #cf-challenge-running, [id^="cf-chl-"]');
   if (blocked()) return {blocked:true};
   if (document.querySelector('input[type="password"]') ||
       Array.from(document.querySelectorAll('button')).some(b => b.textContent.trim()==='로그인'))

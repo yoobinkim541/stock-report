@@ -358,3 +358,42 @@ def test_failed_source_batch_reports_nonzero_service_exit(tmp_path, monkeypatch)
     monkeypatch.setattr(runner.pipeline, '_pending_source', lambda *args: True)
     monkeypatch.setattr(runner, 'process', lambda *args: {'compile_failed': 1})
     assert runner.main() == 2
+
+
+def _apply_setup(runner, tmp_path, monkeypatch):
+    monkeypatch.setattr('sys.argv', ['rollout', '--apply'])
+    monkeypatch.setenv('WIKI_SOURCE_PIPELINE_ENABLED', '0')
+    monkeypatch.delenv('AGENT_CONSOLE_PUBLIC_TOPIC_BOOTSTRAP_ENABLED', raising=False)
+    monkeypatch.setattr(runner.shutil, 'which', lambda command: '/synthetic/codex')
+    monkeypatch.setattr(runner.raw_archive, 'reports_root', lambda: tmp_path)
+    monkeypatch.setattr(runner.pipeline, '_resume_compilations', lambda *args: ([], []))
+    return tmp_path / 'public-wiki-pilot-20261013'
+
+
+def test_apply_with_exhausted_quota_skips_discovery_and_backup(tmp_path, monkeypatch, capsys):
+    runner = module()
+    root = _apply_setup(runner, tmp_path, monkeypatch)
+    root.mkdir(parents=True)
+    for i in range(runner.quota.configured_limit()):
+        assert runner.quota.reserve(root / 'automatic-budget.json', format(i, '064x'))
+    monkeypatch.setattr(runner, 'load_source_events',
+                        lambda **kw: pytest.fail('scanned sources with exhausted quota'))
+    assert runner.main() == 0
+    summary = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert summary['attempted'] == 0 and summary['quota']['count'] == summary['quota']['limit']
+    assert not (root / 'backups').exists()
+
+
+def test_apply_prunes_event_backups_to_retention(tmp_path, monkeypatch):
+    runner = module()
+    root = _apply_setup(runner, tmp_path, monkeypatch)
+    backups = root / 'backups'
+    backups.mkdir(parents=True)
+    for i in range(runner.BACKUP_RETENTION + 5):
+        (backups / f'20261001T{i:06d}000000Z-events.jsonl').write_text('old')
+    monkeypatch.setattr(runner, 'load_source_events', lambda **kw: iter([]))
+    monkeypatch.setattr(runner.shared_memory, '_paths', lambda: {'events': str(tmp_path / 'no-events.jsonl')})
+    assert runner.main() == 0
+    names = sorted(path.name for path in backups.iterdir())
+    assert len(names) == runner.BACKUP_RETENTION
+    assert names[0] == f'20261001T{5:06d}000000Z-events.jsonl'

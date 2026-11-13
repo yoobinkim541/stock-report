@@ -54,11 +54,11 @@ def build_trace(
         "engine": engine,
         "question_preview": _clean(question, 180),
         "steps": [
-            {"label": "질문 분류", "value": _clean(surface, 80)},
-            {"label": "컨텍스트 확인", "value": f"events {event_count} · memory {memory_count}"},
-            {"label": "근거 선택", "value": f"wiki {wiki_count} · source {source_count}"},
+            {"label": "질문 분류", "value": {"market": "시장", "portfolio": "포트폴리오", "ticker": "종목", "paper": "모의투자", "lab": "전략랩", "wiki": "위키", "research": "리서치"}.get(str(surface or "").strip().lower(), "기타")},
+            {"label": "컨텍스트 확인", "value": f"사건 {event_count} · 기억 {memory_count}"},
+            {"label": "근거 선택", "value": f"위키 {wiki_count} · 출처 {source_count}"},
             {"label": "생성 엔진", "value": "규칙" if engine == "local-rules" else engine},
-            {"label": "위키 후처리", "value": _clean(postprocess, 80)},
+            {"label": "위키 후처리", "value": {"queued": "대기", "disabled": "꺼짐", "done": "완료", "none": "없음"}.get(str(postprocess), "없음")},
         ],
     }
 

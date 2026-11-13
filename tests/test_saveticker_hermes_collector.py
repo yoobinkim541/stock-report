@@ -199,6 +199,8 @@ def test_cli_accepts_explicit_article_url_without_listing(tmp_path,capsys):
     (snapshot(html='<article><input type="password"><p>기사</p></article>'), 'reauth_required'),
     ({**snapshot(), 'blocked': True}, 'blocked'),
     (snapshot(html='<article>Just a moment... cf-chl-test</article>'), 'blocked'),
+    (snapshot(html='<html><title>Attention Required! | Cloudflare</title>'
+                   '<div id="cf-error-details">Sorry, you have been blocked</div></html>'), 'blocked'),
     (snapshot(url='https://evil.example/news/123'), 'unsupported_url'),
     (snapshot(url=URL+'?token=secret'), 'unsupported_url'),
     (snapshot(html='<main>기사 미리보기</main>'), 'parse_failed'),

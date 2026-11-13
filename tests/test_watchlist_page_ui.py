@@ -110,6 +110,8 @@ def test_add_and_remove_buttons_use_shared_watchlist_store(monkeypatch):
     at.button(key="_watchlist_add_btn").click().run()
     at.selectbox(key="_watchlist_remove_ticker").set_value("NVDA").run()
     at.button(key="_watchlist_remove_btn").click().run()
+    assert removed == []
+    at.button(key="_watchlist_remove_btn_yes").click().run()
 
     assert not at.exception, str(at.exception)
     assert added == [("amd", "MI450")]
@@ -396,3 +398,17 @@ def test_folder_move_button_calls_move_watchlist_folder(monkeypatch):
 
     assert not at.exception, str(at.exception)
     assert calls == [("NVDA", "반도체")]
+
+
+def test_editor_persists_normalized_symbols_and_rejects_invalid_input(monkeypatch, tmp_path):
+    from lib import watchlist
+
+    monkeypatch.setenv("STOCK_REPORT_DB", str(tmp_path / "watchlist.sqlite3"))
+    assert data.add_watchlist_ticker("005930", note="국내", folder="관찰") == (True, "005930.KS")
+    assert data.add_watchlist_ticker("!!!")[0] is False
+    rows = watchlist.list_watchlist()
+    assert [(r["ticker"], r["note"], r["folder"]) for r in rows] == [
+        ("005930.KS", "국내", "관찰")
+    ]
+    assert data.remove_watchlist_ticker("005930.KS")
+    assert watchlist.list_watchlist() == []

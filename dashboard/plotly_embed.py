@@ -30,24 +30,40 @@ def _plotlyjs_cdn() -> str:
         return "https://cdn.plot.ly/plotly-3.6.0.min.js"
 
 
+def _epoch_ms(index):
+    """DatetimeIndex → epoch ms int64 (asi8 는 naive·tz-aware 모두 UTC 기준 ns — ts.timestamp() 와 동일)."""
+    import numpy as np
+    import pandas as pd
+    return (pd.DatetimeIndex(index).asi8 // 1_000_000).astype(np.int64)
+
+
 def price_bounds_json(hist) -> str:
-    """[[epoch_ms, low, high, volume, open, close], ...] — y 자동맞춤 + 🧲 스냅용 (JS 소비)."""
+    """[[epoch_ms, low, high, volume, open, close], ...] — y 자동맞춤 + 🧲 스냅용 (JS 소비).
+
+    벡터화 — 행별 Python 루프·iloc 호출은 11k 봉(장기 일봉) 기준 수십만 호출이라 rerun 마다
+    수백 ms 를 먹었다. NaN low/high 행은 스킵, NaN open/close 는 low/high 로 대체(기존 계약).
+    """
+    import numpy as np
     if hist is None or getattr(hist, "empty", True):
         return "[]"
     cols = set(hist.columns)
-    close = hist["Close"]
-    lo = hist["Low"] if "Low" in cols else close
-    hi = hist["High"] if "High" in cols else close
-    op = hist["Open"] if "Open" in cols else close
-    vol = hist["Volume"] if "Volume" in cols else None
-    out = []
-    for i, (ts, l, h, o, c) in enumerate(zip(hist.index, lo.values, hi.values,
-                                             op.values, close.values)):
-        if l == l and h == h:                                   # NaN 스킵
-            v = float(vol.iloc[i]) if vol is not None and vol.iloc[i] == vol.iloc[i] else 0.0
-            out.append([int(ts.timestamp() * 1000), float(l), float(h), v,
-                        float(o) if o == o else float(l), float(c) if c == c else float(h)])
-    return json.dumps(out)
+    close = hist["Close"].to_numpy(dtype="float64")
+    lo = hist["Low"].to_numpy(dtype="float64") if "Low" in cols else close
+    hi = hist["High"].to_numpy(dtype="float64") if "High" in cols else close
+    op = hist["Open"].to_numpy(dtype="float64") if "Open" in cols else close
+    vol = hist["Volume"].to_numpy(dtype="float64") if "Volume" in cols else np.zeros(len(close))
+    keep = ~(np.isnan(lo) | np.isnan(hi))
+    if not keep.any():
+        return "[]"
+    ms = _epoch_ms(hist.index)[keep]
+    lo, hi, op, close, vol = lo[keep], hi[keep], op[keep], close[keep], vol[keep]
+    op = np.where(np.isnan(op), lo, op)
+    close = np.where(np.isnan(close), hi, close)
+    vol = np.where(np.isnan(vol), 0.0, vol)
+    rows = np.column_stack([ms.astype("float64"), lo, hi, vol, op, close]).tolist()
+    for r in rows:
+        r[0] = int(r[0])
+    return json.dumps(rows)
 
 
 def compare_bounds_json(main_hist, compare: dict, view_days=None) -> str:
@@ -67,19 +83,24 @@ def compare_bounds_json(main_hist, compare: dict, view_days=None) -> str:
             anchor_ts = None
 
     def _rows(series, vol=None):
+        import numpy as np
         ns = normalize_pct(series, anchor_ts=anchor_ts)
         if ns is None:
             return
-        for i, (ts, p) in enumerate(zip(ns.index, ns.values)):
-            if p == p:                                       # NaN 스킵
-                v = 0.0
-                if vol is not None:
-                    try:
-                        vv = float(vol.loc[ts])
-                        v = vv if vv == vv else 0.0
-                    except Exception:
-                        v = 0.0
-                rows.append([int(ts.timestamp() * 1000), float(p), float(p), v])
+        p = ns.to_numpy(dtype="float64")
+        keep = ~np.isnan(p)
+        if not keep.any():
+            return
+        ms = _epoch_ms(ns.index)[keep]
+        p = p[keep]
+        if vol is not None:
+            if not vol.index.is_unique:
+                vol = vol[~vol.index.duplicated(keep="last")]
+            v = vol.reindex(ns.index).to_numpy(dtype="float64")[keep]
+            v = np.where(np.isnan(v), 0.0, v)
+        else:
+            v = np.zeros(len(p))
+        rows.extend([int(m), float(x), float(x), float(vv)] for m, x, vv in zip(ms, p, v))
 
     if main_hist is not None and not getattr(main_hist, "empty", True):
         cols = set(main_hist.columns)
@@ -94,18 +115,22 @@ def compare_bounds_json(main_hist, compare: dict, view_days=None) -> str:
 # ── HTML/JS 템플릿 (평문 — f-string 아님 · @@TOKEN@@ 치환) ─────────────────────
 _TEMPLATE = r"""
 <style>
-  /* 표면색 = CSS 변수 — 기본 다크, #wrap.tn-light 에서 라이트 재정의 (부모 테마와 동조) */
-  #wrap { --e-panel:#131722; --e-text:#d1d4dc; --e-border:#1e222d; --e-muted:#9198a6;
-          --e-xh:#6b7385; --e-bub:#2a2e39; }
-  #wrap.tn-light { --e-panel:#ffffff; --e-text:#1a2233; --e-border:#dce2ea; --e-muted:#5c6472;
-                   --e-xh:#9aa3b2; --e-bub:#e9edf3; }
+  /* 표면색 = CSS 변수 — 토스 다크/라이트. #wrap.tn-light 가 부모 테마와 동조 */
+  #wrap { --e-panel:#222b36; --e-text:#f9fafb; --e-border:#333d4b; --e-muted:#8b95a1;
+          --e-xh:#6b7684; --e-bub:#2a3340; }
+  #wrap.tn-light { --e-panel:#ffffff; --e-text:#191f28; --e-border:#e5e8eb; --e-muted:#6b7684;
+                   --e-xh:#8b95a1; --e-bub:#f2f4f6; }
   #tools { display:flex; gap:6px; align-items:center; flex-wrap:wrap; margin:0 0 6px 2px;
            font:12px Pretendard, -apple-system, sans-serif; }
-  .tbtn { box-sizing:border-box; background:var(--e-panel); color:var(--e-text); border:1px solid var(--e-border); border-radius:6px;
-          padding:3px 9px; font:12px Pretendard, -apple-system, sans-serif; cursor:pointer;
+  /* 종목 화면 기본은 토스처럼 차트만. 그리기 버튼으로만 도구줄을 연다. 풀뷰(dock)는 좌측 독 유지. */
+  #wrap:not(.dock):not(.show-tools) #tools { display:none; }
+  #wrap.dock #bt-tools, #wrap.compact #bt-tools { display:none; }
+  #bt-tools.on, #wrap.show-tools #bt-tools { border-color:#3182f6; color:#3182f6; background:rgba(49,130,246,.10); }
+  .tbtn { box-sizing:border-box; background:var(--e-panel); color:var(--e-text); border:1px solid var(--e-border); border-radius:10px;
+          padding:4px 10px; font:12px Pretendard, -apple-system, sans-serif; cursor:pointer;
           line-height:1.5; white-space:nowrap; }
-  .tbtn:hover { border-color:#2f81f7; }
-  .tbtn.on { border-color:#2f81f7; color:#2f81f7; background:rgba(47,129,247,.08); }
+  .tbtn:hover { border-color:#3182f6; }
+  .tbtn.on { border-color:#3182f6; color:#3182f6; background:rgba(49,130,246,.10); }
   .tsep { width:1px; align-self:stretch; background:var(--e-border); margin:0 2px; }
   #tool-hint { color:var(--e-muted); font-size:11px; margin-left:4px; }
   /* 좌측 도구 독 (풀뷰 — TradingView 배치) */
@@ -115,9 +140,7 @@ _TEMPLATE = r"""
                       width:128px; min-width:0; max-width:128px; max-height:calc(100vh - 112px);
                       overflow-y:auto; overflow-x:hidden; margin:0; align-self:flex-start;
                       position:sticky; top:0; z-index:3; padding-right:2px; }
-  /* 세로 flex + max-height 에서 기본 flex-shrink:1 이면 버튼 25개+가 몇 px 로 눌려
-     라벨이 잘린 빈 막대 열이 된다(2026-10-23 실측). 높이를 지키고 독을 스크롤시킨다. */
-  #wrap.dock .tbtn { flex:0 0 auto; width:100%; min-width:0; padding:4px 7px; overflow:hidden; text-overflow:ellipsis; }
+  #wrap.dock .tbtn { width:100%; min-width:0; padding:4px 7px; overflow:hidden; text-overflow:ellipsis; }
   #wrap.dock .tsep { width:auto; height:1px; margin:2px 0; }
   #wrap.dock #tool-hint { margin:2px 0 0; white-space:normal; overflow-wrap:anywhere; }
   #wrap.dock #ohlcbar { order:-1; margin:0 0 4px; white-space:normal; overflow:hidden; text-overflow:ellipsis; }
@@ -146,6 +169,7 @@ _TEMPLATE = r"""
   }
 </style>
 <div id="wrap">
+<button id="bt-tools" class="tbtn" type="button" title="그리기 도구">그리기</button>
 <div id="tools">
   <button id="bt-mag" class="tbtn on" title="그리기·편집 시 봉의 시가/고가/저가/종가에 착 붙음">🧲 자석</button>
   <button id="bt-hline" class="tbtn" title="차트에 짧게 긋기 = 시작점 가격 수평선">─ 수평선</button>
@@ -203,7 +227,7 @@ _TEMPLATE = r"""
 (function() {
   if (typeof Plotly === "undefined") {
     document.getElementById("chart").innerHTML =
-      "<div style='color:#9198a6;padding:20px'>plotly.js CDN 로드 실패 — 📐 팝오버의 '구형 렌더러'를 켜세요</div>";
+      "<div style='color:#9198a6;padding:20px'>차트를 불러오지 못했습니다. 지표 메뉴에서 구형 렌더러를 켜세요</div>";
     return;
   }
   const fig = @@FIG@@;
@@ -229,6 +253,10 @@ _TEMPLATE = r"""
   const crosshairKey = @@CROSSHAIR_KEY@@;        // 멀티 iframe 크로스헤어 동기화 키
   const rangeSyncKey = @@RANGE_SYNC_KEY@@;       // 멀티 iframe 보이는 시간 범위 동기화 키
   const chartNonce = Math.random().toString(36).slice(2);
+  const toolsBtn = document.getElementById("bt-tools");
+  if (toolsBtn) toolsBtn.addEventListener("click", () => {
+    document.getElementById("wrap").classList.toggle("show-tools");
+  });
   if (@@COMPACT@@) document.getElementById("wrap").classList.add("compact");
   if (@@DOCK@@) {
     const wrap = document.getElementById("wrap");
@@ -249,10 +277,15 @@ _TEMPLATE = r"""
   fig.layout.height = fitVH ? vhFit() : @@HEIGHT@@;
   if (fitVH) {
     try {
+      let vhTimer = 0;
       window.parent.addEventListener("resize", () => {
-        const h = vhFit();
-        guard++;
-        Plotly.relayout(gd, {height: h}).then(() => { unguard(); });
+        clearTimeout(vhTimer);
+        vhTimer = setTimeout(() => {
+          const h = vhFit();
+          if (gd.layout && gd.layout.height === h) return;
+          guard++;
+          Plotly.relayout(gd, {height: h}).then(() => { unguard(); });
+        }, 120);
       });
     } catch (e) {}
   }
@@ -348,7 +381,7 @@ _TEMPLATE = r"""
   }
 
   function applyRemoteRange() {
-    if (!rangeSyncKey) return;
+    if (!rangeSyncKey || dragging || zooming) return;
     let payload = null;
     try {
       payload = JSON.parse(localStorage.getItem("tnrange:" + rangeSyncKey) || "null");
@@ -356,6 +389,8 @@ _TEMPLATE = r"""
     if (!payload || payload.src === chartNonce || Date.now() - (payload.ts || 0) > 5000) return;
     const x0 = Number(payload.x0), x1 = Number(payload.x1);
     if (!Number.isFinite(x0) || !Number.isFinite(x1) || !(x1 > x0)) return;
+    const cur = curXRangeMs();
+    if (cur && Math.abs(cur[0] - x0) < 40 && Math.abs(cur[1] - x1) < 40) return;
     const a0 = rangeMsToAxis(x0), a1 = rangeMsToAxis(x1);
     if (a0 == null || a1 == null) return;
     guard++;
@@ -478,55 +513,30 @@ _TEMPLATE = r"""
             vol: [0, Math.min(vmax, volCap) * 1.1 || 1]};
   }
 
-  // ── 부드러운 y 전환 — 시간 기반 lerp + **비용 적응형 스로틀** ──
-  // 일목 구름·채널처럼 fill 폴리곤이 많으면 relayout 1회가 비싸다 → 실제 리드로우
-  // 비용(EMA)을 재서 갱신 간격을 자동으로 벌리고(무거우면 ~10fps·가벼우면 60fps),
-  // 목표와 차이가 시각적으로 무의미하면(데드밴드) relayout 자체를 생략한다.
-  let target = null, curY = null, raf = null, busy = false;
-  let costMs = 8, lastApply = 0, lastStep = 0;
-  const HEAVY_REDRAW_MS = 24;   // relayout 1회가 이보다 비싸면(지표 많은 무거운 차트)
-                                 // 드래그·핀치·휠줌 "중"엔 y 적용을 생략 — 네이티브 팬/줌과
-                                 // 경합 방지. curY 는 계속 target 을 lerp 로 쫓아가고, 제스처가
-                                 // 끝나 dragging/zooming 이 false 가 되는 즉시 캐치업한다.
+  // ── y 맞춤 — 제스처 중에는 relayout 하지 않는다 ──
+  // 휠·핀치·드래그 매 틱 Plotly.relayout(yaxis) 은 네이티브 x 줌과 겹쳐 축이 떨린다.
+  // 제스처 중엔 target 만 갱신하고, 손을 뗀 뒤 차이가 있을 때 한 번 스냅한다.
+  let target = null, raf = null, busy = false;
 
   function animStep() {
     raf = null;
-    if (!target) return;
-    const now = performance.now();
-    const dt = Math.min(100, now - (lastStep || now));
-    lastStep = now;
-    if (!curY) curY = {price: target.price.slice(), vol: target.vol.slice()};
-    const a = 1 - Math.exp(-dt / 90);            // 프레임률 무관 ~90ms 수렴 ease-out
-    curY.price[0] += (target.price[0] - curY.price[0]) * a;
-    curY.price[1] += (target.price[1] - curY.price[1]) * a;
-    curY.vol[1]   += (target.vol[1] - curY.vol[1]) * a;
+    if (!target || dragging || zooming || busy) return;
+    const applied = (gd.layout.yaxis && gd.layout.yaxis.range) || [];
     const span = Math.abs(target.price[1] - target.price[0]) || 1;
-    const dist = Math.abs(curY.price[0] - target.price[0])
-               + Math.abs(curY.price[1] - target.price[1]);
-    const done = dist < span * 0.002;
-    if (done) curY = {price: target.price.slice(), vol: target.vol.slice()};
-    const minGap = Math.max(16, costMs * 1.2);   // 리드로우 비용만큼 간격 자동 확대
-    const applied = gd.layout.yaxis.range || [];
-    const visDelta = Math.abs((applied[0] ?? 1e18) - curY.price[0])
-                   + Math.abs((applied[1] ?? 1e18) - curY.price[1]);
-    const heavyWhileGesturing = (dragging || zooming) && costMs > HEAVY_REDRAW_MS;
-    if (!heavyWhileGesturing && !busy && now - lastApply >= minGap && visDelta > span * 0.004) {
-      busy = true; guard++; lastApply = now;
-      const t0 = performance.now();
-      const upd = {"yaxis.range": curY.price.slice()};
-      if (volAxis && !dragging) upd[volAxis + ".range"] = [0, curY.vol[1]];
-      Plotly.relayout(gd, upd).then(() => {
-        costMs = costMs * 0.7 + (performance.now() - t0) * 0.3;   // 비용 EMA
-        busy = false; unguard();
-      });
-    }
-    if (!done || dragging || zooming) raf = requestAnimationFrame(animStep);
+    const visDelta = Math.abs((applied[0] ?? 1e18) - target.price[0])
+                   + Math.abs((applied[1] ?? 1e18) - target.price[1]);
+    if (visDelta <= span * 0.004) return;
+    busy = true; guard++;
+    const upd = {"yaxis.range": target.price.slice()};
+    if (volAxis) upd[volAxis + ".range"] = [0, target.vol[1]];
+    Plotly.relayout(gd, upd).then(() => { busy = false; unguard(); });
   }
 
   function setTargetFrame(x0, x1) {
     const r = yFit(x0, x1);
     if (!r) return;
     target = r;
+    if (dragging || zooming) return;
     if (!raf) raf = requestAnimationFrame(animStep);
   }
   function setTarget(x0, x1) {
@@ -563,14 +573,18 @@ _TEMPLATE = r"""
         // 서버가 만든 categoryarray 는 지역 타임존 오프셋 문자열이라 포맷이 안 맞아
         // Plotly 가 못 찾고 화살표가 엉뚱한 위치로 튄다(감사 2026-08-25). rangeMsToAxis
         // 가 category 축이면 정수 봉 인덱스·아니면 기존 ISOString 을 주므로 그대로 재사용.
-        upd[`annotations[${i}].x`] = rangeMsToAxis(hiT);
-        upd[`annotations[${i}].y`] = toY(hi);
-        upd[`annotations[${i}].text`] = `${fmt(hi)} (${pct(hi) > 0 ? "+" : ""}${pct(hi)}%)`;
+        const x = rangeMsToAxis(hiT), y = toY(hi);
+        const text = `${fmt(hi)} (${pct(hi) > 0 ? "+" : ""}${pct(hi)}%)`;
+        if (anns[i].x !== x) upd[`annotations[${i}].x`] = x;
+        if (anns[i].y !== y) upd[`annotations[${i}].y`] = y;
+        if (anns[i].text !== text) upd[`annotations[${i}].text`] = text;
       }
       if (anns[i].name === "tn-lo") {
-        upd[`annotations[${i}].x`] = rangeMsToAxis(loT);
-        upd[`annotations[${i}].y`] = toY(lo);
-        upd[`annotations[${i}].text`] = `${fmt(lo)} (+${pct(lo)}%)`.replace("(+-", "(-");
+        const x = rangeMsToAxis(loT), y = toY(lo);
+        const text = `${fmt(lo)} (+${pct(lo)}%)`.replace("(+-", "(-");
+        if (anns[i].x !== x) upd[`annotations[${i}].x`] = x;
+        if (anns[i].y !== y) upd[`annotations[${i}].y`] = y;
+        if (anns[i].text !== text) upd[`annotations[${i}].text`] = text;
       }
     }
   }
@@ -587,7 +601,7 @@ _TEMPLATE = r"""
     const xr = curXRangeMs();
     if (!xr) return;
     const x0 = xr[0], x1 = xr[1];
-    setTarget(x0, x1);                           // y 는 lerp 루프가 수렴
+    setTarget(x0, x1);                           // y는 제스처 종료 후 한 번 맞춘다
     saveView(rawXr);                             // 뷰 위치 유지(60s 규칙) — 원문 저장
     const upd = {};
     callouts(x0, x1, upd);                       // 무거운 주석 갱신은 여기서만
@@ -690,6 +704,14 @@ _TEMPLATE = r"""
   if (rangeSyncKey) {
     setInterval(applyRemoteRange, 700);
   }
+  gd.addEventListener("wheel", (e) => {
+    const drag = gd.querySelector(".nsewdrag");
+    if (!drag) return;
+    const r = drag.getBoundingClientRect();
+    if (e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom) {
+      e.preventDefault();
+    }
+  }, {passive: false, capture: true});
   gd.addEventListener("mousemove", (e) => {
     xhEvt = e;
     if (!xhRaf) xhRaf = requestAnimationFrame(xhApply);
@@ -775,7 +797,7 @@ _TEMPLATE = r"""
     }
     const prevC = idx > 0 ? bounds[idx - 1][5] : b[4];
     const chg = prevC ? ((b[5] / prevC - 1) * 100) : 0;
-    const col = b[5] >= b[4] ? "#26a69a" : "#ef5350";
+    const col = b[5] >= b[4] ? "#f04452" : "#3182f6";
     const vol = b[3] >= 1e6 ? (b[3] / 1e6).toFixed(1) + "M" : Math.round(b[3]).toLocaleString();
     ohlcEl.innerHTML = `시 ${f(b[4])} 고 ${f(b[2])} 저 ${f(b[1])} ` +
       `종 <b style="color:${col}">${f(b[5])}</b> ` +
@@ -2017,6 +2039,114 @@ _TEMPLATE = r"""
 """
 
 
+def _as_datetime_index(values):
+    """datetime 배열(numpy M8·Timestamp 객체 배열/리스트·DatetimeIndex) → DatetimeIndex, 아니면 None."""
+    import numpy as np
+    import pandas as pd
+    if values is None:
+        return None
+    if isinstance(values, pd.DatetimeIndex):
+        idx = values
+    elif isinstance(values, np.ndarray):
+        if values.dtype.kind == "M":
+            idx = pd.DatetimeIndex(values)
+        elif values.dtype == object and len(values) and all(isinstance(v, pd.Timestamp) for v in values):
+            idx = pd.DatetimeIndex(values)
+        else:
+            return None
+    elif isinstance(values, (list, tuple)) and values and all(isinstance(v, pd.Timestamp) for v in values):
+        idx = pd.DatetimeIndex(values)
+    else:
+        return None
+    return None if idx.hasnans else idx
+
+
+def _date_fmt(indexes) -> str:
+    """figure 전체에서 하나의 포맷 — 트레이스 x·categoryarray·도형 x 가 같은 문자열이어야
+    category 축에서 같은 봉으로 매칭된다. 자정만이면 'YYYY-MM-DD', 분, 초 순으로 확장."""
+    has_sec = has_time = False
+    for idx in indexes:
+        if (idx.second != 0).any() or (idx.microsecond != 0).any():
+            has_sec = True
+        if (idx.hour != 0).any() or (idx.minute != 0).any():
+            has_time = True
+    return "%Y-%m-%dT%H:%M:%S" if has_sec else ("%Y-%m-%dT%H:%M" if has_time else "%Y-%m-%d")
+
+
+def _format_dates(idx, fmt: str) -> list[str]:
+    if idx.tz is None:
+        return idx.strftime(fmt).tolist()
+    # tz-aware: 오프셋 보존 (+0900 → +09:00) — JS Date.parse 가 naive 를 로컬로 해석하는
+    # 기존 동작을 바꾸지 않기 위해 naive 는 naive 그대로, aware 는 aware 그대로.
+    # 날짜만+오프셋('1990-01-01-05:00')은 ISO 가 아니므로 aware 는 최소 분까지 쓴다.
+    if fmt == "%Y-%m-%d":
+        fmt = "%Y-%m-%dT%H:%M"
+    return [s[:-2] + ":" + s[-2:] for s in idx.strftime(fmt + "%z")]
+
+
+def fig_json(fig) -> str:
+    """fig → JSON (plotly 인코더 + 날짜 압축). fig.to_json() 과 plotly 해석 동일, 크기 ~1/3.
+
+    plotly 기본 인코더는 naive 인덱스를 '1990-01-01T00:00:00.000000000'(29자), Timestamp 를
+    '1990-01-01T00:00:00' 로 쓴다 — 트레이스마다 x 전체가 반복되고 category 축의
+    categoryarray(xaxis·xaxis2·…)에도 또 들어가 8k봉 차트 JSON 의 ~70% 가 날짜 문자열이었다.
+    트레이스 x·layout 안의 모든 datetime(categoryarray·shapes·annotations·range)을 한 포맷으로
+    바꿔 서로 정확히 같은 문자열이 되게 한다(기존엔 ns 접미사 유무가 섞여 있었다).
+    """
+    import datetime
+    import numpy as np
+    import pandas as pd
+    from plotly.io.json import to_json_plotly
+    d = fig.to_plotly_json()
+    found: list[tuple] = []          # (container, key, DatetimeIndex|Timestamp)
+
+    def _scalar(v):
+        if isinstance(v, pd.Timestamp):
+            return None if v is pd.NaT else v
+        if isinstance(v, (np.datetime64, datetime.datetime)):
+            ts = pd.Timestamp(v)
+            return None if ts is pd.NaT else ts
+        return None
+
+    def _walk(obj):
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                idx = _as_datetime_index(v)
+                if idx is not None:
+                    found.append((obj, k, idx))
+                elif _scalar(v) is not None:
+                    found.append((obj, k, v))
+                elif isinstance(v, (dict, list)):
+                    _walk(v)
+        elif isinstance(obj, list):
+            for i, v in enumerate(obj):
+                idx = _as_datetime_index(v)
+                if idx is not None:
+                    found.append((obj, i, idx))
+                elif _scalar(v) is not None:
+                    found.append((obj, i, v))
+                elif isinstance(v, (dict, list)):
+                    _walk(v)
+
+    for tr in d.get("data") or []:
+        if not isinstance(tr, dict):
+            continue
+        if "x" in tr:
+            idx = _as_datetime_index(tr["x"])
+            if idx is not None:
+                found.append((tr, "x", idx))
+    _walk(d.get("layout") or {})
+    if found:
+        fmt = _date_fmt([v if isinstance(v, pd.DatetimeIndex) else pd.DatetimeIndex([v])
+                         for _, _, v in found])
+        for container, key, v in found:
+            if isinstance(v, pd.DatetimeIndex):
+                container[key] = _format_dates(v, fmt)
+            else:
+                container[key] = _format_dates(pd.DatetimeIndex([v]), fmt)[0]
+    return to_json_plotly(d)
+
+
 def pannable_chart_html(fig, hist, *, height: int = 460, view_days=None,
                         vol_axis: str | None = None,
                         bounds_json: str | None = None,
@@ -2065,9 +2195,7 @@ def pannable_chart_html(fig, hist, *, height: int = 460, view_days=None,
             category_x = False
     bounds = bounds_json if bounds_json is not None else price_bounds_json(hist)
     config = json.dumps({
-        "scrollZoom": True, "displaylogo": False,   # 모드바 = hover 시만 (기본) — 상시 노출 제거
-        "modeBarButtonsToRemove": ["select2d", "lasso2d"],
-        "modeBarButtonsToAdd": ["drawline", "drawopenpath", "drawrect", "eraseshape"],
+        "scrollZoom": True, "displaylogo": False, "displayModeBar": False,
     })
     try:
         last_close = float(hist["Close"].iloc[-1])
@@ -2095,7 +2223,7 @@ def pannable_chart_html(fig, hist, *, height: int = 460, view_days=None,
             .replace("@@LIGHTMODE@@", json.dumps(bool(light)))
             .replace("@@CONFIG@@", config)
             .replace("@@BOUNDS@@", bounds)
-            .replace("@@FIG@@", fig.to_json()))       # fig JSON 은 마지막 (토큰 오염 차단)
+            .replace("@@FIG@@", fig_json(fig)))      # fig JSON 은 마지막 (토큰 오염 차단)
     return html
 
 

@@ -73,3 +73,12 @@ def test_wrong_origin_never_receives_credentials():
     page.goto=redirect
     assert module().login_saved_email(page=page,vault=vault)['status']=='reauth_required'
     assert not page.fills and vault.resolved==0
+
+
+def test_existing_block_does_not_navigate_or_resolve_credentials():
+    page, vault = Page(blocked=True), Vault()
+    def navigate(*args, **kwargs):
+        pytest.fail('Do not reload a blocked browser before operator clearance')
+    page.goto = navigate
+    assert module().login_saved_email(page=page, vault=vault) == {'status': 'blocked'}
+    assert vault.resolved == 0 and not page.fills

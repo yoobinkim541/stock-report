@@ -20,6 +20,8 @@ from reports.wiki_source_journal import Journal
 from scripts.run_public_wiki_pilot import source_allowed as is_public, filter_targets, public_target_ids, validate_public_targets, hydrate_public_target
 from reports.wiki_source_compiler import structured_llm_call
 
+BACKUP_RETENTION = 30   # events.jsonl 백업 보존 개수 (매 apply run마다 ~20MB 생성)
+
 
 def _full_body_candidate(row):
     """Cheap prefilter only; discovery still verifies the immutable archive."""
@@ -482,6 +484,15 @@ def main(argv=None):
     journal = Journal(raw_archive.reports_root() / 'public-wiki-pilot-20261013')
     budget_path = journal.root / 'automatic-budget.json'
     now = datetime.now(timezone.utc)
+    if args.apply and os.getenv('AGENT_CONSOLE_PUBLIC_TOPIC_BOOTSTRAP_ENABLED', '0') != '1':
+        budget = quota.status(budget_path, now)
+        if budget['count'] >= budget['limit']:
+            # 쿼터 소진 시 소스 스캔(CPU 2분+)·이벤트 백업 없이 종료. 토픽 복구는 bootstrap 활성 시만 필요.
+            summary = {'attempted': 0, 'results': [], 'quota': budget,
+                       'skipped': 'quota_exhausted'}
+            safe_io.atomic_write_json(str(journal.root / 'automatic-latest.json'), summary)
+            print(json.dumps(summary), flush=True)
+            return 0
     with discover_source_batch(journal, now, limit=args.source_limit) as batch:
         return _run_batch(args, journal, budget_path, now, batch)
 
@@ -522,6 +533,8 @@ def _run_batch(args, journal, budget_path, now, batch):
             events_path = shared_memory._paths()['events']
             if Path(events_path).exists():
                 shutil.copyfile(events_path, backup)
+        for stale in sorted(backup.parent.glob('*-events.jsonl'))[:-BACKUP_RETENTION]:
+            stale.unlink()
         known = {(source['revision_id'], source.get('role', 'support')) for source in candidates}
         available_revisions = (public_revisions(journal, excluded=reserved_v3_revisions)
                                if reserved_v3_revisions else public_revisions(journal))

@@ -18,6 +18,27 @@ opening a screen is not consent to submit a password. Old incident buttons and
 guest/non-owner callbacks cannot authorize recovery. For owner group chats,
 configure `STOCK_BOT_OWNER_USER_ID` explicitly to bind callbacks to the owner user.
 
+## Cloudflare Access Denial
+
+- `Attention Required! | Cloudflare` and `#cf-error-details` indicate a blocked
+  page even when there is no CAPTCHA or `cf-chl-*` challenge element. CDP API
+  reads, DOM capture, listing discovery and saved-email login detect this state
+  before fetching, parsing or entering credentials.
+- If the page says “Sorry, you have been blocked” without a verification
+  control, this is not an expired login. Send the page URL, occurrence time and
+  Cloudflare Ray ID to the site operator for review. Do not repeatedly reload,
+  rotate IPs or clear the authenticated profile to evade the denial.
+- The recovery state stays `awaiting_user`; timer ticks do not retry login or
+  collection. Use `/save check` only after access is restored, not merely after
+  opening the remote screen. Recovery still requires a real ingestion receipt.
+- Regression verification: 110 related collector/auth/browser/recovery tests
+  passed. A live smoke on the blocked server browser exercised all four probes,
+  returned `blocked / delivered=0`, and kept recovery waiting. It used only
+  `Runtime.evaluate`, with no navigation or SaveTicker network requests.
+- This guard fix does not remove Cloudflare's block. Operator clearance remains
+  a prerequisite for verifying successful live article collection.
+
+
 ## Bounds And Privacy
 
 - Remote services bind only loopback (VNC/CDP) or Tailscale IPv4 (noVNC). No public

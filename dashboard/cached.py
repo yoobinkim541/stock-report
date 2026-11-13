@@ -160,8 +160,8 @@ wiki_context.clear = _wiki_context_cached.clear
 
 
 @st.cache_data(ttl=900, show_spinner=False)
-def social_sentiment():
-    return views.social_sentiment()
+def social_sentiment(hours: int = 72):
+    return views.social_sentiment(hours)
 
 
 @st.cache_data(ttl=_TTL, show_spinner=False)
@@ -241,8 +241,8 @@ def risk_struct():
 
 
 @st.cache_data(ttl=_TTL_SLOW, show_spinner="불러오는 중…")
-def econ(days=14):
-    return views.econ_events(days)
+def econ(days=14, start: str | None = None):
+    return views.econ_events(days, start)
 
 
 @st.cache_data(ttl=_TTL_HEAVY, show_spinner="랭킹 계산 중… (최대 1분)")

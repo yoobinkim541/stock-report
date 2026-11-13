@@ -19,6 +19,27 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+
+class _PykrxLogFilter(logging.Filter):
+    """Keep pykrx's root-logger diagnostics visible despite its malformed arguments."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if (
+            record.pathname.endswith("pykrx/website/comm/util.py")
+            and not isinstance(record.msg, str)
+            and record.args
+        ):
+            record.msg = f"pykrx call: {record.msg!r}; context: {record.args!r}"
+            record.args = ()
+        return True
+
+
+# pykrx uses logging.info(args, kwargs), not its named logger. Normalize only
+# those records into one string; the original KRX exception remains untouched.
+_root_logger = logging.getLogger()
+if not any(f.name == "stock_report_pykrx" for f in _root_logger.filters):
+    _root_logger.addFilter(_PykrxLogFilter("stock_report_pykrx"))
+
 CACHE_DIR = Path(os.path.expanduser("~/reports/ml-cache"))
 CACHE_TTL_S = 12 * 3600
 
@@ -380,22 +401,30 @@ def _kr_yfinance_overlay(out: dict) -> None:
 
 
 _PYKRX_REACHABLE: bool | None = None
+_PYKRX_CHECKED_AT: float = 0.0
+_PYKRX_NEGATIVE_RECHECK_S = 600.0    # 불가 판정은 10분 뒤 재확인 — 상시 프로세스(대시보드)가 네트워크 복구를 반영
 
 
 def _pykrx_reachable() -> bool:
-    """pykrx 가 이 서버에서 실제로 KRX 에 도달 가능한지 프로세스당 1회만 확인해 캐싱.
+    """pykrx 가 이 서버에서 실제로 KRX 에 도달 가능한지 확인해 캐싱.
 
     이 서버는 KRX 접근이 막혀 있다는 게 문서화된 환경 사실(kr_market_data.py) — 캐싱
     없이는 KR ETF 캐시 미스마다 최대 10회의 순차 doomed pykrx 호출이 매번 반복된다.
+    양성은 프로세스 수명 동안 유지, 음성은 _PYKRX_NEGATIVE_RECHECK_S 뒤 1회 재확인.
     """
-    global _PYKRX_REACHABLE
-    if _PYKRX_REACHABLE is not None:
-        return _PYKRX_REACHABLE
+    global _PYKRX_REACHABLE, _PYKRX_CHECKED_AT
+    import time as _time
+    now = _time.monotonic()
+    if _PYKRX_REACHABLE is True:
+        return True
+    if _PYKRX_REACHABLE is False and now - _PYKRX_CHECKED_AT < _PYKRX_NEGATIVE_RECHECK_S:
+        return False
     try:
         from pykrx import stock
         _PYKRX_REACHABLE = bool(stock.get_etf_ticker_name("069500"))
     except Exception:
         _PYKRX_REACHABLE = False
+    _PYKRX_CHECKED_AT = now
     return _PYKRX_REACHABLE
 
 

@@ -69,3 +69,29 @@ def test_read_rejects_original_digest_mismatch(monkeypatch, tmp_path):
     monkeypatch.setattr(browser, '_command', lambda *args: {})
     with pytest.raises(CollectionError, match='original_mismatch'):
         browser.read(URL)
+
+
+def test_hard_block_stops_api_fetch_before_network_request(monkeypatch, tmp_path):
+    import json
+    import subprocess
+
+    browser = CDPBrowser()
+    browser.lock_path = tmp_path / 'browser.lock'
+    def evaluate(expression):
+        script = """
+        const document = {
+          title: 'Attention Required! | Cloudflare',
+          querySelector: selectors => selectors.split(',').some(
+            s => s.trim() === '#cf-error-details') ? {} : null,
+          querySelectorAll: () => []
+        };
+        const fetch = () => { throw Error('Blocked page must not fetch'); };
+        const result = await EXPRESSION;
+        console.log(JSON.stringify(result));
+        """.replace('EXPRESSION', expression)
+        result = subprocess.run(['node', '--input-type=module'], input=script,
+                                capture_output=True, text=True, timeout=5, check=True)
+        return json.loads(result.stdout)
+    monkeypatch.setattr(browser, '_evaluate', evaluate)
+    with pytest.raises(CollectionError, match='^blocked$'):
+        browser.fetch_json('/api/news/list')

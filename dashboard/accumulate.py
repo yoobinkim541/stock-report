@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import re
 from datetime import date
 
 import streamlit as st
@@ -27,6 +28,13 @@ def _f_krw(v):
 def _fmt_plan_amt(p: dict) -> str:
     return (f"₩{p.get('amount', 0):,.0f}" if p.get("currency") == "KRW"
             else f"${p.get('amount', 0):,.2f}")
+
+_PHASE_PREFIX = re.compile(r"^(?:Phase\s+\d+|Bull-\d+)\s*[—\-]\s*")
+
+
+def _phase_caption(label) -> str:
+    text = _PHASE_PREFIX.sub("", str(label or "")).strip()
+    return text or "국면 정보 없음"
 
 
 def sidebar_rail() -> None:
@@ -73,12 +81,12 @@ def sidebar_rail() -> None:
 def _manage_dialog():
     plan = cached.accumulation()
     if not plan or not plan.get("rows"):
-        st.caption("계획 데이터 없음 (네트워크/DCA 비중 확인)")
+        st.caption("오늘 모으기 계획이 없습니다. 네트워크와 적립 비중을 확인한 뒤 다시 열어 주세요.")
         return
-    st.caption(f"{plan.get('emoji', '')} {plan.get('label', '')} · QQQ 낙폭 "
-               f"{plan.get('dd', 0):+.1f}% · 배율 {plan.get('mult', 1):g}× · "
-               f"환율 {plan.get('fx', 0):,.0f}원 **(확정 종가 자동 — 하루 고정)** · "
-               f"{plan.get('now', '')}")
+    st.caption(f"{plan.get('emoji', '')} {_phase_caption(plan.get('label', ''))} · QQQ 낙폭 "
+                f"{plan.get('dd', 0):+.1f}% · 배율 {plan.get('mult', 1):g}× · "
+                f"환율 {plan.get('fx', 0):,.0f}원 **(확정 종가 자동 — 하루 고정)** · "
+                f"{plan.get('now', '')}")
 
     # 💱 환전 타이밍 (아침 리포트와 동일 산식 — 원화→달러 분할 환전 가이드)
     ft = cached.fx_timing()
@@ -89,7 +97,7 @@ def _manage_dialog():
             f'border:1px solid {theme.BORDER};border-radius:8px;padding:7px 12px;'
             f'font-size:0.84rem">💱 <b>환전 타이밍</b> {ft.get("emoji", "")} '
             f'<b style="color:{_c}">{ft.get("verdict", "")}</b> — {ft.get("action", "")} · '
-            f'현재 {ft.get("rate", 0):,.1f}원 · 5y 위치 {ft.get("pct_display", "—")}%ile · '
+            f'현재 {ft.get("rate", 0):,.1f}원 · 5년 위치 {ft.get("pct_display", "—")}백분위 · '
             f'분할 환전 배율 <b>{ft.get("multiplier", 1):g}×</b></div>',
             unsafe_allow_html=True)
 
@@ -103,7 +111,7 @@ def _manage_dialog():
         "현재가": (f"${r['price']:,.2f}" if r.get("price") else "—"),
     } for r in rows]), hide_index=True, width="stretch")
     st.caption(f"합계 {_f_krw(plan.get('total_krw'))} ≈ ${plan.get('total_usd', 0):,.2f}"
-               " · 산식 = 봇 /order 와 동일 (Phase 배율·안전가드 반영)")
+               " · 봇 주문서와 같은 계산입니다. 국면 배율과 안전 한도를 반영했습니다.")
 
     # ── 오늘 모으기 기록 (소수점 계좌 · 기록 전용) ──
     ok_rows = [r for r in rows if r.get("qty")]
@@ -164,7 +172,7 @@ def _manage_dialog():
                 accumulation.update_plan(t_, amount=new_amt, freq=new_freq)
                 st.toast(f"💾 {t_} 플랜 저장 — {new_freq} "
                          f"{'₩' if is_krw else '$'}{new_amt:,.0f}")
-            on = r4.toggle("ON", value=p_.get("enabled", True), key=f"_ap_on_{t_}")
+            on = r4.toggle("사용", value=p_.get("enabled", True), key=f"_ap_on_{t_}")
             if on != p_.get("enabled", True):
                 accumulation.set_enabled(t_, on)
             if r5.button("삭제", key=f"_ap_del_{t_}"):
@@ -231,4 +239,4 @@ def _manage_dialog():
             cached.accumulation.clear()
             (st.success if msg.startswith("✅") else st.warning)(msg.splitlines()[0])
             st.caption("다음 계획부터 반영 — 표 새로고침은 다이얼로그 재열기")
-        st.caption("약세장(Phase2+) 전용 비중은 봇 `/holding dca bear ...` 로 편집")
+        st.caption("약세장 전용 비중은 봇 `/holding dca bear ...` 로 편집")

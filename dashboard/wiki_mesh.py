@@ -60,12 +60,13 @@ MAX_INFERRED_GROUP = 80
 MAX_INFERRED_NEIGHBORS = 8
 LARGE_GRAPH_LAYOUT_THRESHOLD = 240
 SURFACE_LABELS = {
+    "all": "전체",
     "market": "시장",
     "portfolio": "포트폴리오",
-    "ticker": "티커",
-    "paper": "페이퍼",
-    "lab": "랩",
-    "wiki": "기타",
+    "ticker": "종목",
+    "paper": "모의투자",
+    "lab": "전략랩",
+    "wiki": "위키",
 }
 
 
@@ -746,17 +747,33 @@ def build_wiki_graph_model(
     }
 
 
+def _wiki_label(kind: str, value: object) -> str:
+    from dashboard.wiki_browser import (
+        KIND_LABELS, STATUS_LABELS, SURFACE_LABELS, VERIFY_LABELS, option_label,
+    )
+    tables = {
+        "surface": (SURFACE_LABELS, "wiki"),
+        "kind": (KIND_LABELS, "note"),
+        "status": (STATUS_LABELS, "draft"),
+        "verify": (VERIFY_LABELS, "unverified"),
+    }
+    table, fallback = tables[kind]
+    return option_label(table, str(value or fallback))
+
+
 def _node_hover(node: dict[str, Any]) -> str:
     tags = " · ".join(list(node.get("tags") or [])[:5]) or "-"
     refs = len(node.get("source_refs") or [])
     summary = _clean(node.get("summary") or "", 180)
     return (
         f"<b>{_clean(node.get('title') or '', 80)}</b><br>"
-        f"{node.get('surface', 'wiki')} · {node.get('kind', 'note')} · {node.get('status', 'draft')}<br>"
-        f"verification {node.get('verification_status', 'unverified')} · lint {node.get('lint_issue_count', 0)}<br>"
-        f"degree {node.get('degree', 0)} · refs {refs}<br>"
+        f"{_wiki_label('surface', node.get('surface'))} · {_wiki_label('kind', node.get('kind'))} · "
+        f"{_wiki_label('status', node.get('status'))}<br>"
+        f"확인 {_wiki_label('verify', node.get('verification_status'))} · "
+        f"점검 {int(node.get('lint_issue_count') or 0)}<br>"
+        f"연결 {int(node.get('degree') or 0)} · 출처 {refs}<br>"
         f"{summary}<br>"
-        f"tags: {tags}"
+        f"태그: {tags}"
     )
 
 
@@ -1100,7 +1117,12 @@ def build_obsidian_network_html(model: dict[str, Any], selected_id: str = "") ->
         vis_nodes.append({
             "id": n["id"],
             "label": n.get("title", n["id"])[:24],
-            "title": f"<div style='font-family:sans-serif;padding:6px;line-height:1.4;'><b>{n.get('title')}</b><br><span style='color:#38bdf8;'>테마: {n.get('surface', '기타')}</span><br>상태: {n.get('status')}<br>연결: {deg}개</div>",
+            "title": (
+                "<div style='font-family:sans-serif;padding:6px;line-height:1.4;'>"
+                f"<b>{n.get('title')}</b><br>"
+                f"<span style='color:#38bdf8;'>화면: {_wiki_label('surface', n.get('surface'))}</span><br>"
+                f"상태: {_wiki_label('status', n.get('status'))}<br>연결: {deg}개</div>"
+            ),
             "color": {
                 "background": color,
                 "border": "#ffffff" if is_sel else "rgba(255,255,255,0.45)",
@@ -1112,7 +1134,7 @@ def build_obsidian_network_html(model: dict[str, Any], selected_id: str = "") ->
                 "size": 12,
                 "face": "Pretendard, -apple-system, sans-serif",
                 "strokeWidth": 2,
-                "strokeColor": "#0b0f19"
+                "strokeColor": "#191f28"
             },
             "borderWidth": 3.0 if is_sel else 1.4
         })
@@ -1136,24 +1158,56 @@ def build_obsidian_network_html(model: dict[str, Any], selected_id: str = "") ->
   <script type="text/javascript" src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
   <style type="text/css">
     html, body {{
-      margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background-color: #0b0f19;
+      margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden;
+      background-color: #191f28;
     }}
     #network {{
-      width: 100%; height: 100%;
+      width: 100%; height: 100%; background: transparent;
     }}
     .hint {{
-      position: absolute; bottom: 12px; left: 16px; color: rgba(226, 232, 240, 0.6);
+      position: absolute; bottom: 12px; left: 16px; color: rgba(249, 250, 251, 0.55);
       font-family: Pretendard, sans-serif; font-size: 11px; pointer-events: none; z-index: 10;
     }}
   </style>
 </head>
 <body>
-<div class="hint">🖱️ 노드를 마우스로 자유롭게 드래그하여 배치하거나 휠로 줌인/줌아웃할 수 있습니다.</div>
+<div class="hint">노드를 드래그해 옮길 수 있습니다. 화면 밖으로는 나가지 않습니다.</div>
 <div id="network"></div>
 <script type="text/javascript">
   const nodes = new vis.DataSet({json.dumps(vis_nodes, ensure_ascii=False)});
   const edges = new vis.DataSet({json.dumps(vis_edges, ensure_ascii=False)});
   const container = document.getElementById('network');
+  function pageChrome() {{
+    let bg = "#191f28", fg = "#f9fafb";
+    try {{
+      const app = window.parent.document.querySelector(".stApp");
+      if (app) {{
+        const cs = window.parent.getComputedStyle(app);
+        if (cs.backgroundColor && cs.backgroundColor !== "rgba(0, 0, 0, 0)") bg = cs.backgroundColor;
+        if (cs.color) fg = cs.color;
+      }}
+      const fe = window.frameElement;
+      if (fe) {{
+        fe.style.setProperty("border", "0", "important");
+        fe.style.setProperty("background", "transparent", "important");
+        fe.style.setProperty("box-shadow", "none", "important");
+        const host = fe.closest('[data-testid="stCustomComponentV1"]') || fe.parentElement;
+        if (host) {{
+          host.style.setProperty("background", "transparent", "important");
+          host.style.setProperty("border", "0", "important");
+          host.style.setProperty("box-shadow", "none", "important");
+        }}
+      }}
+    }} catch (e) {{}}
+    document.documentElement.style.background = bg;
+    document.body.style.background = bg;
+    return {{bg: bg, fg: fg}};
+  }}
+  const chrome = pageChrome();
+  nodes.update(nodes.get().map((n) => ({{
+    id: n.id,
+    font: Object.assign({{}}, n.font, {{color: chrome.fg, strokeColor: chrome.bg}})
+  }})));
   const data = {{ nodes: nodes, edges: edges }};
   const options = {{
     nodes: {{
@@ -1173,7 +1227,7 @@ def build_obsidian_network_html(model: dict[str, Any], selected_id: str = "") ->
         damping: 0.90,
         avoidOverlap: 0.65
       }},
-      stabilization: {{ iterations: 160 }}
+      stabilization: {{ iterations: 160, fit: true }}
     }},
     interaction: {{
       hover: true,
@@ -1183,10 +1237,43 @@ def build_obsidian_network_html(model: dict[str, Any], selected_id: str = "") ->
       tooltipDelay: 100
     }}
   }};
+  container.style.visibility = "hidden";
   const network = new vis.Network(container, data, options);
+  const PAD = 36;
+  function clampNode(id) {{
+    const pos = network.getPositions([id])[id];
+    if (!pos) return;
+    const dom = network.canvasToDOM(pos);
+    const w = container.clientWidth, h = container.clientHeight;
+    const x = Math.min(w - PAD, Math.max(PAD, dom.x));
+    const y = Math.min(h - PAD, Math.max(PAD, dom.y));
+    if (Math.abs(x - dom.x) > 0.5 || Math.abs(y - dom.y) > 0.5) {{
+      const back = network.DOMtoCanvas({{x: x, y: y}});
+      nodes.update({{id: id, x: back.x, y: back.y}});
+    }}
+  }}
+  function settleInside() {{
+    network.fit({{animation: false}});
+    network.setOptions({{physics: {{enabled: false}}}});
+    Object.keys(network.getPositions()).forEach(clampNode);
+    container.style.visibility = "visible";
+  }}
+  network.once("stabilizationIterationsDone", settleInside);
+  setTimeout(settleInside, 2200);
+  network.on("dragEnd", (params) => {{
+    (params.nodes || []).forEach(clampNode);
+  }});
 </script>
 </body>
 </html>'''
+
+
+def mesh_stats_caption(node_count: int, link_count: int, group_count: int, surface: str, status: str) -> str:
+    """그래프 상태줄. 필터 키는 화면 문구로 바꾸되 저장값은 건드리지 않는다."""
+    return (
+        f"노드 {int(node_count)} · 연결 {int(link_count)} · 묶음 {int(group_count)} · "
+        f"화면 {_surface_label(surface)} · 상태 {_wiki_label('status', status)}"
+    )
 
 
 def render_wiki_mesh(
@@ -1205,15 +1292,15 @@ def render_wiki_mesh(
     st.markdown(
         f"""
         <div class="widget-card-head">
-          <span>Linked Memory</span>
-          <b>Knowledge Mesh</b>
+          <span>연결된 기억</span>
+          <b>지식 그물</b>
         </div>
         """,
         unsafe_allow_html=True,
     )
     depth_col, fit_col, stat_col = st.columns([0.75, 0.4, 1.1], gap="small")
     graph_depth = depth_col.slider("깊이", min_value=1, max_value=4, value=max(1, min(int(depth or 2), 4)), key=f"{key}_depth")
-    fit_pressed = fit_col.button("Fit", width="stretch", key=f"{key}_fit")
+    fit_pressed = fit_col.button("화면 맞춤", width="stretch", key=f"{key}_fit")
     if fit_pressed:
         st.session_state[f"{key}_fit_token"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -1250,14 +1337,14 @@ def render_wiki_mesh(
             + "</div>",
             unsafe_allow_html=True,
         )
-    stat_col.caption(f"{len(nodes)} nodes · {len(model.get('edges') or [])} links · {len(groups)} groups · surface {surface} · status {status}")
-    st.caption("✨ 옵시디언(Obsidian) 스타일의 연결형 지식 그래프입니다. 중앙 포털 및 테마별 성단(Cluster)으로 유기적으로 연결되어 있으며, 노드를 클릭하면 해당 위키 문서가 바로 열립니다.")
+    stat_col.caption(mesh_stats_caption(len(nodes), len(model.get("edges") or []), len(groups), surface, status))
+    st.caption("연결형 지식 그래프입니다. 중앙 포털과 테마별 성단으로 이어져 있고, 노드를 누르면 해당 위키 문서가 열립니다.")
 
     import streamlit.components.v1 as components
     # Drag & drop interactive mode toggle
     mode_col1, mode_col2 = st.columns([0.65, 0.35])
     interactive_mode = mode_col2.toggle(
-        "🧲 드래그&드롭 물리 그래프 (Obsidian)",
+        "드래그로 노드 옮기기",
         value=True,
         key=f"{key}_drag_drop_toggle"
     )

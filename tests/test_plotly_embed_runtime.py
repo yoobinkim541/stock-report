@@ -1264,15 +1264,9 @@ console.log("OK datetime-axis-iso " + xUpd);
     assert "OK" in r.stdout
 
 
-# ── 팬/줌 "중" y축 자동맞춤이 X축 네이티브 팬과 경합해 버벅이는 문제 ──────────────
-# (사용자 리포트 2026-08-26: "축소 확대 그리고 이동할 때 더 부드럽게 안되나")
-# animStep() 이 드래그 매 틱마다 Plotly.relayout(yaxis.range) 을 호출하는데, relayout
-# 은 무거운 전체 리드로우(지표 오버레이 많을수록 costMs↑)라 X축 네이티브 팬 렌더링과
-# 매 프레임 경합한다. 지표가 많아 costMs 가 HEAVY_REDRAW_MS 를 넘으면 드래그 "중"엔
-# y 적용을 생략(target 은 계속 lerp 로 추종)하고, 제스처가 끝나 dragging=false 가 되는
-# 즉시 캐치업하도록 했다 — 가벼운 차트는 기존처럼 실시간 추종 유지.
-# clock 을 매 틱 200ms 씩 강제 전진시켜 기존 minGap 스로틀(비용 비례)로는 절대
-# 안 걸릴 만큼 여유를 주므로, 관측되는 억제는 오직 신설 heavy-skip 로직 때문이다.
+# ── 팬/줌 중 y축 relayout 금지 — 네이티브 x 줌과 겹치면 축이 떨린다 ──
+# 가벼운 차트도 무거운 차트도 제스처 중에는 y 를 그리지 않고, 손을 뗀 뒤
+# 보이는 구간의 y 가 달라졌을 때만 한 번 스냅한다.
 _HEAVY_DRAG_HARNESS = r"""
 let clock = 1000;
 const relayoutCalls = [];
@@ -1331,9 +1325,9 @@ for (let i = 0; i < 8; i++) {
 }
 const duringDrag = relayoutCalls.filter(u => Array.isArray(u["yaxis.range"])).length;
 
-// 제스처 종료 — dragging=false 전환 직후 캐치업이 일어나야 한다.
-gd.layout.xaxis = Object.assign({}, gd.layout.xaxis, { range: [-10, 250] });
-gd.emit("plotly_relayout", {"xaxis.range": [-10, 250]});
+// 제스처 종료 — 좁은 구간이라 초기 전체맞춤 y 와 달라 캐치업이 일어나야 한다.
+gd.layout.xaxis = Object.assign({}, gd.layout.xaxis, { range: [80, 100] });
+gd.emit("plotly_relayout", {"xaxis.range": [80, 100]});
 pump(3);
 const afterEnd = relayoutCalls.filter(u => Array.isArray(u["yaxis.range"])).length;
 
@@ -1362,16 +1356,15 @@ def test_heavy_chart_skips_live_y_follow_while_dragging_then_catches_up(tmp_path
     m = re.search(r"RESULT (\d+) (\d+)", r.stdout)
     assert m, r.stdout
     during_drag, after_end = int(m.group(1)), int(m.group(2))
-    assert during_drag < 8, f"heavy 차트인데 8틱 내내 y relayout 이 계속됨(during={during_drag})"
+    assert during_drag == 0, f"드래그 중 y relayout 이 남아 축이 떨린다(during={during_drag})"
     assert after_end > during_drag, (
         f"제스처 종료 후 캐치업 relayout 이 안 일어남(during={during_drag}, after={after_end})"
     )
 
 
 @pytest.mark.skipif(_NODE is None, reason="node 미설치 — 런타임 JS 검증 스킵")
-def test_light_chart_keeps_live_y_follow_while_dragging(tmp_path):
-    """가벼운 차트는 기존처럼 드래그 "중"에도 매 틱 y축이 실시간으로 따라와야 한다
-    (heavy-skip 로직이 가벼운 차트의 기존 동작을 회귀시키면 안 됨)."""
+def test_light_chart_skips_live_y_follow_while_dragging_then_catches_up(tmp_path):
+    """가벼운 차트도 드래그 중 y relayout 을 하지 않는다. 실시간 추종이 줌 떨림의 원인이었다."""
     idx = pd.date_range("2025-01-01", periods=300, freq="D")
     close = [100 + (i % 40) + (5 if i == 200 else 0) - (5 if i == 60 else 0) for i in range(300)]
     df = pd.DataFrame({"Open": close, "High": [c + 2 for c in close],
@@ -1388,8 +1381,9 @@ def test_light_chart_keeps_live_y_follow_while_dragging(tmp_path):
     assert r.returncode == 0, f"light drag fail: {r.stdout}\n{r.stderr}"
     m = re.search(r"RESULT (\d+) (\d+)", r.stdout)
     assert m, r.stdout
-    during_drag = int(m.group(1))
-    assert during_drag == 8, f"가벼운 차트인데 드래그 중 y 추종이 억제됨(during={during_drag})"
+    during_drag, after_end = int(m.group(1)), int(m.group(2))
+    assert during_drag == 0, f"가벼운 차트 드래그 중 y 추종이 남아 있다(during={during_drag})"
+    assert after_end > during_drag
 
 
 # ── 📱 모바일 핀치 줌 — category 축에서 ISOString 을 써 categoryarray 와 안 맞던 버그 ──
@@ -1517,7 +1511,11 @@ const REDRAW_COST_MS = __REDRAW_COST__;
 global.Plotly = {
   newPlot(g, d, l, c) { g.data = d; g.layout = l; return { then(cb) { cb(); return this; } }; },
   relayout(g, u) { relayoutCalls.push(u);
-    for (const k of Object.keys(u)) if (!k.includes(".") && !k.includes("[")) g.layout[k] = u[k];
+    for (const k of Object.keys(u)) {
+      const annotation = k.match(/^annotations\[(\d+)\]\.(\w+)$/);
+      if (annotation) g.layout.annotations[Number(annotation[1])][annotation[2]] = u[k];
+      else if (!k.includes(".") && !k.includes("[")) g.layout[k] = u[k];
+    }
     clock += REDRAW_COST_MS;
     return { then(cb) { cb(); return this; } }; },
 };
@@ -1582,15 +1580,15 @@ def test_heavy_chart_skips_live_y_follow_during_wheel_zoom_burst_then_catches_up
     m = re.search(r"RESULT (\d+) (\d+)", r.stdout)
     assert m, r.stdout
     during_zoom, after_end = int(m.group(1)), int(m.group(2))
-    assert during_zoom < 8, f"heavy 차트인데 8틱 내내 줌 중 y relayout 이 계속됨(during={during_zoom})"
+    assert during_zoom == 0, f"휠 줌 중 y relayout 이 남아 축이 떨린다(during={during_zoom})"
     assert after_end > during_zoom, (
         f"줌 종료 후 캐치업 relayout 이 안 일어남(during={during_zoom}, after={after_end})"
     )
 
 
 @pytest.mark.skipif(_NODE is None, reason="node 미설치 — 런타임 JS 검증 스킵")
-def test_light_chart_keeps_live_y_follow_during_wheel_zoom_burst(tmp_path):
-    """가벼운 차트는 휠 줌 버스트 중에도 기존처럼 매 틱 y축이 실시간으로 따라와야 한다."""
+def test_light_chart_skips_live_y_follow_during_wheel_zoom_burst(tmp_path):
+    """가벼운 차트도 휠 줌 버스트 중 y relayout 을 하지 않고, 틱이 멈추면 스냅한다."""
     idx = pd.date_range("2025-01-01", periods=300, freq="D")
     close = [100 + (i % 40) + (5 if i == 200 else 0) - (5 if i == 60 else 0) for i in range(300)]
     df = pd.DataFrame({"Open": close, "High": [c + 2 for c in close],
@@ -1607,5 +1605,41 @@ def test_light_chart_keeps_live_y_follow_during_wheel_zoom_burst(tmp_path):
     assert r.returncode == 0, f"light wheel zoom fail: {r.stdout}\n{r.stderr}"
     m = re.search(r"RESULT (\d+) (\d+)", r.stdout)
     assert m, r.stdout
-    during_zoom = int(m.group(1))
-    assert during_zoom == 8, f"가벼운 차트인데 줌 중 y 추종이 억제됨(during={during_zoom})"
+    during_zoom, after_end = int(m.group(1)), int(m.group(2))
+    assert during_zoom == 0, f"가벼운 차트 줌 중 y 추종이 남아 있다(during={during_zoom})"
+    assert after_end > during_zoom
+
+
+@pytest.mark.skipif(_NODE is None, reason="node 미설치")
+def test_repeated_view_does_not_redraw_unchanged_extrema(tmp_path):
+    index = pd.date_range("2025-01-01", periods=300, freq="D")
+    frame = pd.DataFrame({
+        "Open": 100., "High": 102., "Low": 98., "Close": 101., "Volume": 1e6,
+    }, index=index)
+    fig = charts.price_chart(frame, "TEST", kind="candle", view_days=365)
+    html = plotly_embed.pannable_chart_html(fig, frame, view_days=365)
+    script = re.findall(r"<script>(.*?)</script>", html, re.S)[-1]
+    harness = _WHEEL_ZOOM_HARNESS.replace("__REDRAW_COST__", "2").replace("__SCRIPT__", script)
+    harness += r"""
+function sameView() {
+  gd.emit("plotly_relayout", {"xaxis.range": gd.layout.xaxis.range.slice()});
+  if (pendingTimer) { const fn = pendingTimer; pendingTimer = null; fn(); }
+  pump(3);
+}
+sameView();
+const extrema = (gd.layout.annotations || []).filter(a => a.name === "tn-hi" || a.name === "tn-lo");
+if (extrema.length !== 2) fail("missing_extrema");
+const before = JSON.stringify(extrema);
+relayoutCalls.length = 0;
+sameView();
+if (JSON.stringify(extrema) !== before) fail("changed_extrema");
+if (relayoutCalls.some(u => Object.keys(u).some(k => k.startsWith("annotations[")))) {
+  fail("unchanged_annotation_redraw");
+}
+console.log("OK stable-extrema");
+"""
+    runner = tmp_path / "stable_extrema.js"
+    runner.write_text(harness, encoding="utf-8")
+    result = subprocess.run([_NODE, str(runner)], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "OK stable-extrema" in result.stdout

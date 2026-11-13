@@ -38,6 +38,14 @@ def default_registry() -> list[ProviderSpec]:
     return [
         ProviderSpec("saveticker", ("saveticker",), "news", source_collector.fetch_saveticker_events, retries=1),
         ProviderSpec(
+            "yahoo_headline",
+            ("yahoo_headline",),
+            "news",
+            source_collector.fetch_yahoo_headline_events,
+            timeout_seconds=45,
+            retries=1,
+        ),
+        ProviderSpec(
             "arca",
             ("arca",),
             "news",
@@ -49,6 +57,14 @@ def default_registry() -> list[ProviderSpec]:
             tuple(f"telegram:{channel}" for channel in source_collector.TELEGRAM_NEWS_CHANNELS),
             "news",
             source_collector.fetch_telegram_channel_events,
+            retries=1,
+        ),
+                ProviderSpec(
+            "news_rss",
+            tuple(f"rss:{key}" for key, _url, _label in source_collector.NEWS_RSS_FEEDS),
+            "news",
+            source_collector.fetch_news_rss_events,
+            timeout_seconds=45,
             retries=1,
         ),
         ProviderSpec("yahoo_finance", ("yahoo_finance",), "market", source_collector.fetch_market_snapshot_events, retries=1, mutable=True),

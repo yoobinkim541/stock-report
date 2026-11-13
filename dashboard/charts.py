@@ -10,9 +10,11 @@ from datetime import timedelta
 from dashboard import theme
 from ohlc_utils import normalize_ohlc_frame, normalize_time_series
 
-# 팔레트 단일 진실원 = theme (TradingView Terminal Noir). 테스트가 _GREEN/_RED 참조.
+# 팔레트 단일 진실원 = theme. _GREEN/_RED 는 판단·beat. 캔들 등락은 UP/DOWN.
 _GREEN = theme.GREEN
 _RED = theme.RED
+_UP = theme.UP
+_DOWN = theme.DOWN
 _BLUE = theme.BLUE
 _GRID = theme.AXIS_GRID
 
@@ -48,10 +50,8 @@ def _pannable(fig, *, rangeslider: bool = True, height: int = 360, rangebreaks=N
 
 
 def _market_from_ticker(ticker: str) -> str:
-    t = str(ticker or "").strip().upper()
-    if t.endswith((".KS", ".KQ")) or (t.isdigit() and len(t) == 6):
-        return "KR"
-    return "US"
+    import ticker_names
+    return "KR" if ticker_names.is_kr_listing(ticker) else "US"
 
 
 def _trading_rangebreaks(index, ticker: str = "") -> list[dict]:
@@ -302,16 +302,6 @@ def _trade_price(hist, trade: dict):
     return None
 
 
-def trade_marker_style(symbol: str, color: str) -> dict:
-    """매수·매도·알림 마커 공통 스타일 (차트 2개 경로 공용).
-
-    적립식 매수처럼 연속 체결이 많으면 13px+흰 테두리 삼각형이 최근 봉을 덮었다
-    (2026-10-23 실측). y=체결가·이벤트별 customdata(클릭 편집)는 유지하고 크기만 줄인다.
-    """
-    return dict(symbol=symbol, size=9, color=color, opacity=0.85,
-                line=dict(color="rgba(255,255,255,0.6)", width=0.5))
-
-
 def _add_trade_markers(fig, hist, trades):
     hist = normalize_ohlc_frame(hist)
     if not trades:
@@ -366,7 +356,8 @@ def _add_trade_markers(fig, hist, trades):
             name=name,
             showlegend=False,
             customdata=custom,
-            marker=trade_marker_style(symbol, color),
+            marker=dict(symbol=symbol, size=13, color=color,
+                        line=dict(color="#ffffff", width=0.8)),
             hovertemplate=hovertemplate,
         ))
 
@@ -425,8 +416,8 @@ def price_candle(hist, ticker: str = "", avg_cost=None, trades=None, view_days=N
         return _t(fig)
     fig.add_trace(go.Candlestick(
         x=hist.index, open=hist["Open"], high=hist["High"], low=hist["Low"], close=hist["Close"],
-        name=ticker or "OHLC", increasing_line_color=_GREEN, decreasing_line_color=_RED,
-        increasing_fillcolor=_GREEN, decreasing_fillcolor=_RED, line=dict(width=1)))
+        name=ticker or "OHLC", increasing_line_color=_UP, decreasing_line_color=_DOWN,
+        increasing_fillcolor=_UP, decreasing_fillcolor=_DOWN, line=dict(width=1)))
     close = hist["Close"]
     for win in (20, 60):
         if len(close) >= win:
@@ -463,42 +454,38 @@ def market_treemap(rows: list[dict], height: int = 560):
         sec_sum[r["sector_kr"]] += mc
         if r.get("sub"):
             sub_sum[(r["sector_kr"], r["sub"])] += mc
-    total_cap = sum(sec_sum.values())
-    ids, labels, parents, values, colors, texts, custom, changes = [], [], [], [], [], [], [], []
+    ids, labels, parents, values, colors, texts, custom = [], [], [], [], [], [], []
     for s in sorted(sec_sum):                       # 섹터 루트노드 (값=자식 시총합)
         ids.append(f"sec:{s}"); labels.append(s); parents.append("")
         values.append(sec_sum[s]); colors.append(0.0)
-        texts.append(f"<b>{s}</b>"); custom.append(""); changes.append("")
+        texts.append(f"<b>{s}</b>"); custom.append("")
     for (s, sub), v in sorted(sub_sum.items()):     # 세부 카테고리 (기술→반도체 등)
         ids.append(f"sub:{s}/{sub}"); labels.append(sub); parents.append(f"sec:{s}")
         values.append(v); colors.append(0.0)
-        texts.append(f"<b>{sub}</b>"); custom.append(""); changes.append("")
+        texts.append(f"<b>{sub}</b>"); custom.append("")
     for r in rows:
         parent = f"sub:{r['sector_kr']}/{r['sub']}" if r.get("sub") else f"sec:{r['sector_kr']}"
         ids.append(f"t:{r['ticker']}"); labels.append(r["ticker"]); parents.append(parent)
         values.append(float(r["market_cap"]))
         colors.append(max(-3.0, min(3.0, float(r["pct"]))))   # ±3 클램프(대비)
-        # Reserve the available line for the ticker in small-cap tiles.
-        # Plotly scales that single line to the actual tile dimensions.
-        small_tile = float(r["market_cap"]) / total_cap < 0.002
-        texts.append(r["ticker"] if small_tile else f'{r["ticker"]}<br>{r["pct"]:+.2f}%')
+        texts.append(f'{r.get("tile") or r["ticker"]}<br>{r["pct"]:+.2f}%')
         custom.append(r.get("name") or r["ticker"])
-        changes.append(f'{r["pct"]:+.2f}%')
     fig = go.Figure(go.Treemap(
         ids=ids, labels=labels, parents=parents, values=values, branchvalues="total",
         text=texts, textinfo="text", textposition="middle center",
         textfont=dict(size=11, color="white", family=theme._MONO),
-        customdata=custom, hovertext=changes,
+        customdata=custom,
         marker=dict(colors=colors,
                     colorscale=[[0.0, _RED], [0.5, "#1a1d26"], [1.0, _GREEN]],
                     cmid=0, cmin=-3, cmax=3, showscale=False,
                     line=dict(width=1, color="#0e1117")),
         tiling=dict(pad=1),
-        hovertemplate="%{customdata} (%{label})<br>%{hovertext}<br>시총 %{value:,.0f}<extra></extra>"))
-    # Let each tile shrink its own label rather than hiding all labels below
-    # a shared font threshold. Small tiles retain the ticker in one line.
+        hovertemplate="%{customdata} (%{label})<br>시총 %{value:,.0f}<extra></extra>"))
+    # 모바일처럼 타일이 잘게 쪼개지는 폭에서도 라벨을 억지로 찌그러뜨리지 않는다 —
+    # 최소 크기(9px) 밑으로 내려가는 라벨은 아예 숨기고, 보이는 라벨은 항상 읽을 수
+    # 있는 크기를 유지한다(실측 2026-09-05: 390px 폭에서 라벨이 깨알같이 작아짐).
     fig.update_layout(margin=dict(t=6, b=6, l=6, r=6), height=height,
-                      uniformtext=dict(mode=False))
+                      uniformtext=dict(minsize=9, mode="hide"))
     return _t(fig)
 
 
@@ -541,7 +528,8 @@ def signed_bars(labels: list[str], values: list[float], title: str = ""):
     return _t(fig)
 
 
-def bullet_bands(price: float, rows: list, x_title: str = "적정가 ($)", height: int = 160):
+def bullet_bands(price: float, rows: list, x_title: str = "적정가 ($)", height: int = 160,
+                 currency: str = "$"):
     """현재가 vs 적정가 밴드(범용 수평 불릿) — rows=[(라벨, lo, mid, hi)]."""
     go = _go()
     fig = go.Figure()
@@ -554,7 +542,7 @@ def bullet_bands(price: float, rows: list, x_title: str = "적정가 ($)", heigh
                                  marker=dict(color=_BLUE, size=12), showlegend=False))
     if price:
         fig.add_vline(x=price, line=dict(color=_RED, dash="dash"),
-                      annotation_text=f"현재 ${price:,.0f}")
+                      annotation_text=f"현재 {currency}{price:,.0f}")
     fig.update_layout(margin=dict(t=24, b=10, l=10, r=10), height=height,
                       xaxis_title=x_title)
     return _t(fig)
@@ -594,7 +582,7 @@ def equity_curve(equity):
                 fig.add_trace(go.Scatter(y=equity[col], name=str(col)))
         else:
             s = pd.Series(equity)
-            fig.add_trace(go.Scatter(y=s, name="equity", line=dict(color=_BLUE)))
+            fig.add_trace(go.Scatter(y=s, name="순자산", line=dict(color=_BLUE)))
     except Exception:
         pass
     fig.update_layout(margin=dict(t=10, b=10, l=10, r=10), height=300,
@@ -613,10 +601,10 @@ def nav_curve(points: list[dict], currency: str = "₩"):
     navs = [float(p["nav"]) for p in pts]
     up = navs[-1] >= navs[0]
     color = _GREEN if up else _RED
-    fig.add_trace(go.Scatter(x=dates, y=navs, name="NAV", mode="lines",
+    fig.add_trace(go.Scatter(x=dates, y=navs, name="순자산", mode="lines",
                              line=dict(color=color, width=2), fill="tozeroy",
                              fillcolor=("rgba(52,211,153,0.08)" if up else "rgba(248,113,113,0.08)"),
-                             hovertemplate="%{x}<br>NAV " + currency + "%{y:,.0f}<extra></extra>"))
+                             hovertemplate="%{x}<br>순자산 " + currency + "%{y:,.0f}<extra></extra>"))
     fig.add_hline(y=navs[0], line=dict(color=theme.AXIS_TEXT, dash="dash", width=1),
                   annotation_text="인셉션", annotation_position="top left",
                   annotation_font=dict(color=theme.AXIS_TEXT, size=11))
@@ -674,8 +662,8 @@ def intraday_candle(hist, ticker: str = "", trades=None, vwap=None,
     fig.add_trace(go.Candlestick(
         x=plot_hist.index, open=plot_hist["Open"], high=plot_hist["High"], low=plot_hist["Low"],
         close=plot_hist["Close"],
-        name=ticker or "OHLC", increasing_line_color=_GREEN, decreasing_line_color=_RED,
-        increasing_fillcolor=_GREEN, decreasing_fillcolor=_RED, line=dict(width=1)))
+        name=ticker or "OHLC", increasing_line_color=_UP, decreasing_line_color=_DOWN,
+        increasing_fillcolor=_UP, decreasing_fillcolor=_DOWN, line=dict(width=1)))
     if vwap is not None and len(vwap) == len(hist):
         fig.add_trace(go.Scatter(x=hist.index, y=list(vwap), name="VWAP",
                                  line=dict(color="#f59e0b", width=1.4, dash="dot")))
@@ -778,8 +766,8 @@ def _rsi_series(close, n: int = 14):
     return 100 - 100 / (1 + rs)
 
 
-_MA_COLORS = {5: "#e879f9", 10: "#22d3ee", 20: "#f59e0b", 60: "#9333ea",
-              120: "#34d399", 200: "#f43f5e"}
+_MA_COLORS = {5: "#7aa7f7", 10: "#4e5968", 20: "#f59e0b", 60: "#3182f6",
+              120: "#8b95a1", 200: "#f04452"}
 _CMP_COLORS = ["#f59e0b", "#e879f9", "#22d3ee"]   # 비교 종목 팔레트 (메인=BLUE)
 
 
@@ -812,22 +800,31 @@ def normalize_pct(series, view_days=None, anchor_ts=None):
     return (s / anchor_val - 1.0) * 100.0
 
 
+# Plotly(SVG 캔들) 직렬화 상한 — "전체" 기간도 이 이상은 보내지 않는다. 일봉 ~32년치.
+# Canvas(lightweight_embed.MAX_INITIAL_BARS=20k)는 더 싸서 별도 상한. 과거 구간은 기간 라디오로.
+MAX_SERIALIZED_BARS = 8000
+
+
 def view_window(hist, view_days, pan_mult: int = 5, warmup_bars: int = 250,
-                floor_bars: int = 800):
+                floor_bars: int = 800, max_bars: int | None = MAX_SERIALIZED_BARS):
     """차트 직렬화용 데이터 윈도잉 — 뷰(기간)의 pan_mult배 팬버퍼 + 지표 워밍업 tail (순수).
 
     기간 라디오는 초기 표시창만 좁히고 데이터는 항상 전체(max·장기주 ~11k봉)를
     fig+bounds 로 직렬화하던 것이 지표/기간 토글마다 수 MB websocket push + 수초
     ScriptRunner 점유의 주원인("채널 쓰면 다운" 체감). 뷰의 pan_mult배 팬버퍼면
     과거 드래그 체감은 유지되고, warmup_bars 는 MA200·일목(52+26) 등 롤링 지표가
-    팬버퍼 구간에서 깨지지 않을 여유분. view_days=None(전체)·짧은 데이터는 그대로
-    반환. DataFrame/Series 모두 지원(tail 뷰 반환).
+    팬버퍼 구간에서 깨지지 않을 여유분. view_days=None(전체)은 max_bars 로만 자른다
+    (max_bars=None 이면 무윈도잉). DataFrame/Series 모두 지원(tail 뷰 반환).
     """
     if hasattr(hist, "columns"):
         hist = normalize_ohlc_frame(hist)
     else:
         hist = normalize_time_series(hist)
-    if view_days is None or hist is None or getattr(hist, "empty", True):
+    if hist is None or getattr(hist, "empty", True):
+        return hist
+    if view_days is None:
+        if max_bars is not None and len(hist) > int(max_bars):
+            return hist.iloc[-int(max_bars):]
         return hist
     import pandas as pd
     try:
@@ -836,6 +833,8 @@ def view_window(hist, view_days, pan_mult: int = 5, warmup_bars: int = 250,
     except Exception:
         return hist                                 # 비시계열 인덱스 등 — 무윈도잉
     keep = max(view_bars * int(pan_mult) + int(warmup_bars), int(floor_bars))
+    if max_bars is not None:
+        keep = min(keep, int(max_bars))
     if keep >= len(hist):
         return hist
     return hist.iloc[-keep:]
@@ -901,7 +900,7 @@ def _add_entry_zones(fig, zones, panes) -> None:
             continue
         if hi <= lo * 1.0005:                       # 점 존 → 얇은 밴드로 시각화
             lo, hi = lo * 0.9985, hi * 1.0015
-        fig.add_hrect(y0=lo, y1=hi, fillcolor="rgba(41,98,255,0.10)", line_width=0, **kw)
+        fig.add_hrect(y0=lo, y1=hi, fillcolor="rgba(49,130,246,0.10)", line_width=0, **kw)
         fig.add_annotation(xref="x domain", x=0.004, y=(lo + hi) / 2, yref="y",
                            xanchor="left", showarrow=False,
                            text=z.get("label", ""), font=dict(size=9, color="#7ea6ff"),
@@ -1075,7 +1074,6 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
     최고/최저 콜아웃)는 자동 비활성 — RSI·거래량 서브패널은 메인 종목 기준 유지.
     """
     go = _go()
-    exchange_timezone = _exchange_timezone(hist, ticker)
     try:
         import pandas as pd
         sequence_index = isinstance(getattr(hist, "index", None), pd.RangeIndex)
@@ -1172,13 +1170,13 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
             fig.add_trace(go.Candlestick(
                 x=hist.index, open=hist["Open"], high=hist["High"], low=hist["Low"],
                 close=close, name=ticker or "OHLC",
-                increasing_line_color=_GREEN, decreasing_line_color=_RED,
-                increasing_fillcolor=_GREEN, decreasing_fillcolor=_RED, line=dict(width=1)))
+                increasing_line_color=_UP, decreasing_line_color=_DOWN,
+                increasing_fillcolor=_UP, decreasing_fillcolor=_DOWN, line=dict(width=1)))
     elif kind == "ohlc" and has_ohlc:
         fig.add_trace(go.Ohlc(
             x=hist.index, open=hist["Open"], high=hist["High"], low=hist["Low"],
             close=close, name=ticker or "OHLC",
-            increasing_line_color=_GREEN, decreasing_line_color=_RED,
+            increasing_line_color=_UP, decreasing_line_color=_DOWN,
             line=dict(width=1)))
     else:
         marker = None
@@ -1274,8 +1272,7 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
     _add_top_indicators(fig, hist, supertrend=supertrend, envelope=envelope,
                         fractals=fractals, vol_profile=vol_profile, panes=panes)
     _add_top_indicators2(fig, hist, emas=emas, psar=psar, donchian_on=donchian_on,
-                         vwap=vwap, avwap=avwap, view_days=view_days, panes=panes,
-                         exchange_timezone=exchange_timezone)
+                         vwap=vwap, avwap=avwap, view_days=view_days, panes=panes)
     _add_trade_markers(fig, hist, trades or [])
     _add_event_markers(fig, hist, events, panes)
     _add_entry_zones(fig, zones, panes)
@@ -1295,7 +1292,7 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
             up = (close >= hist["Open"]).values
         else:
             up = (close.diff().fillna(0) >= 0).values
-        vcolors = [_GREEN if u else _RED for u in up]
+        vcolors = [_UP if u else _DOWN for u in up]
         fig.add_trace(go.Bar(x=hist.index, y=vol, name="거래량", showlegend=False,
                              marker=dict(color=vcolors), opacity=0.55),
                       row=vol_row, col=1)
@@ -1802,16 +1799,17 @@ def donchian(hist, n: int = 20):
     return up, lo, (up + lo) / 2
 
 
-def _exchange_timezone(hist, ticker: str) -> str | None:
-    """세션 VWAP 경계용 거래소 timezone — frame attrs 우선, 없으면 종목의 거래소 기본값."""
-    zone = (getattr(hist, "attrs", None) or {}).get("exchange_timezone")
-    if zone:
-        return str(zone)
-    if not str(ticker or "").strip():
+def session_vwap(hist):
+    """세션(일자별 리셋) VWAP — 인트라데이 전용. Volume 없으면 None."""
+    hist = normalize_ohlc_frame(hist)
+    if "Volume" not in hist.columns:
         return None
-    from dashboard import chart_document
-
-    return str(chart_document.default_chart_document(ticker)["timezone"])
+    tp = (hist["High"] + hist["Low"] + hist["Close"]) / 3
+    v = hist["Volume"].fillna(0)
+    day = hist.index.date
+    cum_tv = (tp * v).groupby(day).cumsum()
+    cum_v = v.groupby(day).cumsum().replace(0, float("nan"))
+    return cum_tv / cum_v
 
 
 def anchored_vwap(hist, anchor=None):
@@ -1829,8 +1827,7 @@ def anchored_vwap(hist, anchor=None):
 
 
 def _add_top_indicators2(fig, hist, *, emas=(), psar=False, donchian_on=False,
-                         vwap=False, avwap=False, view_days=None, panes=1,
-                         exchange_timezone: str | None = None):
+                         vwap=False, avwap=False, view_days=None, panes=1):
     """상단 지표 2차 오버레이 — price_chart 내부 전용."""
     go = _go()
     kw = dict(row=1, col=1) if panes > 1 else {}
@@ -1862,14 +1859,9 @@ def _add_top_indicators2(fig, hist, *, emas=(), psar=False, donchian_on=False,
         fig.add_trace(go.Scatter(x=hist.index, y=mid, showlegend=False,
                                  legendgroup="프라이스 채널(20)",
                                  line=dict(color="#8b93a7", width=0.7, dash="dot")), **kw)
-    if vwap and {"High", "Low", "Close", "Volume"} <= set(hist.columns):
-        import pandas as pd
-
-        from dashboard import chart_studies
-
-        if isinstance(hist.index, pd.DatetimeIndex):
-            # 거래소 현지 날짜마다 리셋 — 경보 runner·스터디와 같은 chart_studies 정의.
-            sv = chart_studies.session_vwap(hist, exchange_timezone)
+    if vwap:
+        sv = session_vwap(hist)
+        if sv is not None:
             fig.add_trace(go.Scatter(x=hist.index, y=sv, name="VWAP(세션)",
                                      line=dict(color="#f59e0b", width=1.3)), **kw)
     if avwap:

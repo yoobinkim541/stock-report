@@ -18,6 +18,16 @@ Commands:
       5분마다 가격 알림 자동 체크
 """
 
+# glibc malloc arena 상한 — 반드시 다른 import·스레드 생성 전에.
+# yfinance(threads=True)·ThreadPool이 주기마다 단명 스레드를 만들고 glibc가 스레드별
+# arena(각 64MB 힙 사슬)를 8×코어개까지 늘려 pandas 단편화 메모리를 OS에 반환하지 않음
+# → RSS가 시간당 ~0.5GB씩 늘어 3GB 상한 재시작 반복(실측: 첫 주기 후 arena 33개·1.3GB).
+try:
+    import ctypes as _ctypes
+    _ctypes.CDLL("libc.so.6").mallopt(-8, 2)   # M_ARENA_MAX = 2
+except (OSError, AttributeError):
+    pass
+
 import json
 import os
 import re
@@ -86,10 +96,12 @@ from bot.accum_commands import cmd_accum
 from bot.entry_commands import cmd_entry
 from bot.earnings_commands import cmd_earnings
 try:
-    from reports.source_collector import build_digest as build_source_digest, load_recent_events as load_source_events
+    from reports.source_collector import (DIGEST_FIELDS, build_digest as build_source_digest,
+                                          load_recent_events as load_source_events)
 except Exception:
     build_source_digest = None
     load_source_events = None
+    DIGEST_FIELDS = frozenset()
 
 try:
     from ml.reporting import build_sample_ml_strategy_report, chunk_text as _ml_chunk_text
@@ -341,7 +353,8 @@ def load_advisor_source_digest(hours: int = 24) -> str:
     if not build_source_digest or not load_source_events:
         return ""
     try:
-        events = load_source_events(hours=hours)
+        # fields 투영 필수: 원본 행의 97%가 raw_payload(스냅샷)라 전체 적재 시 5분마다 1.4GB 피크·200초
+        events = load_source_events(hours=hours, fields=DIGEST_FIELDS)
     except Exception:
         return ""
     if not events:
@@ -2184,6 +2197,28 @@ def dispatch(text: str, chat_id: str, role: str = "owner"):
 _BG_LOCKS: dict[str, threading.Lock] = {}
 
 
+def _mem_stat() -> tuple[int, int]:
+    """(RSS MB, glibc arena 수) — 메모리 증가 원인 작업 추적용 진단 지표.
+    arena 수 = 64MB 정렬된 익명 rw 매핑 개수(glibc 스레드 arena의 특징)."""
+    rss = arenas = 0
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    rss = int(line.split()[1]) // 1024
+                    break
+        with open("/proc/self/maps") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) == 5 and parts[1] == "rw-p":
+                    start, end = (int(x, 16) for x in parts[0].split("-"))
+                    if start % (64 << 20) == 0 and end - start >= (1 << 20):
+                        arenas += 1
+    except OSError:
+        pass
+    return rss, arenas
+
+
 def _run_periodic(name: str, fn) -> None:
     """주기 작업을 백그라운드 스레드로 실행 — 무거운 작업(진입분석 등)이
     명령어 응답을 막지 않도록. 같은 작업이 아직 실행 중이면 이번 주기는 건너뜀."""
@@ -2191,12 +2226,16 @@ def _run_periodic(name: str, fn) -> None:
     if not lock.acquire(blocking=False):
         return  # 이전 주기 아직 실행 중
     def _wrap():
+        rss0, ar0 = _mem_stat()
         try:
             fn()
         except Exception:
             logger.exception("주기 작업 오류: %s", name)
         finally:
             lock.release()
+            rss1, ar1 = _mem_stat()
+            logger.info("MEM 주기 %s: rss %d→%dMB (%+d) arenas %d→%d",
+                        name, rss0, rss1, rss1 - rss0, ar0, ar1)
     threading.Thread(target=_wrap, daemon=True, name=f"periodic-{name}").start()
 
 
@@ -2213,9 +2252,13 @@ _ATTACHMENT_Q: "queue.Queue" = queue.Queue()
 def _dispatch_worker():
     while True:
         item = _DISPATCH_Q.get()
+        rss0, ar0 = _mem_stat()
         try:
             text, chat_id, role = item
             dispatch(text, chat_id, role)
+            rss1, ar1 = _mem_stat()
+            logger.info("MEM 명령 %s: rss %d→%dMB (%+d) arenas %d→%d",
+                        text.split()[0] if text.strip() else "?", rss0, rss1, rss1 - rss0, ar0, ar1)
         except Exception:
             logger.exception("dispatch 워커 오류: %r", item)
             try:

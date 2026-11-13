@@ -17,7 +17,7 @@ def main(argv=None):
     load_dotenv(ROOT/'.env.hermes-source')
     sys.path.insert(0,str(Path(os.getenv('HERMES_SOURCE_AGENT_ROOT','~/.hermes/hermes-agent')).expanduser()))
     from reports.saveticker_auth import login_saved_email
-    from reports.saveticker_recovery import DEFAULT_STATE, tick
+    from reports.saveticker_recovery import DEFAULT_STATE, close_ended_recovery, tick
     from reports.saveticker_remote_access import ensure_remote_access
     from reports.saveticker_runtime import DEFAULT_ROOT, collect_private
     import notify
@@ -27,6 +27,12 @@ def main(argv=None):
     parser.add_argument('--url',action='append')
     parser.add_argument('--limit',type=int,choices=range(1,21),default=3)
     args=parser.parse_args(argv)
+    from reports.source_collector import load_source_health
+    ended = close_ended_recovery(
+        args.state, send_fn=notify.send_telegram, health=load_source_health())
+    if ended:
+        print(json.dumps(ended, ensure_ascii=False))
+        return 0
     result=tick(state_path=args.state,
         collect_fn=lambda:collect_private(root=args.root,limit=args.limit,article_urls=args.url),
         login_fn=login_saved_email,remote_fn=ensure_remote_access,send_fn=notify.send_telegram)
