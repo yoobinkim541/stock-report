@@ -129,6 +129,19 @@ if [ ! -f "$COMBINED_REPORT_FILE" ] || [ ! -f "$COMBINED_SUMMARY_FILE" ]; then
     exit 1
 fi
 
+# ── 증권사 양식 PDF ───────────────────────────────────────────────────
+# 위에서 만든 산출물(JSON·마크다운)을 고정 양식과 그림으로 다시 조판한다. 새 판단이나 LLM 호출은 없다.
+# 실패해도 요약·마크다운 전송은 그대로 간다. 이전 실행의 파일이 섞이지 않게 먼저 지운다.
+PDF_REPORT_FILE="$HOME/reports/daily-investment-brief-${DATE}.pdf"
+rm -f "$PDF_REPORT_FILE"
+if ! timeout "${INVESTMENT_REPORT_PDF_TIMEOUT:-300}" "$PYTHON_BIN" reports/report_pdf.py \
+        --date "$DATE" --reports-dir "$HOME/reports" --out "$PDF_REPORT_FILE" \
+        > /tmp/report_pdf_stdout.txt 2>/tmp/report_pdf_stderr.txt; then
+    echo "[WARN] PDF 리포트 생성 실패 — 마크다운만 전송합니다" >&2
+    tail -n 5 /tmp/report_pdf_stderr.txt >&2 || true
+    rm -f "$PDF_REPORT_FILE"
+fi
+
 # Send to Telegram via Bot API (응답 검증: ok=false 면 실패 처리)
 send_telegram() {
     local method="$1"
@@ -169,10 +182,19 @@ if [ -n "$STOCK_BOT_TOKEN" ]; then
             -F "caption=📊 포트폴리오 대시보드 (${DATE})"
     fi
 
+    # PDF 전송 실패가 하루치 전송 전체를 실패로 만들지 않게 한다(마커가 안 남으면 요약까지 다시 간다).
+    if [ -f "$PDF_REPORT_FILE" ]; then
+        send_telegram sendDocument \
+            -F "chat_id=${STOCK_BOT_CHAT_ID}" \
+            -F "document=@${PDF_REPORT_FILE};type=application/pdf" \
+            -F "caption=데일리 투자 브리프 PDF (${DATE})" \
+            || echo "[WARN] PDF 리포트 전송 실패" >&2
+    fi
+
     send_telegram sendDocument \
         -F "chat_id=${STOCK_BOT_CHAT_ID}" \
         -F "document=@${COMBINED_REPORT_FILE}" \
-        -F "caption=통합 데일리 리포트 (${DATE})"
+        -F "caption=통합 데일리 리포트 원문 (${DATE})"
 
     marker_tmp="${DELIVERY_MARKER}.tmp.$$"
     printf 'sent_at=%s\ndate=%s\n' "$(date -Is)" "$DATE" > "$marker_tmp"
@@ -204,7 +226,12 @@ echo "  - LLM overlay: ${INVESTMENT_REPORT_LLM_MODEL:-gpt-5-mini} (fact guard �
 echo "  - LLM decision: ${INVESTMENT_REPORT_LLM_DECISION_MODEL:-${INVESTMENT_REPORT_LLM_MODEL:-gpt-5-mini}} (${INVESTMENT_REPORT_LLM_DECISION_MODE}, schema guard)"
 echo "  - 시장/뉴스 리포트: exit ${MARKET_EXIT}"
 echo "  - 통합 문서: ${COMBINED_REPORT_FILE}"
-echo "  - API 비용: yfinance 무료 + SaveTicker 무료"
+if [ -f "$PDF_REPORT_FILE" ]; then
+    echo "  - PDF 리포트: ${PDF_REPORT_FILE} ($(wc -c < "$PDF_REPORT_FILE") bytes)"
+else
+    echo "  - PDF 리포트: 생성 실패 (/tmp/report_pdf_stderr.txt)"
+fi
+echo "  - API 비용: yfinance 무료"
 echo ""
 echo "✅ @Stock_botbot 으로 전송 완료"
 echo ""
