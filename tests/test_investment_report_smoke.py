@@ -55,7 +55,6 @@ def test_generate_report_writes_expected_files_without_network():
         old_detect_signals = ir.detect_signals
         old_market_summary = ir._market_summary
         old_korea_indices = ir._fetch_korea_indices
-        old_arca_posts = ir._fetch_arca_posts
         old_company_name = ir._company_name
         old_manual_scores = ir.MANUAL_SCORES
         old_source_digest = ir.load_cached_source_digest
@@ -91,7 +90,6 @@ def test_generate_report_writes_expected_files_without_network():
                 "qqq_name": "QQQ",
             }
             ir._fetch_korea_indices = lambda: ("2,500.00", "850.00", "1,300.00")
-            ir._fetch_arca_posts = lambda: [{"title": "테스트", "url": "https://example.com", "category": "📰뉴스", "when": "09:00", "views": "10", "likes": "2"}]
             ir._company_name = lambda ticker: f"{ticker} Corporation"
             ir.load_cached_source_digest = lambda: "## 누적 수집 자료\n\n- saveticker 1건\n- [saveticker] AI chip demand · NVDA\n"
 
@@ -110,7 +108,6 @@ def test_generate_report_writes_expected_files_without_network():
             report_text = report_file.read_text(encoding="utf-8")
             summary_text = summary_file.read_text(encoding="utf-8")
             assert "일일 투자 자동화 레포트" in report_text
-            assert "아카라이브 커뮤니티 동향" in report_text
             assert "누적 수집 자료" in report_text
             assert "AI chip demand" in report_text
             assert "위험 대시보드" in report_text
@@ -135,7 +132,6 @@ def test_generate_report_writes_expected_files_without_network():
             ir.detect_signals = old_detect_signals
             ir._market_summary = old_market_summary
             ir._fetch_korea_indices = old_korea_indices
-            ir._fetch_arca_posts = old_arca_posts
             ir._company_name = old_company_name
             ir.MANUAL_SCORES = old_manual_scores
 
@@ -154,7 +150,6 @@ def test_generate_report_fetches_ticker_info_once_per_ticker_not_twice():
         old_detect_signals = ir.detect_signals
         old_market_summary = ir._market_summary
         old_korea_indices = ir._fetch_korea_indices
-        old_arca_posts = ir._fetch_arca_posts
         old_company_name = ir._company_name
         old_manual_scores = ir.MANUAL_SCORES
         old_source_digest = ir.load_cached_source_digest
@@ -199,7 +194,6 @@ def test_generate_report_fetches_ticker_info_once_per_ticker_not_twice():
                 "qqq_price": 600.0, "qqq_change": 0.8, "qqq_name": "QQQ",
             }
             ir._fetch_korea_indices = lambda: ("2,500.00", "850.00", "1,300.00")
-            ir._fetch_arca_posts = lambda: []
             ir._company_name = lambda ticker: f"{ticker} Corporation"
             ir.load_cached_source_digest = lambda: ""
 
@@ -222,7 +216,6 @@ def test_generate_report_fetches_ticker_info_once_per_ticker_not_twice():
             ir.detect_signals = old_detect_signals
             ir._market_summary = old_market_summary
             ir._fetch_korea_indices = old_korea_indices
-            ir._fetch_arca_posts = old_arca_posts
             ir._company_name = old_company_name
             ir.MANUAL_SCORES = old_manual_scores
             ir.yf.Ticker = old_yf_ticker

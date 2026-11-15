@@ -36,7 +36,13 @@ class ProviderSpec:
 
 def default_registry() -> list[ProviderSpec]:
     return [
-        ProviderSpec("saveticker", ("saveticker",), "news", source_collector.fetch_saveticker_events, retries=1),
+        ProviderSpec(
+            "investing_news",
+            tuple(f"rss:{key}" for key, _url, _label in source_collector.INVESTING_RSS_FEEDS),
+            "news",
+            source_collector.fetch_investing_news_events,
+            timeout_seconds=25,
+        ),
         ProviderSpec(
             "yahoo_headline",
             ("yahoo_headline",),
@@ -46,17 +52,11 @@ def default_registry() -> list[ProviderSpec]:
             retries=1,
         ),
         ProviderSpec(
-            "arca",
-            ("arca",),
-            "news",
-            source_collector.fetch_arca_provider,
-            retries=1,
-        ),
-        ProviderSpec(
             "telegram",
             tuple(f"telegram:{channel}" for channel in source_collector.TELEGRAM_NEWS_CHANNELS),
             "news",
             source_collector.fetch_telegram_channel_events,
+            timeout_seconds=90,     # 채널 수만큼 순차 요청 — 기본 30초로는 모자란다
             retries=1,
         ),
         ProviderSpec(
@@ -107,8 +107,35 @@ def _importable_fetch_target(fetch: Callable[[], list[dict]]) -> tuple[str, str]
     return (module, qualname) if current is fetch else None
 
 
+def _mirror_worker_source_state(spec: ProviderSpec, payload: object = None) -> None:
+    """Replace this provider's per-source notes with the ones its worker recorded.
+
+    Fetchers note a failed source in source_collector globals and still return the healthy
+    ones; the worker's copy dies with it. Only this provider's keys are touched, and a key
+    the worker did not report is cleared, so a recovered source drops its old error.
+    """
+    reported = payload if isinstance(payload, dict) else {}
+    errors = reported.get("source_errors")
+    availability = reported.get("source_availability")
+    errors = errors if isinstance(errors, dict) else {}
+    availability = availability if isinstance(availability, dict) else {}
+    for source in spec.sources:
+        for key in dict.fromkeys((source, source.split(":", 1)[0])):
+            note = errors.get(key)
+            if note:
+                source_collector._LAST_ERRORS[key] = str(note)[:200]
+            else:
+                source_collector._LAST_ERRORS.pop(key, None)
+            record = availability.get(key)
+            if isinstance(record, dict) and record:
+                source_collector._SOURCE_AVAILABILITY[key] = record
+            else:
+                source_collector._SOURCE_AVAILABILITY.pop(key, None)
+
+
 def _run_subprocess_fetch(spec: ProviderSpec, target: tuple[str, str]) -> dict:
     started_clock = time.monotonic()
+    _mirror_worker_source_state(spec)
     command = [
         sys.executable,
         "-m",
@@ -179,6 +206,7 @@ def _run_subprocess_fetch(spec: ProviderSpec, target: tuple[str, str]) -> dict:
             "terminated": False,
             "duration_ms": duration_ms,
         }
+    _mirror_worker_source_state(spec, payload)
     if not isinstance(payload, dict) or not payload.get("ok"):
         error = str((payload or {}).get("error") or stderr or "provider worker failed")
         status_code = (payload or {}).get("status_code")

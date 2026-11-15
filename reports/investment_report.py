@@ -14,7 +14,6 @@ import logging
 import time
 from datetime import datetime, timedelta, timezone
 
-import requests
 import yfinance as yf
 import numpy as np
 
@@ -156,82 +155,11 @@ INVESTMENT_REPORT_LLM_PROVIDER = os.environ.get("INVESTMENT_REPORT_LLM_PROVIDER"
 
 
 # ── helpers
-# ── Arca Live helpers ────────────────────────────────────────────────────
-
-_ARCA_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0.0.0 Safari/537.36"
-    )
-}
-_ARCA_LABELS = ("🧠분석", "📰뉴스", "ℹ️정보", "실적")
-
-
 def _compact_text(text, limit=90):
     if not text:
         return ""
     cleaned = " ".join(str(text).replace("\n", " ").split())
     return cleaned[: limit - 1].rstrip() + "…" if len(cleaned) > limit else cleaned
-
-
-def _fetch_arca_markdown(page=1):
-    url = f"https://r.jina.ai/http://arca.live/b/stock?p={page}"
-    last_error = None
-    for attempt in range(3):
-        try:
-            resp = requests.get(url, headers=_ARCA_HEADERS, timeout=8)
-            resp.raise_for_status()
-            return resp.text
-        except Exception as e:
-            last_error = e
-            logger.warning(f"Arca fetch failed (page={page}, attempt={attempt + 1}/3): {e}")
-            if attempt < 2:
-                time.sleep(3)
-    if last_error:
-        logger.warning(f"Arca fetch exhausted retries (page={page}): {last_error}")
-    return None
-
-
-def _parse_arca_posts(markdown):
-    if not markdown:
-        return []
-    posts = []
-    seen_ids = set()
-    link_pat = re.compile(r"\[([^\]]+)\]\(https://arca\.live/b/stock/(\d+)\?p=(\d+)\)")
-    for match in link_pat.finditer(markdown):
-        link_text = " ".join(match.group(1).split()).replace("**", "").strip()
-        post_id = match.group(2)
-        if post_id in seen_ids:
-            continue
-        if not any(label in link_text for label in _ARCA_LABELS):
-            continue
-        header = re.match(
-            rf"^(?P<num>\d+)\s*(?P<label>{'|'.join(map(re.escape, _ARCA_LABELS))})\s+(?P<rest>.+)$",
-            link_text,
-        )
-        if not header:
-            continue
-        body = header.group("rest").strip()
-        meta = re.match(
-            r"^(?P<title>.*?)(?:\s+\[\d+\])?\s+(?P<author>\S+)\s+"
-            r"(?P<when>(?:\d{2}:\d{2}|\d{4}\.\d{2}\.\d{2}))\s+(?P<views>\d+)\s+(?P<likes>\d+)$",
-            body,
-        )
-        if not meta:
-            continue
-        seen_ids.add(post_id)
-        posts.append({
-            "id": post_id,
-            "url": f"https://arca.live/b/stock/{post_id}",
-            "category": header.group("label"),
-            "title": _compact_text(meta.group("title").strip(), 90),
-            "author": meta.group("author").strip(),
-            "when": meta.group("when").strip(),
-            "views": meta.group("views"),
-            "likes": meta.group("likes"),
-        })
-    return posts
 
 
 def _env_int(name, default, minimum=0):
@@ -706,29 +634,6 @@ def llm_overlay_stats(days=30):
     }
 
 
-def _fetch_arca_posts(max_pages=None, limit=6):
-    if max_pages is None:
-        max_pages = _env_int("INVESTMENT_REPORT_ARCA_PAGES", 3, 0)
-    posts = []
-    seen = set()
-    for page in range(1, max_pages + 1):
-        for post in _parse_arca_posts(_fetch_arca_markdown(page) or ""):
-            if post["id"] in seen:
-                continue
-            seen.add(post["id"])
-            posts.append(post)
-            if len(posts) >= limit:
-                return posts
-    return posts
-
-
-def _format_arca_post(post):
-    return (
-        f"- [{post['title']}]({post['url']})"
-        f" ({post['category']} · {post['when']} · 조회 {post['views']} · 추천 {post['likes']})"
-    )
-
-
 # ── helpers ─────────────────────────────────────────────────────────────
 
 def _fmt_pct(val, force_sign=False):
@@ -809,40 +714,6 @@ def _select_watch_candidates(results, limit=5, exclude_tickers=None):
     ]
     risky.sort(key=lambda x: (x.get("total_score", 0), x.get("ticker", "")))
     return risky[:limit]
-
-
-def _news_title_relevant(ticker, title):
-    text = (title or "").lower()
-    if not text:
-        return False
-    t = (ticker or "").upper()
-    base = t.split(".")[0]
-    names = {base.lower()}
-    # 뉴스 관련성 판정은 매 항목 hot path → 무네트워크(큐레이트+캐시)로 회사명 조회
-    try:
-        import ticker_names
-        company = _KOSPI_NAMES.get(t) or ticker_names.display_name(t, allow_net=False)
-    except Exception:
-        company = _KOSPI_NAMES.get(t)
-    if company:
-        names.update(part.lower() for part in re.split(r"\s+", str(company)) if len(part) >= 2)
-        names.add(str(company).lower())
-    aliases = {
-        "MSFT": ("microsoft",),
-        "NVDA": ("nvidia",),
-        "GOOGL": ("alphabet", "google"),
-        "GOOG": ("alphabet", "google"),
-        "AMZN": ("amazon",),
-        "TSLA": ("tesla",),
-        "AAPL": ("apple",),
-        "ORCL": ("oracle",),
-        "SAP": ("sap",),
-        "UNH": ("unitedhealth", "united health"),
-        "005930": ("삼성전자", "samsung electronics"),
-        "000660": ("sk하이닉스", "하이닉스", "sk hynix"),
-    }
-    names.update(aliases.get(base, ()))
-    return any(name and name in text for name in names)
 
 
 _ETF_PERIODS = (
@@ -2276,10 +2147,7 @@ def _kr_valuation_context_line(v: dict) -> str:
 
 
 def _build_ticker_findings(sig, price_info, vol_info, vol_str, fund, ticker):
-    """종목별 '확인할 것' findings 리스트 생성 (순수 추출 — 원본 로직·순서 그대로).
-
-    네트워크(SaveTicker)는 try/except 로 격리되어 있어 실패해도 부분 결과 반환.
-    """
+    """종목별 '확인할 것' findings 리스트 생성 (순수 추출 — 원본 로직·순서 그대로)."""
     findings = []
 
     # 1. News headlines from yfinance
@@ -2317,21 +2185,6 @@ def _build_ticker_findings(sig, price_info, vol_info, vol_str, fund, ticker):
             score_val = data_cat.get("score", 0)
             max_val = data_cat.get("max", 10)
             findings.append(f"⚠️ {cn} 점수 낮음 ({score_val}/{max_val}) — 재무제표 확인 필요")
-
-    # 5. SaveTicker news check — news/list?tickers 는 서비스 종료 공지만 반환하므로
-    # 공개 호스트 top-stories 에서 해당 티커 기사만 고른다.
-    try:
-        import requests
-        from providers.saveticker_api import api_base, rows_for_tickers
-        st_resp = requests.get(f"{api_base()}/news/top-stories", timeout=5)
-        if st_resp.status_code == 200:
-            st_news = rows_for_tickers(st_resp.json().get("news_list") or [], [ticker])
-            for item in st_news[:2]:
-                st_title = item.get("title", "")
-                if st_title and _news_title_relevant(ticker, st_title) and not any(st_title in f for f in findings):
-                    findings.append(f"📰 SaveTicker: {st_title}")
-    except Exception:
-        pass
 
     return findings
 
@@ -2763,22 +2616,6 @@ def generate_report():
     lines.append(f"---")
     lines.append(f"")
 
-    # Section 6: Arca community
-    print(f"\n🗨 아카라이브 주식 채널 수집 중...")
-    arca_posts = _fetch_arca_posts()
-    lines.append(f"## 6. 아카라이브 커뮤니티 동향")
-    lines.append(f"")
-    if arca_posts:
-        lines.append(f"{len(arca_posts)}건의 분석/뉴스/정보/실적 게시글")
-        lines.append(f"")
-        for post in arca_posts:
-            lines.append(_format_arca_post(post))
-    else:
-        lines.append(f"아카라이브 데이터를 불러올 수 없습니다.")
-    lines.append(f"")
-    lines.append(f"---")
-    lines.append(f"")
-
     source_digest = load_cached_source_digest()
     if source_digest:
         lines.append(source_digest.strip())
@@ -2786,8 +2623,8 @@ def generate_report():
         lines.append(f"---")
         lines.append(f"")
 
-    # Section 7: Conclusion
-    lines.append(f"## 7. 오늘의 결론")
+    # Section 6: Conclusion
+    lines.append(f"## 6. 오늘의 결론")
     lines.append(f"")
 
     # Generate conclusion
@@ -2838,7 +2675,7 @@ def generate_report():
         lines.append(f"---")
         lines.append(f"")
 
-    lines.append(f"## 8. 📊 실행 통계")
+    lines.append(f"## 7. 📊 실행 통계")
     lines.append(f"")
     lines.append(f"| 항목 | 값 |")
     lines.append(f"|---|------|")
@@ -2847,7 +2684,7 @@ def generate_report():
     lines.append(f"| 포트폴리오 종목 | {len(PORTFOLIO_TICKERS)}개 |")
     lines.append(f"| NASDAQ 100 스캔 | {len(ndx_results)}개 종목 |")
     lines.append(f"| KOSPI 상위 30 스캔 | {len(kospi_results)}개 종목 |")
-    lines.append(f"| 데이터 소스 | yfinance, SaveTicker API |")
+    lines.append(f"| 데이터 소스 | yfinance |")
     lines.append(f"| LLM decision | 포트폴리오 맥락 판단: {llm_decision_status} |")
     lines.append(f"| LLM overlay | 선택 실행: {INVESTMENT_REPORT_LLM_MODEL}, fact guard 통과 시만 추가 |")
     _ostats = llm_overlay_stats()
@@ -2855,7 +2692,7 @@ def generate_report():
         lines.append(f"| LLM overlay 최근 30일 | {_ostats['n']}회 · 성공 {_ostats['ok']} "
                      f"({_ostats['ok_rate']*100:.0f}%) · guard 거부 {_ostats['guard_rejected']} "
                      f"· 호출 실패 {_ostats['call_failed']} |")
-    lines.append(f"| 외부 API 비용 | yfinance 무료 + SaveTicker 무료 |")
+    lines.append(f"| 외부 API 비용 | yfinance 무료 |")
     lines.append(f"| Telegram 전송 | @Stock_botbot (파일 2개 + 헤더) |")
     lines.append(f"")
     lines.append(f"*Python 계산/수치 산출은 공개 API 기반 deterministic 경로로 수행됩니다.*")

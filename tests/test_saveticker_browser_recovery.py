@@ -1,7 +1,5 @@
 """Authenticated browser recovery never exports cookies or accepts challenge content."""
 import importlib
-import json
-from datetime import datetime, timezone
 
 import pytest
 
@@ -46,22 +44,6 @@ def test_browser_discovery_prioritizes_unseen_valid_ids_not_clipboard(monkeypatc
     assert len(calls) <= 5
 
 
-def test_recovery_partial_success_clears_sticky_error_without_hiding_errors(tmp_path):
-    from reports.saveticker_recovery import tick, read_state
-    state = tmp_path / 'state.json'
-    state.write_text(json.dumps({'phase': 'error'}))
-    result = tick(state_path=state, now=2000,
-        collect_fn=lambda: {'status': 'partial', 'delivered': 2, 'unchanged': 0,
-                            'errors': [{'reason': 'parse_failed'}]},
-        login_fn=lambda: None, remote_fn=lambda **kw: None, send_fn=lambda *a, **kw: True)
-    assert result['phase'] == 'degraded'
-    assert read_state(state)['last_success'] == 2000
-    result = tick(state_path=state, now=3000,
-        collect_fn=lambda: {'status': 'delivered', 'delivered': 3, 'errors': []},
-        login_fn=lambda: None, remote_fn=lambda **kw: None, send_fn=lambda *a, **kw: True)
-    assert result['phase'] == 'healthy'
-    assert 'reason' not in read_state(state)
-
 
 def test_calendar_http_block_falls_back_to_authenticated_browser(monkeypatch):
     import requests
@@ -78,27 +60,4 @@ def test_calendar_http_block_falls_back_to_authenticated_browser(monkeypatch):
     assert events[0]['when'].tzinfo is not None
 
 
-def test_news_http_block_fetches_browser_data_without_refetching_blocked_pages(monkeypatch, tmp_path):
-    import requests
-    from reports import source_collector as collector
-    m = module()
-    class Response:
-        status_code = 403
-        def raise_for_status(self):
-            raise requests.HTTPError(response=self)
-    monkeypatch.setattr(requests, 'get', lambda *a, **kw: Response())
-    monkeypatch.setenv('STOCK_REPORT_REPORTS_DIR', str(tmp_path))
-    monkeypatch.setattr(m.CDPBrowser, 'fetch_json', lambda self, path, params=None:
-        {'news_list': [{'id': 'fresh', 'title': 'New item', 'content': 'A preview...'}]})
-    monkeypatch.setattr(collector, '_fetch_saveticker_article_body',
-                        lambda *a, **kw: pytest.fail('browser previews must not refetch blocked HTTP pages'))
-    rows = collector.fetch_saveticker_events()
-    assert len(rows) == 1 and rows[0]['url'] == 'https://saveticker.com/news/fresh'
-    assert rows[0]['fulltext_status'] == 'preview_only'
-    assert rows[0]['manifest_path']
 
-
-def test_runtime_defaults_to_direct_cdp_not_shutdown_sensitive_hermes():
-    import inspect
-    from reports import saveticker_runtime
-    assert 'CDPBrowser()' in inspect.getsource(saveticker_runtime.collect_private)

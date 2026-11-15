@@ -249,7 +249,7 @@ _OWNER_MENU = [
     {"command": "earnings",  "description": "실적·밸류에이션 — PER/PBR/ROE·서프라이즈·PEAD (예: /earnings NVDA)"},
     {"command": "indicators","description": "종목 기술적 지표 — RSI·이동평균·모멘텀·52주 위치 (예: /indicators QQQ)"},
     {"command": "signals",   "description": "ML·단기 신호 (rank|entry|intraday|lev|meta) — 정보·표시용"},
-    {"command": "save",      "description": "SaveTicker 수집 상태·재인증 복구 (/save check)"},
+    {"command": "save",      "description": "뉴스 수집 전환 안내 — SaveTicker 종료·대체 소스"},
 ]
 
 # 읽기전용 게스트 메뉴 (default·all_private_chats scope — 소유자 메뉴엔 노출 안 함)
@@ -2097,6 +2097,11 @@ def _dispatch_save(chat_id,args):
 
 
 def _handle_save_recovery_callback(update):
+    """옛 인라인 버튼(savecheck:/saveopen: + 24 hex)을 종료 안내로 넘긴다.
+
+    다른 prefix 는 소비하지 않는다. 소유자 채팅·소유자 사용자·형식 일치를 모두
+    만족할 때만 /save 를 큐에 넣고, 아니면 거부 문구로 callback 만 응답한다.
+    """
     callback=update.get('callback_query',{})
     data=callback.get('data','')
     if not isinstance(data,str) or not data.startswith(('savecheck:','saveopen:')):
@@ -2107,10 +2112,9 @@ def _handle_save_recovery_callback(update):
     allowed=(chat_id==str(OWNER_CHAT_ID) and user_id==owner_user
              and re.fullmatch(r'(?:savecheck|saveopen):[a-f0-9]{24}',data))
     _api('answerCallbackQuery',callback_query_id=callback.get('id'),
-         text='복구 확인을 요청합니다.' if allowed else '소유자만 확인할 수 있습니다.')
+         text='SaveTicker 뉴스 수집은 종료되었습니다.' if allowed else '소유자만 확인할 수 있습니다.')
     if allowed:
-        action='check' if data.startswith('savecheck:') else 'open'
-        _DISPATCH_Q.put(('/save '+action+' '+data.split(':',1)[1],chat_id,'owner'))
+        _DISPATCH_Q.put(('/save',chat_id,'owner'))
     return True
 
 

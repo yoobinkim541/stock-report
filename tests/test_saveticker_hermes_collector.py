@@ -186,12 +186,6 @@ def test_discovery_javascript_never_uses_stale_clipboard(write_delay,write_enabl
         assert not result.get('links')
 
 
-def test_cli_accepts_explicit_article_url_without_listing(tmp_path,capsys):
-    cli=importlib.import_module('scripts.saveticker_collect')
-    assert cli.main(['--url',URL,'--limit','1','--outbox',str(tmp_path)],
-        browser_factory=lambda:Browser({URL:modal_snapshot()}),sender=lambda p:{'ok':True})==0
-    assert json.loads(capsys.readouterr().out)['delivered']==1
-
 
 @pytest.mark.parametrize('value,reason', [
     (snapshot(url='https://saveticker.com/login'), 'reauth_required'),
@@ -401,22 +395,6 @@ def test_synthetic_article_reaches_real_archive_and_revision_discovery(tmp_path,
     assert discovery['eligible'][0]['body'].endswith('마지막 근거 끝.')
 
 
-def test_cli_runs_collector_and_prints_receipt_only(tmp_path, capsys):
-    cli=importlib.import_module('scripts.saveticker_collect')
-    assert cli.main(['--outbox',str(tmp_path)],browser_factory=browser,sender=lambda p:{'ok':True})==0
-    output=capsys.readouterr().out
-    assert json.loads(output)['delivered']==1
-    assert '마지막 근거' not in output
-
-
-def test_cli_reports_missing_browser_without_claiming_collection(tmp_path, capsys):
-    cli=importlib.import_module('scripts.saveticker_collect')
-    def unavailable():
-        raise module().CollectionError('browser_connection_required')
-    assert cli.main(['--outbox',str(tmp_path)],browser_factory=unavailable,sender=lambda p:pytest.fail('no send'))==2
-    assert json.loads(capsys.readouterr().out)['status']=='browser_connection_required'
-    state=json.loads((tmp_path/'collector-state.json').read_text())
-    assert not state.get('last_success')
 
 
 @pytest.mark.parametrize('html', [
@@ -472,21 +450,4 @@ def test_retry_cursor_prevents_permanent_failure_starvation(tmp_path):
     assert len(delivered)==1
 
 
-def test_check_connection_mode_cannot_collect_write_or_deliver(tmp_path,capsys):
-    cli=importlib.import_module('scripts.saveticker_collect')
-    class Readiness:
-        def read(self,url):
-            pytest.fail('must not navigate')
-    assert cli.main(['--check-connection','--outbox',str(tmp_path/'not-created')],
-                    browser_factory=Readiness,sender=lambda p:pytest.fail('must not send'))==0
-    assert json.loads(capsys.readouterr().out)['status']=='browser_configured'
-    assert not (tmp_path/'not-created').exists()
 
-
-def test_missing_browser_state_recovers_once_connection_is_available(tmp_path,capsys):
-    cli=importlib.import_module('scripts.saveticker_collect')
-    def unavailable():
-        raise module().CollectionError('browser_connection_required')
-    cli.main(['--outbox',str(tmp_path)],browser_factory=unavailable)
-    assert cli.main(['--outbox',str(tmp_path)],browser_factory=browser,sender=lambda p:{'ok':True})==0
-    assert json.loads((tmp_path/'collector-state.json').read_text())['status']=='delivered'

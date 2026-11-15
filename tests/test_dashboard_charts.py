@@ -547,6 +547,22 @@ def test_market_treemap_prioritizes_ticker_for_small_tiles():
     assert fig.layout.uniformtext.mode != "hide"
 
 
+def test_market_treemap_small_tiles_keep_ticker_and_move_pct_to_hover():
+    """실측(2026-11-15): 러셀 2000 맵은 모든 타일에 `티커<br>등락%` 두 줄을 넣고 작은 글자를
+    숨기다 보니 2,000개 중 77개만 글자가 보였다. 좁은 타일은 티커만 적고 등락%는 hover 로."""
+    rows = [{"ticker": "BIG", "name": "Big", "sector_kr": "기술", "market_cap": 9e11, "pct": 1.0}] + [
+        {"ticker": f"S{i}", "name": f"Small {i}", "sector_kr": "금융", "market_cap": 1e9, "pct": -0.5}
+        for i in range(700)]
+    fig = charts.market_treemap(rows)
+    tr = fig.data[0]
+    ids = list(tr.ids)
+    assert tr.text[ids.index("t:BIG")] == "BIG<br>+1.00%"
+    assert tr.text[ids.index("t:S1")] == "S1"
+    assert tr.customdata[ids.index("t:S1")] == "Small 1"
+    assert tr.hovertext[ids.index("t:S1")] == "-0.50%"
+    assert fig.layout.height > charts.market_treemap(rows[:100]).layout.height   # 조밀한 맵은 캔버스를 키운다
+
+
 def test_market_treemap_clamps_and_empty():
     rows = [{"ticker": "X", "name": "X", "sector_kr": "기술", "market_cap": 1e9, "pct": 9.9}]
     tr = charts.market_treemap(rows).data[0]
