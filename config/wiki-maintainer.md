@@ -104,3 +104,16 @@ generations and append-only log; no pruning. Explicit rollback logs an idempoten
 event. `AGENT_CONSOLE_WIKI_QMD_CAPABILITY_FILE` names approved probe JSON; absent
 it search stays pending/failed with canonical fallback, never global updates.
 Tests are not rollout acceptance.
+
+## Ontology And Insights
+
+`ontology/ontology.json` is a derived graph, rebuilt from active pages' claims:
+typed entities (company, asset, indicator, institution, person, region, sector,
+theme, event) and typed relations that a cited claim states verbatim. A relation
+is `asserted` (one source), `corroborated` (two or more) or `contested`
+(competing claims or an opposite relation). Never store the graph in pages.
+`kind: insight` pages (one per entity, tag `entity:<id>`) hold model inference
+that joins claims from at least two sources; every point cites its claims and
+contains no number absent from them. Treat insights as hypotheses, not facts;
+do not merge, distill or rewrite them by hand — the ontology job regenerates
+them when their evidence changes.

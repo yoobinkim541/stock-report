@@ -32,6 +32,7 @@ TRUST_COLORS = {
 }
 
 THEME_COLORS = {
+    "인사이트 (Insights)": "#facc15",                          # Yellow (cross-source judgments)
     "종합 위키 포털 (Overview Portals)": "#f59e0b",          # Amber/Gold (Portals/Hubs)
     "원문 지식 요약 (Compiled Source Summaries)": "#38bdf8",     # Sky Blue (Sources)
     "정치·지정학 (Politics & Geopolitics)": "#ef4444",          # Rose/Red

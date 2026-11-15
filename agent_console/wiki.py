@@ -18,13 +18,13 @@ from typing import Any, Iterable
 
 from . import evidence_usage, qmd_search, shared_memory, storage
 import safe_io
-from . import wiki_contract
+from . import wiki_contract, wiki_ontology
 
 
 WIKI_TAG = "wiki"
 WIKI_SURFACE = "wiki"
 VALID_STATUSES = ("draft", "reviewed", "stable", "archived")
-VALID_KINDS = ("note", "playbook", "decision", "risk", "concept", "overview", "source_digest", "source_index")
+VALID_KINDS = ("note", "playbook", "decision", "risk", "concept", "overview", "source_digest", "source_index", "insight")
 MAX_LINKS = 12
 MAX_SOURCE_REFS = 100
 WIKI_SUMMARY_LIMIT = 2400
@@ -1276,7 +1276,7 @@ def apply_source_batch(batch: dict) -> dict:
     return result
 
 
-_REPORT_WIKI_KINDS = ("risk", "playbook")
+_REPORT_WIKI_KINDS = ("risk", "playbook", "insight")
 
 
 def _ticker_lookup_variants(ticker: object) -> list[str]:
@@ -1500,6 +1500,28 @@ def lint_pages(pages: list[dict] | None = None) -> dict:
     return result
 
 
+def _lint_insight_issues(pages: list[dict]) -> list[dict]:
+    """인사이트가 인용한 근거 페이지가 보관·삭제됐으면 다시 써야 한다."""
+    active = {page.get("id") for page in pages if isinstance(page, dict) and page.get("status") != "archived"}
+    issues = []
+    for page in pages:
+        if not isinstance(page, dict) or page.get("kind") != wiki_ontology.INSIGHT_KIND or page.get("status") == "archived":
+            continue
+        knowledge = page.get("source_knowledge") if isinstance(page.get("source_knowledge"), dict) else {}
+        cited = (knowledge.get("insight") or {}).get("cited") or []
+        missing = sorted({str(pair[0]) for pair in cited if isinstance(pair, list) and pair and pair[0] not in active})
+        if missing or not cited:
+            issues.append({
+                "code": "insight_evidence_missing",
+                "severity": "warning",
+                "page_id": _clean(page.get("id") or "", 80),
+                "title": _clean(page.get("title") or "위키 페이지", 160),
+                "message": (f"인용한 근거 페이지 {len(missing)}개가 보관·삭제됐습니다. 인사이트를 다시 생성하세요."
+                            if missing else "인용 근거가 없는 인사이트입니다."),
+            })
+    return issues
+
+
 def collect_lint(pages: list[dict], *, captured_at: str) -> dict:
     """Collect lint without live reads, clock access, cache changes or logging."""
     cutoff = (datetime.fromisoformat(captured_at) - timedelta(days=30)).isoformat()
@@ -1559,6 +1581,7 @@ def collect_lint(pages: list[dict], *, captured_at: str) -> dict:
                     "message": f"not_helpful({not_helpful})이 helpful({helpful})의 2배를 초과합니다. 페이지 개선 또는 삭제를 고려하세요.",
                 })
     issues.extend(_lint_relational_issues(pages or []))
+    issues.extend(_lint_insight_issues(pages or []))
     return {"ok": not issues, "issue_count": len(issues), "issues": issues}
 
 
@@ -1673,27 +1696,24 @@ RAW_LAYER_KINDS = ("source_index",)
 RAW_LAYER_TAG = "raw_index"
 _TAXONOMY_RULES = [
     ("정치·지정학", "정치·지정학 (Politics & Geopolitics)",
-     ("정치", "대선", "트럼프", "바이든", "선거", "정부", "의회", "백악관", "외교", "우크라이나", "러시아", "후티", "사우디", "이란", "이스라엘", "가자", "국방", "미사일", "군사", "키이우", "젤렌스키", "소하르", "호르무즈")),
+     ("정치", "지정학", "전쟁", "중동", "제재", "대선", "트럼프", "바이든", "선거", "정부", "의회", "백악관", "외교", "우크라이나", "러시아", "후티", "사우디", "이란", "이스라엘", "가자", "국방", "미사일", "군사", "키이우", "젤렌스키", "소하르", "호르무즈", "geopolitics", "sanction")),
     ("금리·통화정책", "금리·통화정책 (Monetary Policy & Rates)",
      ("금리", "연준", "fed", "fomc", "인플레이션", "물가", "cpi", "통화정책", "채권", "국채", "긴축", "완화", "sofr", "기준금리")),
     ("거시경제·에너지", "거시경제·에너지 (Macro & Commodities)",
-     ("거시", "경제", "gdp", "고용", "실업", "유가", "에너지", "원자재", "수출", "무역", "관세", "recession", "경기", "bess", "가스", "전력")),
+     ("거시", "경제", "gdp", "고용", "실업", "유가", "원유", "에너지", "원자재", "달러", "환율", "수출", "무역", "관세", "recession", "경기", "bess", "가스", "전력")),
     ("기술·반도체·AI", "기술·반도체·AI (Tech & AI)",
-     ("반도체", "ai", "양자", "빅테크", "기술", "소프트웨어", "hbm", "하드웨어", "엔비디아", "애플", "마이크로소프트", "구글", "스미토모", "ibm", "heron")),
+     ("반도체", "ai", "인공지능", "gpu", "nvidia", "양자", "빅테크", "기술", "소프트웨어", "hbm", "하드웨어", "엔비디아", "애플", "마이크로소프트", "구글", "스미토모", "ibm", "heron")),
     ("기업실적·산업동향", "기업실적·산업동향 (Earnings & Industry)",
-     ("실적", "매출", "영업이익", "가이던스", "자산운용", "aum", "etf", "배당", "밸류에이션", "주주환원", "합병", "인수", "공시", "블랙록", "bank of america")),
+     ("실적", "어닝", "earnings", "산업동향", "매출", "영업이익", "가이던스", "자산운용", "aum", "etf", "배당", "밸류에이션", "주주환원", "합병", "인수", "공시", "블랙록", "bank of america")),
 ]
 
-_INDEX_CATEGORIES = (
-    ("overview", "종합 위키 포털 (Overview Portals)"),
-    ("compiled_source", "원문 지식 요약 (Compiled Source Summaries)"),
-    ("politics", "정치·지정학 (Politics & Geopolitics)"),
-    ("rates", "금리·통화정책 (Monetary Policy & Rates)"),
-    ("macro", "거시경제·에너지 (Macro & Commodities)"),
-    ("tech", "기술·반도체·AI (Tech & AI)"),
-    ("earnings", "기업실적·산업동향 (Earnings & Industry)"),
-    ("strategy", "종목전략·플레이북 (Single Stock Strategies)"),
-)
+_INDEX_INSIGHT = "인사이트 (Insights)"
+_INDEX_PORTAL = "종합 위키 포털 (Overview Portals)"
+_INDEX_SOURCE = "원문 지식 요약 (Compiled Source Summaries)"
+_INDEX_PLAYBOOK = "종목전략·플레이북 (Single Stock Strategies)"
+_INDEX_OTHER = "기타 지식"
+# index.md 섹션 순서. 라벨은 dashboard.wiki_mesh.THEME_COLORS 키와 같아야 그래프 색·배치가 맞는다.
+_INDEX_ORDER = (_INDEX_INSIGHT, _INDEX_PORTAL, _INDEX_SOURCE, *(label for _, label, _ in _TAXONOMY_RULES), _INDEX_PLAYBOOK, _INDEX_OTHER)
 
 
 def is_raw_layer_page(page: dict) -> bool:
@@ -1701,17 +1721,26 @@ def is_raw_layer_page(page: dict) -> bool:
     return page.get("kind") in RAW_LAYER_KINDS or RAW_LAYER_TAG in (page.get("tags") or [])
 
 
-def _index_category(page: dict) -> str:
-    if page.get("kind") == "overview" or str(page.get("id", "")).startswith("overview-"):
-        return "종합 위키 포털 (Overview Portals)"
-    if "compiled_source" in (page.get("tags") or []):
-        return "원문 지식 요약 (Compiled Source Summaries)"
-    
-    text = (str(page.get("title", "")) + " " + str(page.get("summary", "")) + " " + str(page.get("body", "")) + " " + " ".join(page.get("tags", []))).lower()
-    for code, label, kws in _TAXONOMY_RULES:
-        if kws and any(k.lower() in text for k in kws):
+def _index_category(page: dict | None) -> str:
+    """index.md 섹션, 개요 허브, 그래프 테마 색이 함께 쓰는 단일 분류."""
+    if not isinstance(page, dict):
+        return _INDEX_OTHER
+    kind = str(page.get("kind") or "")
+    tags = [str(tag) for tag in page.get("tags") or []]
+    if kind == wiki_ontology.INSIGHT_KIND:
+        return _INDEX_INSIGHT
+    if kind == "overview" or str(page.get("id") or "").startswith("overview-"):
+        return _INDEX_PORTAL
+    if kind == "source_digest" or "compiled_source" in tags:
+        return _INDEX_SOURCE
+    if page.get("surface") == "ticker" or any(tag.startswith("ticker:") for tag in tags):
+        return _INDEX_PLAYBOOK
+    text = " ".join([str(page.get("title") or ""), str(page.get("summary") or ""),
+                     str(page.get("body") or ""), *tags]).lower()
+    for _, label, keywords in _TAXONOMY_RULES:
+        if any(keyword in text for keyword in keywords):
             return label
-    return "종목전략·플레이북 (Single Stock Strategies)"
+    return _INDEX_PLAYBOOK if kind == "playbook" else _INDEX_OTHER
 
 
 def page_source_count(page: dict) -> int:
@@ -1730,8 +1759,7 @@ def _render_index_md(pages: list[dict], *, captured_at: str | None = None) -> st
     by_category: dict[str, list[dict]] = {}
     for page in active_pages:
         by_category.setdefault(_index_category(page), []).append(page)
-    order = [name for _, name in _INDEX_CATEGORIES] + ["Other"]
-    for category in sorted(by_category, key=order.index):
+    for category in sorted(by_category, key=_INDEX_ORDER.index):
         lines += [f"## {category}", ""]
         for page in sorted(by_category[category], key=lambda item: str(item.get("title") or "")):
             lines.append(_render_index_entry(page))
@@ -2701,6 +2729,21 @@ MODEL_SYNTHESIS_WARNING = (
 )
 
 
+INSIGHT_WARNING = (
+    "모델 추론 인사이트: 여러 출처의 미검증 claim을 모델이 엮어 낸 판단입니다. 근거 문서를 확인하기 전에는 "
+    "가설로만 쓰고 사실이나 매매 근거로 단정하지 마세요."
+)
+
+
+def _ontology_context(query: str) -> str:
+    """질문에 나온 개체의 온톨로지 관계와 인사이트. 온톨로지가 아직 없으면 빈 문자열."""
+    if not _clean(query, 400):
+        return ""
+    insights = [page for page in _all_wiki_pages()
+                if page.get("kind") == wiki_ontology.INSIGHT_KIND and page.get("status") != "archived"]
+    return wiki_ontology.context_section(query, insights=insights)
+
+
 def has_unverified_synthesis(page: dict) -> bool:
     """Compiled/topic knowledge whose claims are still draft model synthesis."""
     knowledge = page.get("source_knowledge")
@@ -2724,8 +2767,9 @@ def build_context_section(*, query: str = "", surface: str = WIKI_SURFACE, limit
     else:
         pages = list_pages(query=query, surface=surface, status=status, limit=limit,
                            include_archived=include_archived)
+    ontology_block = _ontology_context(query)
     if not pages:
-        return ""
+        return ontology_block
     related_ids = {
         rid
         for page in pages
@@ -2783,6 +2827,8 @@ def build_context_section(*, query: str = "", surface: str = WIKI_SURFACE, limit
         lines.append(f"- 검증: {page.get('verification_status', 'unverified')}")
         if unverified_synthesis:
             lines.append(f"- 주의: {MODEL_SYNTHESIS_WARNING}")
+        if page.get("kind") == wiki_ontology.INSIGHT_KIND:
+            lines.append(f"- 주의: {INSIGHT_WARNING}")
         for warning in page.get("trust_warnings") or []:
             lines.append(f"- 주의: {warning}")
         related_ids_for_page = _dedupe_texts(
@@ -2800,6 +2846,8 @@ def build_context_section(*, query: str = "", surface: str = WIKI_SURFACE, limit
         )
     except Exception:
         pass
+    if ontology_block:
+        lines += ["", ontology_block]
     return "\n".join(lines).strip()
 
 # ── 아래 함수들은 652d61d 잘림 사고로 유실됐다가 복구된 것들이다.
@@ -3552,53 +3600,6 @@ def _auto_tags(text: str, surface: str, kind: str) -> list[str]:
     if "위키" in text or "기억" in text:
         tags.add("wiki")
     return sorted(tags)
-
-
-_INDEX_OTHER = "기타 지식"
-_INDEX_PORTAL = "종합 위키 포털 (Overview Portals)"
-_INDEX_SOURCE = "원문 지식 요약 (Compiled Source Summaries)"
-_INDEX_PLAYBOOK = "종목전략·플레이북 (Single Stock Strategies)"
-_INDEX_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("정치·지정학 (Politics & Geopolitics)", ("지정학", "정치", "전쟁", "중동", "선거", "제재", "geopolitics", "sanction")),
-    ("금리·통화정책 (Monetary Policy & Rates)", ("금리", "통화정책", "연준", "fomc", "기준금리", "국채")),
-    ("거시경제·에너지 (Macro & Commodities)", ("거시", "유가", "에너지", "원자재", "달러", "인플레", "환율", "원유")),
-    ("기술·반도체·AI (Tech & AI)", ("반도체", "인공지능", "엔비디아", "nvidia", "gpu")),
-    ("기업실적·산업동향 (Earnings & Industry)", ("실적", "어닝", "earnings", "가이던스", "산업동향")),
-)
-
-
-def _index_category(node: dict | None) -> str:
-    """위키 그래프 노드를 테마 묶음 이름으로 분류한다.
-
-    dashboard.wiki_mesh.THEME_COLORS 키와 같아야 색·배치가 맞는다.
-    """
-    if not isinstance(node, dict):
-        return _INDEX_OTHER
-    kind = str(node.get("kind") or "").strip().lower()
-    surface = str(node.get("surface") or "").strip().lower()
-    tags = [str(tag).strip().lower() for tag in (node.get("tags") or []) if str(tag).strip()]
-    text = " ".join([
-        str(node.get("title") or ""),
-        str(node.get("summary") or ""),
-        " ".join(tags),
-    ]).lower()
-    if kind == "source_digest" or "source_digest" in tags:
-        return _INDEX_SOURCE
-    if any(token in text for token in ("포털", "overview portal", "위키 인덱스", "종합 위키")):
-        return _INDEX_PORTAL
-    if any(tag.startswith("ticker:") for tag in tags) or surface == "ticker":
-        return _INDEX_PLAYBOOK
-    best = _INDEX_OTHER
-    best_hits = 0
-    for label, words in _INDEX_RULES:
-        hits = sum(1 for word in words if word in text)
-        if hits > best_hits:
-            best, best_hits = label, hits
-    if best_hits:
-        return best
-    if kind == "playbook":
-        return _INDEX_PLAYBOOK
-    return _INDEX_OTHER
 
 
 def _num_or_default(value: object, default: float = 0.5) -> float:

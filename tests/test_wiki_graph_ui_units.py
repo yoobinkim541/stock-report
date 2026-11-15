@@ -15,7 +15,8 @@ def test_taxonomy_routes_pages_to_thematic_categories():
     assert wiki._index_category(_page("a", "FOMC 금리 인하 전망")).startswith("금리·통화정책")
     assert wiki._index_category(_page("b", "우크라이나 휴전 협상")).startswith("정치·지정학")
     assert wiki._index_category(_page("c", "HBM 반도체 소재")).startswith("기술·반도체·AI")
-    assert wiki._index_category(_page("d", "아무 관련 없는 문서")).startswith("종목전략")
+    assert wiki._index_category(_page("d", "아무 관련 없는 문서")) == wiki._INDEX_OTHER
+    assert wiki._index_category(_page("p", "아무 관련 없는 문서", kind="playbook")).startswith("종목전략")
     assert wiki._index_category(_page("overview-x", "포털", kind="overview")).startswith("종합 위키 포털")
     assert wiki._index_category(_page("e", "요약", tags=["compiled_source"])).startswith("원문 지식 요약")
 

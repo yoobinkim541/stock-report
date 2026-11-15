@@ -9,12 +9,48 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from datetime import datetime, timedelta, timezone
 
-from agent_console import wiki
+from agent_console import wiki, wiki_ontology
 from reports.wiki_pipeline_health import build_pipeline_health_report
 
 STALE_MAX_AGE_DAYS = 14
 VERY_UNUSED_DAYS = 60
+ARTIFACT_LAG_HOURS = 6
+ONTOLOGY_MAX_AGE_HOURS = 24
+
+
+def _parse_time(value: object) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _derived_health(stats_data: dict, now: datetime) -> tuple[dict, list[str]]:
+    """index.md 와 온톨로지처럼 페이지에서 파생되는 산출물이 페이지를 따라오고 있는지 본다.
+
+    2026-11-12 색인 렌더 예외로 사흘간 index.md 가 멈췄는데도 헬스 체크가 조용했던 것을 막는다.
+    """
+    notes: list[str] = []
+    latest_at = _parse_time((stats_data.get("latest") or {}).get("updated_at"))
+    index_path = wiki.wiki_artifacts_dir() / "index.md"
+    index_at = datetime.fromtimestamp(index_path.stat().st_mtime, timezone.utc) if index_path.exists() else None
+    if latest_at and (index_at is None or latest_at - index_at > timedelta(hours=ARTIFACT_LAG_HOURS)):
+        notes.append(
+            f"index.md 가 최신 페이지보다 {ARTIFACT_LAG_HOURS}시간 넘게 뒤처졌습니다 — rebuild_artifacts 실패 여부를 "
+            "/tmp/wiki_*.log 에서 확인하세요")
+    ontology = wiki_ontology.load_ontology()
+    summary: dict = {"insights": (stats_data.get("kind_counts") or {}).get(wiki_ontology.INSIGHT_KIND, 0)}
+    if ontology:
+        summary.update(ontology.get("stats") or {}, generated_at=ontology.get("generated_at"))
+        generated_at = _parse_time(ontology.get("generated_at"))
+        if generated_at is None or now - generated_at > timedelta(hours=ONTOLOGY_MAX_AGE_HOURS):
+            notes.append(f"온톨로지 컴파일이 {ONTOLOGY_MAX_AGE_HOURS}시간 넘게 멈췄습니다 — /tmp/wiki_ontology.log 확인")
+    else:
+        notes.append("온톨로지가 아직 없습니다 — python -m reports.wiki_ontology_insights --apply")
+    return summary, notes
 
 
 def _pipeline_report(report: dict) -> dict:
@@ -73,6 +109,9 @@ def build_health_report(dry_run: bool = False) -> dict:
                 key: (len(value) if isinstance(value, list) else value)
                 for key, value in wiki_cleanup.apply_mechanical_archive(mechanical, dry_run=False).items()}
         report["crosslinks"] = wiki_crosslinks.apply(dry_run=False)
+
+    report["ontology"], derived_notes = _derived_health(stats_data, datetime.now(timezone.utc))
+    report["recommendations"].extend(derived_notes)
 
     if very_unused_pages:
         report["recommendations"].append(
@@ -157,6 +196,17 @@ def format_report(report: dict) -> str:
         f"unlinked {curation_section.get('source_digest_unlinked_count', 0)}"
     )
     lines.append("")
+
+    ontology = report.get("ontology") or {}
+    if ontology.get("entities"):
+        states = ontology.get("relation_states") or {}
+        lines.append(
+            f"온톨로지: 개체 {ontology.get('entities', 0)} · 관계 {ontology.get('relations', 0)}"
+            f" (교차 확인 {states.get('corroborated', 0)} · 상충 {states.get('contested', 0)})"
+            f" · 인사이트 {ontology.get('insights', 0)}"
+            f" · 관계 추출 {ontology.get('extracted_pages', 0)}/{ontology.get('pages', 0)} 페이지"
+        )
+        lines.append("")
 
     lint_issues = report.get("lint_issues") or []
     if lint_issues:

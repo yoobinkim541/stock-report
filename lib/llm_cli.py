@@ -238,11 +238,13 @@ def structured_providers() -> list[str] | None:
     return names
 
 
-def structured_chat(prompt: str, *, max_timeout: int = 180) -> str | None:
+def structured_chat(prompt: str, *, max_timeout: int = 180, provider_timeout: int | None = None) -> str | None:
     """Bounded Codex → direct OpenRouter → Hermes JSON-object fallback.
 
     No parallel calls or web search; agy is an opt-in stage via WIKI_STRUCTURED_PROVIDERS. Each provider gets at most 60
-    seconds within a shared, hard-capped 180-second budget. Codex's existing
+    seconds within a shared, hard-capped 180-second budget; ``provider_timeout``
+    raises that per-provider share for long batch prompts (the 180-second cap
+    still holds, so later providers get what is left). Codex's existing
     unsupported-model retry shares that same provider deadline. Domain schemas
     and source attribution remain the caller's responsibility; invalid JSON is
     never salvaged. Provider errors and source bodies are deliberately not logged.
@@ -259,7 +261,7 @@ def structured_chat(prompt: str, *, max_timeout: int = 180) -> str | None:
         return None
     deadline = time.monotonic() + max(0, min(max_timeout, int(os.getenv("WIKI_STRUCTURED_DEADLINE", "180"))))
     for provider in providers:
-        remaining = min(int(os.getenv("WIKI_PROVIDER_TIMEOUT", "60")), deadline - time.monotonic())
+        remaining = min(provider_timeout or int(os.getenv("WIKI_PROVIDER_TIMEOUT", "60")), deadline - time.monotonic())
         if remaining < 1:
             return None
         stage_deadline = time.monotonic() + remaining

@@ -103,6 +103,15 @@ def test_shared_budget_expires_without_starting_more_providers(monkeypatch, prov
     assert calls[0][3]["deadline"] == 30
 
 
+def test_provider_timeout_raises_first_share_inside_the_same_total_cap(monkeypatch, providers):
+    calls, _ = providers
+    clock = iter([0, 0, 0, 120, 120, 120, 120, 120, 120, 180])
+    monkeypatch.setattr(llm_cli.time, "monotonic", lambda: next(clock))
+    assert llm_cli.structured_chat("source", provider_timeout=120) is None
+    assert [(call[0], call[3].get("max_timeout", call[3].get("timeout"))) for call in calls] == [
+        ("codex", 120), ("openrouter", 60), ("hermes", 60)]
+
+
 def test_total_budget_capped_and_each_stage_uses_remaining_time(monkeypatch, providers):
     calls, _ = providers
     clock = iter([0, 0, 0, 60, 60, 60, 120, 120, 120, 180])

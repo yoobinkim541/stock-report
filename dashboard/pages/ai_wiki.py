@@ -8,7 +8,7 @@ import streamlit as st
 from agent_console import wiki
 
 
-from dashboard import cached, ui_actions
+from dashboard import cached, ui_actions, wiki_ontology_view
 from dashboard.wiki_browser import (
     KIND_LABELS,
     KIND_OPTIONS,
@@ -123,6 +123,8 @@ def render():
                     "general": "일반",
                 }, rec.get("category", "general")))
                 st.write(rec.get("detail", ""))
+
+    wiki_ontology_view.render_section(pages_all)
 
     # 폼 제출형 검색 — 종전엔 text_input 이 폼 밖이라 글자 하나 칠 때마다 전체 rerun + 위키 조회
     with st.form("wiki_search_form", border=False):
