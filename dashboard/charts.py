@@ -436,11 +436,19 @@ def price_candle(hist, ticker: str = "", avg_cost=None, trades=None, view_days=N
     return _initial_view(fig, hist, view_days, category_x=True)
 
 
-def market_treemap(rows: list[dict], height: int = 560):
+_TREEMAP_WIDTH = 1000        # 타일 글자 판정용 기준 폭(px) — 실제 폭은 반응형이라 근사값
+_TREEMAP_DENSE_TILES = 600   # 이보다 종목이 많으면(러셀 2000) 캔버스를 세로로 키운다
+
+
+def market_treemap(rows: list[dict], height: int | None = None):
     """시장 맵 트리맵 (Finviz 풍). rows:[{ticker,name,sector_kr,market_cap,pct,sub?}].
 
     섹터→(선택: 세부 카테고리 sub)→종목 2~3계층. 타일 크기=시총, 색=당일 등락%(±3 클램프).
     id/parent 체계로 라벨 충돌 방지 — 종목 노드 label=티커(클릭→정규화→분석 이동 계약 유지).
+    타일 글자는 추정 타일 크기로 고른다: 넉넉하면 티커와 등락%(표시명이 따로 있으면 그 위에 한 줄),
+    좁으면 티커만 — 가장 짧은 글자라 같은 타일에서 가장 크게 들어간다(등락%·이름은 hover).
+    글자를 숨기지 않고 타일에 맞춰 줄이므로 모든 종목에 티커가 찍힌다.
+    종목이 많은 맵은 height 를 안 주면 캔버스를 세로로 키워 티커가 들어갈 자리를 만든다.
     """
     go = _go()
     rows = [r for r in (rows or []) if (r.get("market_cap") or 0) > 0 and r.get("pct") is not None]
@@ -454,38 +462,47 @@ def market_treemap(rows: list[dict], height: int = 560):
         sec_sum[r["sector_kr"]] += mc
         if r.get("sub"):
             sub_sum[(r["sector_kr"], r["sub"])] += mc
-    ids, labels, parents, values, colors, texts, custom = [], [], [], [], [], [], []
+    dense = len(rows) > _TREEMAP_DENSE_TILES
+    if height is None:
+        height = 1400 if dense else 560
+    px_per_cap = _TREEMAP_WIDTH * height * 0.85 / sum(sec_sum.values())   # 0.85 = 헤더·패딩 몫
+    ids, labels, parents, values, colors, texts, names, pcts = [], [], [], [], [], [], [], []
     for s in sorted(sec_sum):                       # 섹터 루트노드 (값=자식 시총합)
         ids.append(f"sec:{s}"); labels.append(s); parents.append("")
         values.append(sec_sum[s]); colors.append(0.0)
-        texts.append(f"<b>{s}</b>"); custom.append("")
+        texts.append(f"<b>{s}</b>"); names.append(""); pcts.append("")
     for (s, sub), v in sorted(sub_sum.items()):     # 세부 카테고리 (기술→반도체 등)
         ids.append(f"sub:{s}/{sub}"); labels.append(sub); parents.append(f"sec:{s}")
         values.append(v); colors.append(0.0)
-        texts.append(f"<b>{sub}</b>"); custom.append("")
+        texts.append(f"<b>{sub}</b>"); names.append(""); pcts.append("")
     for r in rows:
         parent = f"sub:{r['sector_kr']}/{r['sub']}" if r.get("sub") else f"sec:{r['sector_kr']}"
         ids.append(f"t:{r['ticker']}"); labels.append(r["ticker"]); parents.append(parent)
         values.append(float(r["market_cap"]))
         colors.append(max(-3.0, min(3.0, float(r["pct"]))))   # ±3 클램프(대비)
-        texts.append(f'{r.get("tile") or r["ticker"]}<br>{r["pct"]:+.2f}%')
-        custom.append(r.get("name") or r["ticker"])
+        ticker, pct = str(r["ticker"]), f'{r["pct"]:+.2f}%'
+        tile = r.get("tile") or ticker
+        if float(r["market_cap"]) * px_per_cap < 48 * 48:                 # 두 줄이 안 들어가는 타일
+            texts.append(ticker)
+        elif tile == ticker:
+            texts.append(f"{ticker}<br>{pct}")
+        else:
+            texts.append(f"{tile}<br>{ticker}<br>{pct}")
+        names.append(r.get("name") or ticker); pcts.append(pct)
     fig = go.Figure(go.Treemap(
         ids=ids, labels=labels, parents=parents, values=values, branchvalues="total",
         text=texts, textinfo="text", textposition="middle center",
         textfont=dict(size=11, color="white", family=theme._MONO),
-        customdata=custom,
+        customdata=names, hovertext=pcts,
         marker=dict(colors=colors,
                     colorscale=[[0.0, _RED], [0.5, "#1a1d26"], [1.0, _GREEN]],
                     cmid=0, cmin=-3, cmax=3, showscale=False,
                     line=dict(width=1, color="#0e1117")),
         tiling=dict(pad=1),
-        hovertemplate="%{customdata} (%{label})<br>시총 %{value:,.0f}<extra></extra>"))
-    # 모바일처럼 타일이 잘게 쪼개지는 폭에서도 라벨을 억지로 찌그러뜨리지 않는다 —
-    # 최소 크기(9px) 밑으로 내려가는 라벨은 아예 숨기고, 보이는 라벨은 항상 읽을 수
-    # 있는 크기를 유지한다(실측 2026-09-05: 390px 폭에서 라벨이 깨알같이 작아짐).
-    fig.update_layout(margin=dict(t=6, b=6, l=6, r=6), height=height,
-                      uniformtext=dict(minsize=9, mode="hide"))
+        hovertemplate="%{customdata} (%{label}) %{hovertext}<br>시총 %{value:,.0f}<extra></extra>"))
+    # uniformtext 를 두지 않는다 — 글자는 타일마다 맞춰 줄고, 숨는 타일이 없다.
+    # (mode="hide" 였을 때 러셀 2000 은 2,000개 중 77개만 글자가 보였다.)
+    fig.update_layout(margin=dict(t=6, b=6, l=6, r=6), height=height)
     return _t(fig)
 
 

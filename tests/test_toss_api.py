@@ -405,38 +405,172 @@ def test_kiwoom_domestic_write_skipped_when_other_source_active(monkeypatch):
 
 # ── 키움 해외 거래내역 → trade_events (차트 마커·모으기 실행 이력) ────────────
 
+def _us_tx(date, no, kind, remark, ticker, qty, *, price=0.0, amount=0.0, name=""):
+    """ust21100 실제 응답 행 모양 — 종류는 deal_kind_nm, 방향은 rmrk_nm."""
+    return {"deal_dt": date, "deal_no": str(no), "deal_kind_nm": kind, "rmrk_nm": remark,
+            "stk_cd": ticker, "stk_nm": name or ticker, "deal_qty": str(qty),
+            "uv_exrt": str(price), "fc_deal_amt": str(amount)}
+
+
 def test_kiwoom_parse_us_transactions():
+    """실측(2026-11-15): 방향이 rmrk_nm 에만 와서 예전 파서는 실제 체결을 한 건도 못 잡았다."""
     import kiwoom_sync_rest as K
     result = {"return_code": 0, "result_list": [
-        {"deal_dt": "20260713", "deal_kind_nm": "해외주식매수", "stk_cd": "AAPL",
-         "stk_nm": "애플", "deal_qty": "2", "deal_amt": "420.50", "deal_no": "T001"},
-        {"deal_dt": "20260713", "deal_kind_nm": "주식모으기매수", "stk_cd": "MSFT",
-         "stk_nm": "마이크로소프트", "deal_qty": "0.5", "deal_amt": "225.00", "deal_no": "T002"},
-        {"deal_dt": "20260712", "deal_kind_nm": "외화입금", "stk_cd": "", "deal_qty": "0",
-         "deal_amt": "1000", "deal_no": "T003"},                    # 비체결 → 스킵
-        {"deal_dt": "20260712", "deal_kind_nm": "해외주식매도", "stk_cd": "NVDA",
-         "stk_nm": "엔비디아", "deal_qty": "1", "deal_amt": "180.00", "deal_no": "T004"},
+        _us_tx("20261113", 3, "매매", "매수", "AAPL", 2, price=210.25, amount=420.50),
+        _us_tx("20261113", 4, "소수점매매", "매수", "MSFT", "0.5", amount=225.00),
+        _us_tx("20261112", 1, "입출금", "배당금입금", "", 0, amount=12.3),     # 수량 변화 없음 → 스킵
+        _us_tx("20261112", 2, "소수점매매", "매도", "NVDA", "0.25", price=180.0, amount=45.0),
+        _us_tx("20261111", 5, "입출고", "대체온주전환출고", "ORCL", 1),
+        _us_tx("20261111", 6, "입출고", "대체온주전환입고", "ORCL", 1),
+        _us_tx("20261110", 7, "입출고", "대체출고", "QLD", 1),
     ]}
     rows = K._parse_us_transactions(result)
-    assert [r["ticker"] for r in rows] == ["AAPL", "MSFT", "NVDA"]
-    assert rows[0]["side"] == "buy" and rows[0]["price"] == 210.25   # deal_amt/qty 근사
-    assert rows[1]["kind"] == "주식모으기매수" and rows[1]["qty"] == 0.5   # 모으기 = 소수점 매수
-    assert rows[2]["side"] == "sell"
+    got = [(r["ticker"], r["side"], r["book"], r["move"]) for r in rows]
+    assert got == [
+        ("AAPL", "buy", "whole", "trade"),
+        ("MSFT", "buy", "fractional", "trade"),
+        ("NVDA", "sell", "fractional", "trade"),
+        ("ORCL", "sell", "fractional", "convert"),      # 소수점 1주가 빠지고
+        ("ORCL", "buy", "whole", "convert"),            # 온주 1주로 들어온다
+        ("QLD", "sell", "", "transfer"),                # "입출고" 의 "출고" 가 아니라 적요로 방향 판정
+    ]
+    assert rows[0]["price"] == 210.25 and rows[0]["amount"] == 420.50
+    assert rows[1]["price"] == 450.0 and rows[1]["qty"] == 0.5        # 단가 없으면 금액/수량
+    assert rows[1]["kind"] == "소수점매매 매수"
     assert K._parse_us_transactions({}) == []
 
 
+def _us_row(date, no, side, ticker, qty, *, book="whole", move="trade", price=100.0):
+    return {"ticker": ticker, "side": side, "qty": qty, "price": price, "amount": price * qty,
+            "date": date, "deal_no": str(no), "kind": "", "name": ticker, "book": book, "move": move}
+
+
+def test_kiwoom_reconstruct_us_positions_from_history():
+    """잔고 조회는 온주만 주므로 소수점 보유는 거래내역 누적 — 매도·전환이 빠지면 과대 표시된다."""
+    import kiwoom_sync_rest as K
+    history = [
+        _us_row("20260901", 1, "buy", "ORCL", 0.6, book="fractional", price=100.0),
+        _us_row("20260902", 1, "buy", "ORCL", 0.6, book="fractional", price=200.0),
+        # 옛 표기: 같은 날·같은 수량 대체출고/입고 짝 = 소수점 1주 → 온주 전환
+        _us_row("20260903", 1, "sell", "ORCL", 1.0, book="", move="transfer"),
+        _us_row("20260903", 2, "buy", "ORCL", 1.0, book="", move="transfer"),
+        # 거래번호는 체결 순서가 아니다 — 당일 매수분을 앞 번호로 매도
+        _us_row("20260904", 1, "sell", "NOW", 0.4, book="fractional"),
+        _us_row("20260904", 2, "buy", "NOW", 0.4, book="fractional"),
+        _us_row("20260905", 1, "buy", "QLD", 3.0),
+        _us_row("20260906", 1, "sell", "QLD", 1.0, book="", move="transfer"),   # 짝 없음 = 온주 출고
+    ]
+    pos = K.reconstruct_us_positions(history)
+    assert pos["ORCL"]["whole"] == 1.0
+    assert pos["ORCL"]["fractional"] == pytest.approx(0.2)
+    assert pos["ORCL"]["fractional_cost"] == pytest.approx(30.0)      # 평균 150 × 0.2
+    assert pos["NOW"]["fractional"] == pytest.approx(0.0)             # 전량 매도
+    assert pos["QLD"]["whole"] == 2.0 and pos["QLD"]["fractional"] == 0.0
+
+    balance = [{"ticker": "ORCL", "shares": 1, "name": "오라클", "current_price_usd": 160.0},
+               {"ticker": "QLD", "shares": 2, "current_price_usd": 90.0}]
+    assert K.whole_share_mismatches(pos, balance) == []
+    assert K.whole_share_mismatches(pos, balance[:1]) == ["QLD: 거래내역 2주 ≠ 잔고 0주"]
+
+    held = K.fractional_holdings(pos, balance)
+    assert [h["ticker"] for h in held] == ["ORCL"]                    # 전량 매도한 NOW 는 빠진다
+    assert held[0]["shares"] == 0.2 and held[0]["avg_price_usd"] == 150.0
+    assert held[0]["value_usd"] == 32.0 and held[0]["return_pct"] == 6.67
+
+
 def test_kiwoom_sync_us_transactions_idempotent(monkeypatch):
-    """event_id=거래번호 — 같은 내역 재동기화해도 원장 중복 없음 (store 격리는 conftest)."""
+    """event_id=날짜+거래번호 — 거래번호는 날짜별 일련번호라 번호만으로는 다른 날 체결과 겹친다."""
     import kiwoom_sync_rest as K
     from lib import trade_events
-    rows = [{"ticker": "AAPL", "side": "buy", "qty": 2.0, "price": 210.25,
-             "date": "20260713", "deal_no": "TX9", "kind": "해외주식매수", "name": "애플"}]
-    monkeypatch.setattr(K, "fetch_us_transactions", lambda days=7: rows)
-    assert K.sync_us_transactions() == 1
-    assert K.sync_us_transactions() == 1                             # record_trade 가 중복 스킵
-    mine = [t for t in trade_events.all_trades() if t.get("broker_order_id") == "TX9"]
-    assert len(mine) == 1 and mine[0]["date"] == "2026-07-13"
-    assert mine[0]["note"] == "해외주식매수" and mine[0]["source"] == "kiwoom_us_sync"
+    history = [
+        _us_row("20260101", 1, "buy", "AAPL", 1.0),                              # 14일보다 오래됨 → 미기록
+        _us_row("20260712", 1, "sell", "ZZKW", 0.5, book="fractional", price=180.0),
+        _us_row("20260713", 1, "buy", "ZZKW", 2.0, price=210.25),
+        _us_row("20260713", 2, "sell", "ZZKW", 1.0, book="fractional", move="convert"),   # 체결 아님
+    ]
+    monkeypatch.setattr(K, "refresh_us_transaction_history", lambda **kw: history)
+    assert K.sync_us_transactions() == 2
+    assert K.sync_us_transactions() == 0                              # 재동기화 — 새 기록 없음
+    mine = sorted((t for t in trade_events.all_trades() if t.get("ticker") == "ZZKW"),
+                  key=lambda t: t["date"])
+    assert [(t["date"], t["side"], t["qty"]) for t in mine] == [
+        ("2026-07-12", "sell", 0.5), ("2026-07-13", "buy", 2.0)]
+    assert {t["source"] for t in mine} == {"kiwoom_us_sync"}
+
+
+def test_kiwoom_us_trades_skip_buys_already_logged_by_accumulate_cron(monkeypatch):
+    """모으기 크론이 종가 기준으로 먼저 적은 매수(manual_holding)와 같은 체결은 다시 적지 않는다."""
+    import kiwoom_sync_rest as K
+    from lib import trade_events
+    trade_events.record_trade(ticker="ZZPL", side="buy", qty=0.03, price=100.0, account="overseas_fractional",
+                              source="manual_holding", market="US", currency="USD",
+                              timestamp="2026-08-12T06:10:00", event_id="manual:zzpl:20260812")
+    history = [
+        _us_row("20260813", 1, "buy", "ZZPL", 0.031, book="fractional"),    # 크론 기록(전날)과 같은 체결
+        _us_row("20260813", 2, "sell", "ZZPL", 0.5, book="fractional"),     # 매도는 크론이 모른다
+        _us_row("20260813", 3, "buy", "ZZNP", 0.2, book="fractional"),      # 플랜에 없는 종목
+        _us_row("20260813", 4, "buy", "ZZPL", 1.0),                         # 온주 매수
+    ]
+    assert K._record_us_trades(history) == 3
+    synced = [(t["ticker"], t["side"], t["qty"]) for t in trade_events.all_trades()
+              if t.get("source") == "kiwoom_us_sync" and t["ticker"].startswith("ZZ") and t["date"] == "2026-08-13"]
+    assert sorted(synced) == [("ZZNP", "buy", 0.2), ("ZZPL", "buy", 1.0), ("ZZPL", "sell", 0.5)]
+
+
+def test_kiwoom_us_history_refresh_replaces_recent_window(monkeypatch):
+    """증분 갱신은 마지막 캐시 날짜 14일 전부터 다시 받아 그 구간을 통째로 교체한다."""
+    import kiwoom_sync_rest as K
+    import store
+    from datetime import datetime, timedelta
+    day = lambda n: (datetime.now() - timedelta(days=n)).strftime("%Y%m%d")
+    old = _us_row(day(60), 1, "buy", "MSFT", 1.0)
+    cancelled = _us_row(day(3), 1, "buy", "MSFT", 9.0)                # 브로커가 취소·정정한 행
+    store.replace_all(K._US_TX_COLLECTION, [old, cancelled])
+    asked = []
+
+    def fake_fetch(days):
+        asked.append(days)
+        return [_us_row(day(2), 1, "buy", "MSFT", 0.3, book="fractional")]
+
+    monkeypatch.setattr(K, "fetch_us_transactions", fake_fetch)
+    history = K.refresh_us_transaction_history()
+    assert asked == [18]                                              # 3 + 14일 전부터 오늘까지
+    assert [(r["date"], r["qty"]) for r in history] == [(day(60), 1.0), (day(2), 0.3)]
+    assert store.all(K._US_TX_COLLECTION) == history
+
+    monkeypatch.setattr(K, "fetch_us_transactions", lambda days: None)   # 조회 실패 → 캐시 유지
+    assert K.refresh_us_transaction_history() is None
+    assert store.all(K._US_TX_COLLECTION) == history
+
+
+def test_kiwoom_sync_us_fractional_skips_when_history_disagrees_with_balance(tmp_path, monkeypatch):
+    """온주 수량이 잔고와 다르면 거래내역이 불완전한 것 — 소수점 보유를 덮어쓰지 않는다."""
+    import kiwoom_sync_rest as K
+    from lib import overseas_snapshot as O
+    snap_path = tmp_path / "portfolio_snapshot.json"
+    snap_path.write_text(json.dumps({"overseas_fractional": {"holdings": [
+        {"ticker": "NOW", "shares": 0.9354}, {"ticker": "ORCL", "shares": 2.8839}]}}), encoding="utf-8")
+    monkeypatch.setattr(O, "PORTFOLIO_PATH", str(snap_path))
+    monkeypatch.setenv("OVERSEAS_SYNC_SOURCE", "kiwoom")
+    monkeypatch.setattr(K, "_us_quote_prices", lambda tickers: {})
+    notices = []
+    monkeypatch.setattr(K, "_notify", notices.append)
+    history = [_us_row("20260901", 1, "buy", "ORCL", 0.2, book="fractional", price=150.0),
+               _us_row("20260902", 1, "buy", "ORCL", 1.0, price=150.0)]
+
+    monkeypatch.setattr(K, "refresh_us_transaction_history", lambda **kw: history)
+    assert K.sync_us_fractional(history, [{"ticker": "ORCL", "shares": 5}]) is False
+    assert "미반영" in notices[0] and "ORCL: 거래내역 1주 ≠ 잔고 5주" in notices[0]
+    held = json.loads(snap_path.read_text(encoding="utf-8"))["overseas_fractional"]["holdings"]
+    assert [h["ticker"] for h in held] == ["NOW", "ORCL"]             # 그대로
+
+    assert K.sync_us_fractional(history, [{"ticker": "ORCL", "shares": 1,
+                                           "current_price_usd": 160.0}]) is True
+    snap = json.loads(snap_path.read_text(encoding="utf-8"))
+    held = snap["overseas_fractional"]["holdings"]
+    assert [(h["ticker"], h["shares"]) for h in held] == [("ORCL", 0.2)]   # 매도한 NOW 제거
+    assert snap["overseas_fractional"]["summary"]["total_value_usd"] == 32.0
+    assert "➖ NOW" in notices[1] and "ORCL" not in notices[1]        # 수량만 바뀐 종목은 알리지 않음
 
 
 # ── main() 전체 플로우 (2026-07-25: NameError 회귀방지 — 단위테스트만으론 못 잡음) ──

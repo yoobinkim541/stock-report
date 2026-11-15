@@ -10,8 +10,6 @@ import html as html_mod
 import json
 import logging
 import os
-import socket
-import subprocess
 import sys
 import re
 import time as time_mod
@@ -35,7 +33,6 @@ HEADERS = {
 # (2026-07-07 라이브 실증: FRED 위장 UA=12s 타임아웃·정직 UA=0.3s 200, jina 위장 UA=403·정직 UA=200).
 # 1차 경로가 살아나면 매 실행 12시리즈×2회×12s 타임아웃 낭비 없이 즉시 수집 — API 키 폴백은 유지.
 PLAIN_HEADERS = {"User-Agent": "stock-report/1.0 (+yoobinkim2006@gmail.com)"}
-ARCA_LABELS = ("🧠분석", "📰뉴스", "ℹ️정보", "실적")
 # 보유 종목 — 단일 소스: portfolio_universe.py
 _PROJECT_DIR = os.getenv("STOCK_REPORT_PROJECT_DIR",
                          os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -105,8 +102,20 @@ WORLD_GOV_BOND_COUNTRIES = {
     "south-korea": "한국 국채금리",
 }
 # 뉴스 텔레그램 채널 — env 로 교체 가능(죽은 채널 무배포 교체): STOCK_COLLECTOR_TG_CHANNELS=a,b
+# 공개 미리보기(t.me/s/<채널>)가 열려 있는 증권사·애널리스트·뉴스 채널만 넣는다.
+_DEFAULT_TELEGRAM_CHANNELS = (
+    "insidertracking",        # 미국 주식 인사이더 — 미국 속보·레딧 분석
+    "kwusa",                  # 키움증권 미국주식 톡톡
+    "mirae_dm",               # 미래에셋 선진국 전략 (김성근)
+    "Samsung_Global_AI_SW",   # 삼성증권 글로벌 AI/SW (이영진)
+    "FastStockNewsUSA",       # 급등일보 미국주식 — 미국 뉴스 속보
+    "daishinstrategy",        # 대신증권 전략 (이경민)
+    "yuantais",               # 유안타증권 투자전략
+    "shStrategy",             # 신한투자증권 주식전략·시황·퀀트
+    "thekobeissiletter",      # The Kobeissi Letter — 영문 매크로 코멘트
+)
 TELEGRAM_NEWS_CHANNELS = [c.strip().lstrip("@") for c in os.getenv(
-    "STOCK_COLLECTOR_TG_CHANNELS", "yuzukinaok1,insidertracking").split(",") if c.strip()]
+    "STOCK_COLLECTOR_TG_CHANNELS", ",".join(_DEFAULT_TELEGRAM_CHANNELS)).split(",") if c.strip()]
 
 # 공개 RSS만. 로그인·페이월 우회 없음. 피드 하나가 죽어도 나머지는 수집한다.
 NEWS_RSS_FEEDS = (
@@ -116,6 +125,12 @@ NEWS_RSS_FEEDS = (
     ("hankyung", "https://www.hankyung.com/feed/finance", "한국경제"),
     ("yonhap", "https://www.yna.co.kr/rss/economy.xml", "연합뉴스"),
     ("sec", "https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=8-K&company=&dateb=&owner=include&start=0&count=15&output=atom", "SEC 8-K"),
+)
+# Official directory: https://kr.investing.com/webmaster-tools/rss
+# Separate provider budget: two additional feeds must not starve the existing RSS group.
+INVESTING_RSS_FEEDS = (
+    ("investing_kr_stock", "https://kr.investing.com/rss/news_25.rss", "Investing.com 주식"),
+    ("investing_kr_economy", "https://kr.investing.com/rss/news_14.rss", "Investing.com 경제"),
 )
 NEWS_THEME_KEYWORDS = {
     "중동/전쟁": ("이스라엘", "이란", "가자", "하마스", "우크라이나", "러시아", "전쟁", "군", "미사일", "핵"),
@@ -356,90 +371,10 @@ def _bounded_get(url: str, *, timeout: int = 20, max_bytes: int = 5_000_000, **k
         return _BoundedResponse(b"".join(chunks), r.encoding)
 
 
-def _proxy_from_env() -> str:
-    return (os.getenv("STOCK_COLLECTOR_ARCA_PROXY")
-            or os.getenv("ARCA_PROXY")
-            or os.getenv("CRAWL_PROXY")
-            or "").strip()
 
 
-def _proxy_host_port(proxy: str) -> tuple[str, int] | None:
-    try:
-        parsed = urlparse(proxy)
-    except Exception:
-        return None
-    if not parsed.hostname:
-        return None
-    return parsed.hostname, int(parsed.port or 1080)
 
 
-def arca_proxy_status(proxy: str | None = None) -> dict:
-    """Arca 전용 프록시 상태. 네트워크 요청 없이 로컬 SOCKS 포트 리슨 여부만 확인한다."""
-    proxy = (proxy or _proxy_from_env() or "").strip()
-    if not proxy:
-        return {"enabled": False, "proxy": "", "reachable": False, "error": "proxy unset"}
-    hp = _proxy_host_port(proxy)
-    if not hp:
-        return {"enabled": True, "proxy": proxy, "reachable": False, "error": "invalid proxy url"}
-    host, port = hp
-    try:
-        with socket.create_connection((host, port), timeout=0.35):
-            return {"enabled": True, "proxy": proxy, "reachable": True, "host": host, "port": port}
-    except Exception as exc:
-        return {"enabled": True, "proxy": proxy, "reachable": False, "host": host, "port": port,
-                "error": str(exc)[:160]}
-
-
-def _curl_proxy_args(proxy: str) -> list[str]:
-    parsed = urlparse(proxy)
-    scheme = parsed.scheme.lower()
-    host_port = f"{parsed.hostname}:{parsed.port or 1080}"
-    if scheme in ("socks5", "socks5h", "socks"):
-        return ["--socks5-hostname", host_port]
-    if scheme == "socks4":
-        return ["--socks4", host_port]
-    if scheme in ("http", "https"):
-        return ["--proxy", proxy]
-    raise ValueError(f"지원하지 않는 프록시 프로토콜: {scheme or 'unknown'}")
-
-
-def _bounded_get_via_proxy(url: str, proxy: str, *, timeout: int = 20,
-                           max_bytes: int = 5_000_000, headers: dict | None = None):
-    """curl 기반 프록시 fetch.
-
-    requests는 PySocks가 없으면 SOCKS를 못 타므로, 서버에 이미 있는 curl을 사용한다.
-    Cloudflare 우회를 자동화하지 않고 일반 GET만 수행한다.
-    """
-    status = arca_proxy_status(proxy)
-    if not status.get("reachable"):
-        raise RuntimeError(f"proxy unavailable: {status.get('error') or proxy}")
-    cmd = [
-        "curl", "-fsSL", "--compressed", "--max-time", str(int(timeout)),
-        "--user-agent", (headers or HEADERS).get("User-Agent", HEADERS["User-Agent"]),
-        *_curl_proxy_args(proxy),
-    ]
-    for key, value in (headers or {}).items():
-        if key.lower() == "user-agent":
-            continue
-        cmd.extend(["-H", f"{key}: {value}"])
-    cmd.append(url)
-    proc = subprocess.run(cmd, check=False, capture_output=True, timeout=timeout + 3)
-    if proc.returncode != 0:
-        err = proc.stderr.decode("utf-8", errors="replace").strip() or f"curl exit {proc.returncode}"
-        raise RuntimeError(err[:240])
-    if len(proc.stdout) > max_bytes:
-        raise ValueError(f"응답 과대(>{max_bytes}B) — {url[:60]}")
-    return _BoundedResponse(proc.stdout, "utf-8")
-
-
-def _is_cloudflare_challenge(text: str) -> bool:
-    lower = (text or "").lower()
-    return (
-        "just a moment" in lower
-        or "cf-challenge" in lower
-        or "checking if the site connection is secure" in lower
-        or "cloudflare challenge" in lower
-    )
 
 
 def event_id(event: dict) -> str:
@@ -669,272 +604,6 @@ def _extract_news_tags(text: str) -> list[str]:
     return [theme for theme, words in NEWS_THEME_KEYWORDS.items() if any(word.lower() in lower for word in words)]
 
 
-def _normalize_tickers(raw) -> list[str]:
-    """티커 리스트를 문자열로 정규화.
-
-    SaveTicker API 는 tickers 를 [{"id":.., "name":.., "symbol":"NVDA"}] 같은
-    dict 리스트로 줄 때가 있다 → symbol 문자열만 추출한다. 다운스트림(build_digest
-    등)은 list[str] 을 가정하므로 dict 가 새면 Counter·join 에서 크래시한다.
-    """
-    out: list[str] = []
-    for t in raw or []:
-        if isinstance(t, str):
-            if t.strip():
-                out.append(t.strip())
-        elif isinstance(t, dict):
-            sym = t.get("symbol") or t.get("ticker") or t.get("code")
-            if sym:
-                out.append(str(sym).strip())
-    return out
-
-
-def _combine_body_raw(*parts: object) -> str:
-    body = "\n\n".join(
-        str(part).replace("\x00", " ").strip()
-        for part in parts
-        if str(part or "").strip()
-    ).strip()
-    return body
-
-
-def _saveticker_html_to_text(html_text: str) -> str:
-    if not html_text:
-        return ""
-    soup = BeautifulSoup(html_text, "html.parser")
-    main = soup.find("article") or soup.find("main") or soup.body or soup
-    text = main.get_text("\n", strip=True) if main else html_text
-    lines = [line.strip() for line in text.splitlines()]
-    cleaned = "\n".join(line for line in lines if line)
-    return cleaned.strip()
-
-
-def _saveticker_article_url(item: dict) -> str:
-    """saveticker API 응답엔 url/link 필드가 없음(2026-07-25 실측 확인 — top-stories·news/list
-    둘 다) — id 로 직접 구성. 실측: https://saveticker.com/news/{id} 가 실제 기사 페이지(200)."""
-    url = str(item.get("url") or item.get("link") or "").strip()
-    if url:
-        return url
-    aid = item.get("id")
-    return f"https://saveticker.com/news/{aid}" if aid else ""
-
-
-_SAVETICKER_DISCLAIMER = "본 콘텐츠는 투자 권유 목적이 아닌 정보 제공용입니다."
-
-
-def _strip_saveticker_boilerplate(text: str, title: str = "") -> str:
-    """추출 텍스트에서 상단 메타데이터 헤더(태그·티커·시각·출처+제목)와 하단 면책조항 제거.
-
-    페이지 구조 실측(2026-07-25): <article> 첫 블록이 'SAVE PICK · 속보 · $TICKER · 시각 ·
-    출처: X · {제목}' 형태로 제목까지 끝나 — 제목이 등장하는 줄까지를 헤더로 보고 그 다음
-    줄부터를 본문으로 채택. 제목 매칭 실패 시(페이지 구조 변형 등) 원문 그대로 반환(안전).
-    """
-    lines = text.splitlines()
-    title = (title or "").strip()
-    if title:
-        for i, line in enumerate(lines):
-            if title in line:
-                lines = lines[i + 1:]
-                break
-    cleaned = [ln for ln in lines if ln.strip() and ln.strip() != _SAVETICKER_DISCLAIMER]
-    return "\n".join(cleaned).strip()
-
-
-def _fetch_saveticker_article_body(url: str, title: str = "") -> str:
-    if not url:
-        return ""
-    try:
-        resp = _bounded_get(url, timeout=15)
-        html_text = resp.text.strip()
-        if not html_text or _is_cloudflare_challenge(html_text):
-            return ""
-        text = _saveticker_html_to_text(html_text)
-        return _strip_saveticker_boilerplate(text, title)
-    except Exception:
-        return ""
-
-
-def _saveticker_article_record(item: dict, base: str, *, fetch_full: bool = True) -> dict:
-    from reports.raw_archive import save_extracted_text, save_raw_artifact
-
-    fetched_at = datetime.now(KST)
-    title = str(item.get("title") or "").strip()
-    url = _saveticker_article_url(item)
-    content = str(item.get("content") or "").strip()
-    summary = str(item.get("group_summary") or "").strip()
-    body_raw = _combine_body_raw(content, summary)
-    # saveticker 자체 미리보기가 80~90자 근처서 "..."로 잘려 오는 경우가 흔해 길이만으로는
-    # 거의 안 걸림 — 말줄임표로 끝나면 길이 무관하게 전체 기사를 마저 가져온다(2026-07-25).
-    looks_truncated = body_raw.endswith("...") or body_raw.endswith("…")
-    if fetch_full and (len(body_raw) < 80 or looks_truncated) and url:
-        fetched = _fetch_saveticker_article_body(url, title=title)
-        if fetched and len(fetched) > len(body_raw):
-            body_raw = fetched   # 전체 기사가 미리보기의 상위집합 — 미리보기 중복 없이 이걸로 대체
-        elif fetched:
-            body_raw = _combine_body_raw(content, summary, fetched)
-    if not body_raw:
-        body_raw = _combine_body_raw(title, content, summary) or title
-
-    raw_payload = json.dumps(item, ensure_ascii=False, sort_keys=True)
-    raw_record = save_raw_artifact(
-        source="saveticker_article",
-        kind="json",
-        fetched_at=fetched_at,
-        title=title or url or "saveticker article",
-        url=url or base,
-        payload=raw_payload,
-        suffix=".json",
-    )
-    save_extracted_text(raw_record, body_raw)
-    return {
-        "body_raw": body_raw,
-        "body": body_raw,
-        "body_excerpt": body_raw[:500],
-        "raw_path": raw_record["raw_path"],
-        "text_path": raw_record["text_path"],
-        "manifest_path": raw_record["manifest_path"],
-        "raw_sha256": raw_record["sha256"],
-        "raw_source": raw_record["source"],
-    }
-
-
-def _fetch_arca_post_body(post_id: str, *, proxy: str | None = None) -> str:
-    """Arca 게시글 본문을 가능한 한 원문에 가깝게 수집한다."""
-    proxy = (proxy or _proxy_from_env() or "").strip()
-    if proxy:
-        try:
-            resp = _bounded_get_via_proxy(
-                f"https://arca.live/b/stock/{post_id}",
-                proxy,
-                timeout=18,
-            )
-            body = resp.text.strip()
-            if body:
-                return body
-        except Exception:
-            pass
-    try:
-        resp = _bounded_get(f"https://r.jina.ai/http://arca.live/b/stock/{post_id}", timeout=25)
-        body = resp.text.strip()
-        if body:
-            return body
-    except Exception:
-        pass
-    return ""
-
-
-def _saveticker_max_pages() -> int:
-    try:
-        return max(1, min(20, int(os.getenv("STOCK_COLLECTOR_SAVETICKER_MAX_PAGES", "3"))))
-    except (TypeError, ValueError):
-        return 3
-
-
-def _saveticker_sunset_item(item) -> bool:
-    if not isinstance(item, dict):
-        return False
-    blob = " ".join(str(item.get(key) or "") for key in ("id", "title"))
-    return "legacy-news-sunset-notice" in blob
-
-
-def fetch_saveticker_events() -> list[dict]:
-    from reports.raw_archive import load_dedupe_index, save_dedupe_index
-
-    _SOURCE_AVAILABILITY.pop("saveticker", None)
-    base = os.getenv("SAVE_TICKER_API_BASE", "https://api.saveticker.com/api").rstrip("/")
-    paths = [("news/top-stories", None)]
-    paths.extend(
-        ("news/list", {"page": page, "page_size": 30, "sort": "created_at_desc"})
-        for page in range(1, _saveticker_max_pages() + 1)
-    )
-    events = []
-    seen_keys: set[str] = set()
-    dedupe_index = load_dedupe_index()
-    dedupe_dirty = False
-    now_iso = datetime.now(KST).isoformat(timespec="seconds")
-    saw_sunset = False
-    errors: list[str] = []
-    for path, params in paths:
-        try:
-            resp = requests.get(f"{base}/{path}", headers=HEADERS, params=params, timeout=12)
-            resp.raise_for_status()
-            data = resp.json()
-        except Exception as exc:
-            errors.append(f"{path} {type(exc).__name__}")
-            continue
-        items = data.get("news_list") or data.get("data") or []
-        if (isinstance(data, dict) and "legacy-news-sunset-notice" in str(data.get("id") or "")) or (
-            items and all(_saveticker_sunset_item(item) for item in items)
-        ):
-            saw_sunset = True
-            continue
-        if params and not items:
-            break
-        for item in items:
-            if _saveticker_sunset_item(item):
-                saw_sunset = True
-                continue
-            title = item.get("title") or ""
-            if not title:
-                continue
-            url = _saveticker_article_url(item)
-            dedupe_key = str(url or title).strip().lower()
-            if dedupe_key and dedupe_key in seen_keys:
-                continue
-            if dedupe_key:
-                seen_keys.add(dedupe_key)
-            text = " ".join(str(item.get(k) or "") for k in ("title", "content", "group_summary"))
-            if dedupe_key and dedupe_key in dedupe_index:
-                # 같은 기사가 API 응답에 계속 남아있는 동안 매 폴링(30분)마다 원본을 재저장하던
-                # 버그 수정 — 최근에 이미 아카이브했으면 재수집/재저장 생략(디스크·네트워크 낭비 방지).
-                body_raw = _combine_body_raw(item.get("content"), item.get("group_summary")) or text
-                raw_path = text_path = manifest_path = raw_sha256 = raw_source = ""
-            else:
-                record = _saveticker_article_record(item, base, fetch_full=False)
-                body_raw = record["body_raw"] or _combine_body_raw(item.get("content"), item.get("group_summary")) or text
-                raw_path, text_path = record["raw_path"], record["text_path"]
-                manifest_path, raw_sha256, raw_source = (
-                    record["manifest_path"], record["raw_sha256"], record["raw_source"])
-                if dedupe_key:
-                    dedupe_index[dedupe_key] = now_iso
-                    dedupe_dirty = True
-            events.append({
-                "source": "saveticker",
-                "source_url": base,
-                "title": title,
-                "url": url,
-                "published_at": item.get("created_at") or item.get("published_at") or "",
-                "body_raw": body_raw,
-                "body": body_raw,
-                "body_excerpt": body_raw[:500],
-                "tickers": _normalize_tickers(item.get("tickers")) or _extract_tickers(text),
-                "tags": item.get("tag_names") or [],
-                "raw_path": raw_path,
-                "text_path": text_path,
-                "manifest_path": manifest_path,
-                "raw_sha256": raw_sha256,
-                "raw_source": raw_source,
-            })
-    if dedupe_dirty:
-        save_dedupe_index(dedupe_index, now=datetime.now(KST))
-    if not events and saw_sunset:
-        reason = "SaveTicker news API ended: legacy-news-sunset-notice"
-        _SOURCE_AVAILABILITY["saveticker"] = {
-            "availability": "unavailable",
-            "availability_reason": reason,
-        }
-        _note_error("saveticker", reason)
-        raise SourceProviderUnavailable(reason, availability="unavailable")
-    if errors and not events:
-        reason = "SaveTicker fetch failed: " + "; ".join(errors[:3])
-        _SOURCE_AVAILABILITY["saveticker"] = {
-            "availability": "error",
-            "availability_reason": reason,
-        }
-        _note_error("saveticker", reason)
-        raise SourceProviderUnavailable(reason, availability="error")
-    return [_classify_event(event) for event in events]
-
-
 YAHOO_HEADLINE_RSS = "https://feeds.finance.yahoo.com/rss/2.0/headline"
 
 
@@ -974,7 +643,10 @@ def _rss_published_at(value: str) -> str:
         from email.utils import parsedate_to_datetime
         parsed = parsedate_to_datetime(text)
     except (TypeError, ValueError, IndexError, OverflowError):
-        return text
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            return text
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(KST).isoformat(timespec="seconds")
@@ -993,7 +665,7 @@ def fetch_yahoo_headline_events(symbols=None, *, get=None) -> list[dict]:
         raise SourceProviderUnavailable(reason, availability="disabled")
     getter = get
     events = []
-    seen: set[str] = set()
+    seen: dict[str, dict] = {}
     errors: list[str] = []
     for symbol in chosen:
         url = f"{YAHOO_HEADLINE_RSS}?s={symbol}&region=US&lang=en-US"
@@ -1014,11 +686,15 @@ def fetch_yahoo_headline_events(symbols=None, *, get=None) -> list[dict]:
             continue
         for item in items:
             key = str(item.get("url") or item.get("title") or "").strip().lower()
-            if not key or key in seen:
+            if not key:
                 continue
-            seen.add(key)
+            existing = seen.get(key)
+            if existing is not None:
+                if symbol not in existing["tickers"]:
+                    existing["tickers"].append(symbol)
+                continue
             body = item.get("body") or ""
-            events.append({
+            event = {
                 "source": "yahoo_headline",
                 "source_url": url,
                 "title": item.get("title") or "",
@@ -1031,7 +707,11 @@ def fetch_yahoo_headline_events(symbols=None, *, get=None) -> list[dict]:
                 "tags": ["Yahoo"],
                 "fulltext_status": "feed_blurb",
                 "body_raw_source": "rss_description",
-            })
+                "body_coverage": "partial",
+                "text_complete": False,
+            }
+            seen[key] = event
+            events.append(event)
     if not events:
         reason = "Yahoo headline RSS failed: " + "; ".join(errors[:3])
         _SOURCE_AVAILABILITY["yahoo_headline"] = {
@@ -1042,109 +722,7 @@ def fetch_yahoo_headline_events(symbols=None, *, get=None) -> list[dict]:
     _LAST_ERRORS.pop("yahoo_headline", None)
     return [_classify_event(event) for event in events]
 
-def _parse_arca_html(html_text: str) -> list[tuple[str, str]]:
-    """arca.live 게시판 HTML → [(post_id, 제목텍스트)] (순수 — jina 장애 시 직접 폴백용)."""
-    out = []
-    seen = set()
-    for m in re.finditer(r'href="/b/stock/(\d+)[^"]*"[^>]*>(.*?)</a>', html_text, re.S):
-        post_id = m.group(1)
-        if post_id in seen:
-            continue
-        text = html_mod.unescape(re.sub(r"<[^>]+>", " ", m.group(2)))
-        text = " ".join(text.split())
-        if not text:
-            continue
-        seen.add(post_id)
-        out.append((post_id, text))
-    return out
 
-
-def fetch_arca_events(max_pages: int = 2, *, proxy: str | None = None,
-                      prefer_proxy: bool = False) -> list[dict]:
-    events = []
-    # 스킴은 http/https 모두 허용 — jina 는 내부 URL 스킴을 href 에 그대로 반사(라이브 실증:
-    # http 내부 요청이면 링크도 http://arca.live/... 라 https 고정 패턴은 0건). ?p= 꼬리도 선택.
-    link_pat = re.compile(r"\[([^\]]+)\]\(https?://arca\.live/b/stock/(\d+)[^)]*\)")
-
-    seen_posts: set[str] = set()
-
-    def _add(post_id: str, text: str) -> None:
-        if post_id in seen_posts:
-            return                                    # 페이지 간 중복(핀 고정 글 등)
-        label = next((lb for lb in ARCA_LABELS if lb in text), "")
-        if not label:
-            return
-        seen_posts.add(post_id)
-        title = text[text.index(label):]              # 게시글 번호 프리픽스 제거
-        # 꼬리 메타([댓글수] 작성자 날짜 조회 추천) 제거 — 실패해도 원문 유지(graceful)
-        title = re.sub(r"\s*(\[\d+\])?\s*\S{1,20}\s+\d{4}\.\d{2}\.\d{2}\s+\d+\s+\d+\s*$",
-                       "", title) or title
-        body_raw = _fetch_arca_post_body(post_id, proxy=proxy)
-        body = body_raw or title
-        events.append({
-            "source": "arca",
-            "title": title[:140],
-            "url": f"https://arca.live/b/stock/{post_id}",
-            "source_url": "https://arca.live/b/stock",
-            "category": label,
-            "body_raw": body_raw or body,
-            "body": body,
-            "body_excerpt": body[:500],
-            "tickers": _extract_tickers(title),
-        })
-
-    proxy = (proxy or _proxy_from_env() or "").strip()
-    if prefer_proxy and proxy:
-        for page in range(1, max_pages + 1):
-            try:
-                resp = _bounded_get_via_proxy(f"https://arca.live/b/stock?p={page}", proxy, timeout=18)
-                if _is_cloudflare_challenge(resp.text):
-                    _note_error("arca", "proxy: Cloudflare challenge")
-                    logger.warning("arca p%d proxy 응답이 Cloudflare challenge", page)
-                    continue
-                for post_id, text in _parse_arca_html(resp.text):
-                    _add(post_id, text)
-            except Exception as e:
-                logger.warning("arca p%d proxy 실패: %s", page, e)
-                _note_error("arca", f"proxy: {e}")
-        if events:
-            _LAST_ERRORS.pop("arca", None)
-            return [_classify_event(event) for event in events]
-
-    for page in range(1, max_pages + 1):
-        try:
-            # x-wait-for-selector: 게시글 행(.vrow) 렌더 완료까지 대기 — jina 부분 렌더
-            # (공지만 있는 11KB 응답·간헐 0건의 유력 원인) 재발 방지
-            resp = _bounded_get(f"https://r.jina.ai/http://arca.live/b/stock?p={page}",
-                                timeout=25, headers={"x-wait-for-selector": ".vrow"})
-            for match in link_pat.finditer(resp.text):
-                _add(match.group(2), " ".join(match.group(1).split()).replace("**", "").strip())
-        except Exception as e:
-            logger.warning("arca p%d jina 실패: %s", page, e)
-            _note_error("arca", f"jina: {e}")
-
-    if not events:
-        # 폴백: arca.live 직접 (jina 장애/레이트리밋 대응 — CF 차단이면 이것도 실패·헬스에 기록)
-        for page in range(1, max_pages + 1):
-            try:
-                resp = _bounded_get(f"https://arca.live/b/stock?p={page}", timeout=15)
-                for post_id, text in _parse_arca_html(resp.text):
-                    _add(post_id, text)
-            except Exception as e:
-                logger.warning("arca p%d 직접 폴백도 실패: %s", page, e)
-                _note_error("arca", f"직접: {e}")
-    if events:
-        _LAST_ERRORS.pop("arca", None)
-    return [_classify_event(event) for event in events]
-
-
-def fetch_arca_provider() -> list[dict]:
-    """Importable Arca provider entrypoint for the isolated source worker."""
-    try:
-        pages = max(0, min(20, int(os.getenv("STOCK_COLLECTOR_ARCA_PAGES", "2"))))
-    except (TypeError, ValueError):
-        pages = 2
-    return fetch_arca_events(max_pages=pages)
 
 
 def _telegram_text_from_fragment(fragment: str) -> str:
@@ -1268,24 +846,23 @@ def fetch_telegram_channel_events(channels: list[str] = TELEGRAM_NEWS_CHANNELS) 
         channel = channel.strip().lstrip("@")
         if not channel:
             continue
-        jina_messages: list[dict] = []
-        try:
-            resp = _bounded_get(f"https://r.jina.ai/http://t.me/s/{channel}", timeout=20)
-            markdown = resp.text
-            titles = [" ".join(m.group(1).split()) for m in re.finditer(r"\*\*([^*]+)\*\*", markdown)]
-            urls = re.findall(rf"https://t\.me/{re.escape(channel)}/\d+", markdown)
-            for idx, title in enumerate(titles):
-                jina_messages.append({
-                    "title": title[:180],
-                    "url": urls[idx] if idx < len(urls) else "",
-                    "body_raw": title[:TELEGRAM_BODY_MAX],
-                    "raw_html": title,
-                })
-        except Exception as e:
-            logger.warning("telegram:%s jina 수집 실패 — 직접 HTML 폴백 시도: %s", channel, e)
-
-        # 직접 HTML 카드 파싱을 canonical 경로로 사용한다. 실패할 때만 jina 제목을 이벤트화한다.
-        messages = _telegram_direct_messages(channel) or jina_messages
+        # 직접 HTML 카드가 canonical 경로다. 비었을 때만 jina 리더로 제목을 받아 이벤트화한다.
+        messages = _telegram_direct_messages(channel)
+        if not messages:
+            try:
+                resp = _bounded_get(f"https://r.jina.ai/http://t.me/s/{channel}", timeout=20)
+                markdown = resp.text
+                titles = [" ".join(m.group(1).split()) for m in re.finditer(r"\*\*([^*]+)\*\*", markdown)]
+                urls = re.findall(rf"https://t\.me/{re.escape(channel)}/\d+", markdown)
+                for idx, title in enumerate(titles):
+                    messages.append({
+                        "title": title[:180],
+                        "url": urls[idx] if idx < len(urls) else "",
+                        "body_raw": title[:TELEGRAM_BODY_MAX],
+                        "raw_html": title,
+                    })
+            except Exception as e:
+                logger.warning("telegram:%s jina 수집 실패: %s", channel, e)
 
         if not messages:
             logger.warning("telegram:%s 수집 0건 (jina·직접 모두) — 채널명/차단 확인 필요", channel)
@@ -1413,16 +990,25 @@ def fetch_news_rss_events(feeds=NEWS_RSS_FEEDS) -> list[dict]:
                 "source_url": url,
                 "title": item["title"],
                 "url": item["url"],
-                "published_at": item["published_at"],
+                "published_at": _rss_published_at(item["published_at"]),
                 "body_raw": item["body"],
                 "body": item["body"],
                 "body_excerpt": item["body"][:500],
                 "tags": [label],
                 "tickers": _extract_tickers(f"{item['title']} {item['body']}"),
+                "fulltext_status": "feed_blurb",
+                "body_raw_source": "rss_description",
+                "body_coverage": "partial",
+                "text_complete": False,
             })
     if errors and not events:
         raise RuntimeError("RSS fetch failed: " + "; ".join(errors[:4]))
     return [_classify_event(event) for event in events]
+
+
+def fetch_investing_news_events() -> list[dict]:
+    """Collect only the organizer-published Korean stock and economy RSS feeds."""
+    return fetch_news_rss_events(INVESTING_RSS_FEEDS)
 
 
 def _pct(current: float | None, base: float | None) -> float | None:
@@ -1992,12 +1578,12 @@ HEALTH_FILE = "source_health.json"
 
 # 소스별 "이만큼 수집 0이면 비정상" 임계(시간) — 크론 30분 주기 기준·주말 여유
 SOURCE_STALE_HOURS = {
-    "saveticker": 3,
     "yahoo_headline": 6,
-    "arca": 24,
     "telegram:*": 12,
     "rss:fed": 96,
     "rss:sec": 72,
+    "rss:investing_kr_stock": 6,
+    "rss:investing_kr_economy": 6,
     "rss:*": 36,
     "yahoo_finance": 24,
     "fred": 72,
@@ -2010,10 +1596,21 @@ SOURCE_STALE_HOURS = {
 
 def expected_sources() -> list[str]:
     """수집기가 시도해야 하는 소스 전체 (텔레그램은 채널별 분리 — 채널 단위 공백 감지)."""
-    return (["saveticker", "yahoo_headline", "arca"]
+    return (["yahoo_headline"]
             + [f"telegram:{c}" for c in TELEGRAM_NEWS_CHANNELS]
-            + [f"rss:{key}" for key, _url, _label in NEWS_RSS_FEEDS]
+            + [f"rss:{key}" for key, _url, _label in (*NEWS_RSS_FEEDS, *INVESTING_RSS_FEEDS)]
             + ["yahoo_finance", "fred", "worldgovernmentbonds", "polymarket", "kalshi", "economic_calendar"])
+
+
+def source_collection_mode(source: str, record: dict | None = None) -> str:
+    """Separate passive ingress from a sender with an expected delivery cadence."""
+    if source != "hermes_webhook":
+        return "scheduled"
+    mode = os.getenv("HERMES_SOURCE_COLLECTION_MODE")
+    if mode is None:
+        mode = (record or {}).get("collection_mode", "on_demand")
+    # Unknown configuration must not disable missing-delivery monitoring.
+    return "on_demand" if mode == "on_demand" else "scheduled"
 
 
 def update_source_health(events: list[dict], cache_dir: Path | str = DEFAULT_CACHE_DIR,
@@ -2033,7 +1630,8 @@ def update_source_health(events: list[dict], cache_dir: Path | str = DEFAULT_CAC
     import safe_io
 
     counts = Counter(str(e.get("source") or "") for e in events)
-    attempted = list(attempted_sources) if attempted_sources is not None else expected_sources()
+    attempted = (list(attempted_sources) if attempted_sources is not None
+                 else list(dict.fromkeys([*expected_sources(), *counts])))
     stats_by_source = run_stats or {}
     with safe_io.file_write_lock(str(path)):
         health: dict = {}
@@ -2184,7 +1782,9 @@ def stale_sources(health: dict | None = None, now: datetime | None = None,
 
     out = []
     for src, rec in sorted(health.items()):
-        if rec.get("availability") in {"blocked", "disabled", "unavailable"}:
+        if source_collection_mode(src, rec) == "on_demand":
+            continue
+        if rec.get("availability") in {"blocked", "disabled"}:
             continue
         limit = th.get(src) or th.get(f"{src.split(':')[0]}:*") or th.get(src.split(":")[0]) or 24
         last_ok = rec.get("last_success")
@@ -2203,46 +1803,9 @@ def stale_sources(health: dict | None = None, now: datetime | None = None,
 
 
 def collect_once(cache_dir: Path | str = DEFAULT_CACHE_DIR, now: datetime | None = None) -> tuple[int, int]:
-    from reports.source_pipeline import ProviderSpec, run_providers
+    from reports.source_pipeline import default_registry, run_providers
 
-    registry = [
-        ProviderSpec("saveticker", ("saveticker",), "news", fetch_saveticker_events, retries=1),
-        ProviderSpec(
-            "yahoo_headline",
-            ("yahoo_headline",),
-            "news",
-            fetch_yahoo_headline_events,
-            timeout_seconds=45,
-            retries=1,
-        ),
-        ProviderSpec(
-            "arca",
-            ("arca",),
-            "news",
-            fetch_arca_provider,
-            retries=1,
-        ),
-        ProviderSpec(
-            "telegram",
-            tuple(f"telegram:{channel}" for channel in TELEGRAM_NEWS_CHANNELS),
-            "news",
-            fetch_telegram_channel_events,
-            retries=1,
-        ),
-        ProviderSpec(
-            "news_rss",
-            tuple(f"rss:{key}" for key, _url, _label in NEWS_RSS_FEEDS),
-            "news",
-            fetch_news_rss_events,
-            timeout_seconds=45,
-            retries=1,
-        ),
-        ProviderSpec("yahoo_finance", ("yahoo_finance",), "market", fetch_market_snapshot_events, retries=1, mutable=True),
-        ProviderSpec("fred", ("fred",), "macro", fetch_fred_macro_events, retries=1, mutable=True),
-        ProviderSpec("worldgovernmentbonds", ("worldgovernmentbonds",), "macro", fetch_world_gov_bond_events, retries=1, mutable=True),
-        ProviderSpec("polymarket", ("polymarket",), "prediction", fetch_polymarket_events, mutable=True),
-        ProviderSpec("kalshi", ("kalshi",), "prediction", fetch_kalshi_events, retries=1, mutable=True),
-    ]
+    registry = [spec for spec in default_registry() if spec.group != "calendar"]
     result = run_providers(registry=registry, cache_dir=cache_dir, now=now)
     for name, stats in result["providers"].items():
         logger.info(

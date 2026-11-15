@@ -752,40 +752,6 @@ def test_context_pack_exposes_strategy_studio_state(monkeypatch, tmp_path):
     assert pack["strategy_studio"]["latest"]["name"] == "EMA trend"
 
 
-def test_ingest_arca_proxy(monkeypatch, tmp_path):
-    _isolate(monkeypatch, tmp_path)
-
-    from agent_console import context, storage
-    from reports import source_collector
-
-    monkeypatch.setattr(source_collector, "arca_proxy_status", lambda proxy=None: {"reachable": True, "proxy": proxy})
-    monkeypatch.setattr(
-        source_collector,
-        "fetch_arca_events",
-        lambda max_pages=2, proxy=None, prefer_proxy=False: [
-            {
-                "source": "arca",
-                "title": "📰뉴스 QQQ 반등",
-                "url": "https://arca.live/b/stock/444",
-                "category": "📰뉴스",
-                "tickers": ["QQQ"],
-            }
-        ],
-    )
-
-    result = context.ingest_arca_proxy(max_pages=1, proxy="socks5://127.0.0.1:1080")
-
-    assert result["ok"] is True
-    assert result["fetched"] == 1
-    assert result["changed"] == 1
-    # 단일 진실원 = lib.world_memory (콘솔 자체 테이블이 아니라 공용 타임라인에 적재)
-    from lib import world_memory
-
-    rows = world_memory.timeline(limit=5)
-    assert rows and rows[0]["title"].startswith("📰뉴스 QQQ")
-    assert rows[0]["source"] == "arca:proxy"
-    assert storage.list_memory_events() == []  # 콘솔 로컬 테이블엔 더 안 씀
-
 
 def test_context_pack_memory_reads_unified_world_memory(monkeypatch, tmp_path):
     """컨텍스트 팩 memory = lib.world_memory 타임라인 (크론·/ask 와 같은 축적)."""

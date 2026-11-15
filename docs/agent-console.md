@@ -15,7 +15,7 @@ Cloudflare로 접속 중인 기존 Streamlit 대시보드에서는 사이드바�
 - Portfolio Lab: 실제 자산 연동 없이 전략 가설, 비중, 손실한도, 운용 규칙을 저장한다.
 - Strategy Canvas: FinanceAgentGUI의 `portfolio-matrix-dsl` 방식으로 RSI 현금화 규칙을 실행하고, Sortino/Calmar/Ulcer/UPI/Beta까지 표준 평가 지표를 표시한다.
 - Local Install Prompt: 노트북에서 같은 콘솔을 설치하도록 붙여넣을 프롬프트를 제공한다.
-- Arca proxy ingest: 서버에 이미 열려 있는 SOCKS 터널(`socks5://127.0.0.1:1080`)을 이용해 아카라이브 주식채널 공개 글 조회를 시도하고, 성공한 글만 `source-cache`와 World Memory에 저장한다.
+- Arca 수집은 종료했다. 2026-11-14부터 arca.live가 Cloudflare challenge(403)만 반환하고 `r.jina.ai` 미러도 채널 헤더만 준다. 접근 통제를 우회하지 않으므로 수동 수집 버튼도 없다.
 
 ## 의도적으로 뺀 것
 
@@ -60,7 +60,6 @@ AGENT_CONSOLE_PORT=8798 bash scripts/run_agent_console.sh
 - `AGENT_CONSOLE_SHARED_MEMORY_ENABLED`: `0`이면 공유 메모리 기록을 비활성화한다.
 - `AGENT_CONSOLE_HOST`: 바인드 주소. 기본값은 `127.0.0.1`.
 - `AGENT_CONSOLE_PORT`: 포트. 기본값은 `8797`.
-- `STOCK_COLLECTOR_ARCA_PROXY`: Arca 조회에 사용할 프록시. 서버 기본 수동 버튼은 `socks5://127.0.0.1:1080`을 사용한다.
 - `STOCK_COLLECTOR_POLYMARKET_LIMIT`: Polymarket 이벤트 조회 개수. 기본값은 `80`.
 - `STOCK_COLLECTOR_POLYMARKET_MIN_VOLUME`: Polymarket market 최소 거래량 필터. 기본값은 `10000`.
 - `STOCK_COLLECTOR_POLYMARKET_KEYWORDS`: 쉼표로 구분한 Polymarket 필터 키워드. 기본값은 Fed, CPI, election, oil, Nvidia, AI, geopolitical 키워드 묶음이다.

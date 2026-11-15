@@ -422,6 +422,27 @@ def _looks_browser_dependent(status: int, text: str) -> bool:
     return status in {401, 403, 429, 503} and any(marker in lower for marker in markers)
 
 
+
+_SAVETICKER_DISCLAIMER = "본 콘텐츠는 투자 권유 목적이 아닌 정보 제공용입니다."
+
+
+def _strip_retired_news_boilerplate(text: str, title: str = "") -> str:
+    """저장된 SaveTicker 기사 HTML에서 상단 메타 헤더와 하단 면책조항을 뺀다.
+
+    신규 수집은 하지 않는다. 대기열에 남은 기사 본문을 정리할 때만 쓴다.
+    제목이 없으면 헤더를 자르지 않고, 제목 매칭이 실패하면 원문을 유지한다.
+    """
+    lines = text.splitlines()
+    title = (title or "").strip()
+    if title:
+        for i, line in enumerate(lines):
+            if title in line:
+                lines = lines[i + 1:]
+                break
+    cleaned = [ln for ln in lines if ln.strip() and ln.strip() != _SAVETICKER_DISCLAIMER]
+    return "\n".join(cleaned).strip()
+
+
 def _extract_article_text(html: str, title: str) -> str:
     if not html.strip():
         return ""
@@ -444,13 +465,7 @@ def _extract_article_text(html: str, title: str) -> str:
         if line and (not lines or line != lines[-1]):
             lines.append(line)
     text = "\n".join(lines).strip()
-    try:
-        from reports.source_collector import _strip_saveticker_boilerplate
-
-        text = _strip_saveticker_boilerplate(text, title)
-    except ImportError:
-        pass
-    return text.strip()
+    return _strip_retired_news_boilerplate(text, title)
 
 
 def _fetch_article(record: dict, *, fetcher, resolve_dns: bool, host_last: dict[str, float], robots_cache: dict) -> str:

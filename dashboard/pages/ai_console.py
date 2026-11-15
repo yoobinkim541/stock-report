@@ -1122,32 +1122,9 @@ def _strategy_canvas_backtest(
 
 def _connectors_tab():
     st.markdown("##### 로컬 커넥터")
-    c1, c2 = st.columns(2)
-    with c1:
-        st.markdown("**아카 — 서버 터널**")
-        proxy = os.getenv("STOCK_COLLECTOR_ARCA_PROXY", "socks5://127.0.0.1:1080")
-        try:
-            from reports import source_collector
-            status = source_collector.arca_proxy_status(proxy)
-        except Exception:
-            status = {"reachable": False, "proxy": proxy, "error": "unavailable"}
-        st.metric("터널", "연결" if status.get("reachable") else "끊김", help="로컬 터널")
-        if status.get("error"):
-            st.caption("터널 상태를 확인하지 못했습니다.")
-        pages = st.number_input("조회 페이지", min_value=1, max_value=5, value=2, step=1, key="arca_proxy_pages")
-        if st.button("아카 수집", type="primary", width="stretch"):
-            with st.spinner("아카를 터널로 조회 중..."):
-                result = context.ingest_arca_proxy(max_pages=int(pages), proxy=proxy)
-            _context_pack.clear()
-            if result.get("ok"):
-                st.success(f"수집 {result.get('fetched', 0)}건 · 캐시 {result.get('written', 0)}건 · 메모리 {result.get('changed', 0)}건")
-            else:
-                st.warning("아카 수집에 실패했습니다. 잠시 후 다시 시도하세요.")
-    with c2:
-        st.markdown("**토스 — 로컬 스냅샷 예정**")
-        st.markdown("- 읽기 전용 자산 스냅샷\n- 주문/매매 연결 없음\n- 보유·현금·거래내역 요약만 맥락 층에 반영")
+    st.markdown("**토스 — 로컬 스냅샷 예정**")
+    st.markdown("- 읽기 전용 자산 스냅샷\n- 주문/매매 연결 없음\n- 보유·현금·거래내역 요약만 맥락 층에 반영")
     st.code(
-        "아카: 서버 터널 127.0.0.1:1080 → 소스 캐시 + 시장 기억\n"
         "토스: 노트북 로컬 스냅샷 → ~/reports/local-connectors/*.json",
         language="text",
     )

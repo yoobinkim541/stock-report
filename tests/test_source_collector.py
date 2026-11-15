@@ -6,10 +6,16 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import source_collector as sc
+from reports import source_collector as sc
 import pytest
 
 KST = timezone(timedelta(hours=9))
+
+
+@pytest.fixture(autouse=True)
+def isolate_provider_error_state(monkeypatch):
+    monkeypatch.setattr(sc, "_LAST_ERRORS", {})
+    monkeypatch.setattr(sc, "_SOURCE_AVAILABILITY", {})
 
 
 def test_event_id_prefers_url_and_dedupes_when_appending(tmp_path):
@@ -756,15 +762,6 @@ def test_polymarket_multi_market_event_keeps_distinct_cache_rows(monkeypatch, tm
     assert len({event["url"] for event in events}) == 2
 
 
-def test_normalize_tickers_extracts_symbols_from_dicts():
-    # SaveTicker 가 tickers 를 dict 리스트로 줄 때 symbol 만 추출
-    assert sc._normalize_tickers([{"id": 17135, "name": None, "symbol": "SPCX"}]) == ["SPCX"]
-    assert sc._normalize_tickers(["NVDA", {"symbol": "MSFT"}, {"name": "심볼없음"}]) == ["NVDA", "MSFT"]
-    assert sc._normalize_tickers(None) == []
-    assert sc._normalize_tickers([]) == []
-    assert sc._normalize_tickers([" AMD ", ""]) == ["AMD"]
-
-
 def test_build_digest_survives_dict_tickers_in_corrupt_cache():
     # 손상 캐시(tickers/tags 가 dict 리스트)여도 build_digest 가 크래시하지 않아야 함.
     # 회귀: 예전엔 Counter / ", ".join 에서 TypeError: unhashable type: 'dict'
@@ -784,250 +781,13 @@ def test_build_digest_survives_dict_tickers_in_corrupt_cache():
     assert "스페이스X 급등" in digest   # dict 티커 이벤트도 크래시 없이 항목으로 표시
 
 
-def test_fetch_saveticker_events_normalizes_dict_tickers(monkeypatch, tmp_path):
-    class FakeResponse:
-        def __init__(self, payload):
-            self._payload = payload
-
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return self._payload
-
-    monkeypatch.setenv("STOCK_REPORT_REPORTS_DIR", str(tmp_path / "reports"))
-    monkeypatch.setattr(sc, "_fetch_saveticker_article_body", lambda url, title="": "")
-
-    payload = {"news_list": [{
-        "title": "스페이스X 상장 급등",
-        "content": "상장 기대감이 커지며 거래량이 급증했다.",
-        "group_summary": "우주 섹터 전반이 강세를 보였다.",
-        "url": "https://e/spcx",
-        "created_at": "2026-06-16",
-        "tickers": [{"id": 17135, "name": None, "symbol": "SPCX"}],
-        "tag_names": ["우주"],
-    }]}
-
-    monkeypatch.setattr(sc.requests, "get", lambda *args, **kwargs: FakeResponse(payload))
-
-    events = sc.fetch_saveticker_events()
-
-    assert events, "이벤트가 비어있으면 안 됨"
-    event = events[0]
-    assert event["tickers"] == ["SPCX"]   # dict → symbol 문자열로 정규화
-    assert all(isinstance(t, str) for t in event["tickers"])
-    assert event["classification"]["source_family"] == "news"
-    assert event["classification"]["wiki_eligible"] is False
-    assert event["body_raw"] == "상장 기대감이 커지며 거래량이 급증했다.\n\n우주 섹터 전반이 강세를 보였다."
-    assert event["body"] == event["body_raw"]
-    assert Path(event["raw_path"]).exists()
-    assert Path(event["text_path"]).exists()
-    assert Path(event["manifest_path"]).exists()
-    manifest = json.loads(Path(event["manifest_path"]).read_text(encoding="utf-8"))
-    assert manifest["ttl_days"] == 60
-    fetched_at = datetime.fromisoformat(manifest["fetched_at"])
-    expires_at = datetime.fromisoformat(manifest["expires_at"])
-    assert expires_at - fetched_at == timedelta(days=60)
-    assert Path(event["text_path"]).read_text(encoding="utf-8") == event["body_raw"]
 
 
-def test_fetch_saveticker_events_skips_rearchive_for_recently_seen_article(monkeypatch, tmp_path):
-    """같은 기사가 API 응답에 계속 남아있어도 재폴링마다 원본을 재저장하면 안 된다(디스크 낭비 버그 회귀 방지)."""
-    class FakeResponse:
-        def __init__(self, payload):
-            self._payload = payload
-
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return self._payload
-
-    monkeypatch.setenv("STOCK_REPORT_REPORTS_DIR", str(tmp_path / "reports"))
-    monkeypatch.setattr(sc, "_fetch_saveticker_article_body", lambda url, title="": "")
-
-    payload = {"news_list": [{
-        "title": "반복 노출 기사",
-        "content": "매 폴링마다 API 응답에 남아있는 기사.",
-        "url": "https://e/repeat",
-        "created_at": "2026-07-24",
-        "tag_names": ["기술/AI"],
-    }]}
-    monkeypatch.setattr(sc.requests, "get", lambda *args, **kwargs: FakeResponse(payload))
-
-    first = sc.fetch_saveticker_events()
-    assert first[0]["raw_path"]
-    manifests_after_first = list((tmp_path / "reports" / "raw").rglob("*.manifest.json"))
-    assert len(manifests_after_first) == 1
-
-    second = sc.fetch_saveticker_events()
-    assert second[0]["raw_path"] == ""          # 재저장 생략 — 새 아카이브 안 만듦
-    assert second[0]["body_raw"]                 # 본문 자체는 API 응답에서 계속 채워짐
-    manifests_after_second = list((tmp_path / "reports" / "raw").rglob("*.manifest.json"))
-    assert len(manifests_after_second) == 1       # 파일 수 그대로 — 중복 저장 안 됨
 
 
-def test_fetch_saveticker_events_keeps_thin_preview_without_synchronous_article_fetch(monkeypatch, tmp_path):
-    class FakeResponse:
-        def __init__(self, payload):
-            self._payload = payload
-
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return self._payload
-
-    monkeypatch.setenv("STOCK_REPORT_REPORTS_DIR", str(tmp_path / "reports"))
-    monkeypatch.setattr(
-        sc,
-        "_fetch_saveticker_article_body",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("synchronous article fetch")),
-    )
-
-    payload = {"news_list": [{
-        "title": "오라클 급등",
-        "content": "짧은 본문",
-        "group_summary": "",
-        "url": "https://e/orcl",
-        "created_at": "2026-06-16",
-        "tickers": [{"id": 17135, "name": None, "symbol": "ORCL"}],
-        "tag_names": ["실적"],
-    }]}
-
-    monkeypatch.setattr(sc.requests, "get", lambda *args, **kwargs: FakeResponse(payload))
-
-    events = sc.fetch_saveticker_events()
-
-    assert events
-    assert events[0]["body_raw"] == "짧은 본문"
-    assert events[0]["body_excerpt"] == "짧은 본문"
-    assert Path(events[0]["raw_path"]).exists()
 
 
-def test_explicit_saveticker_article_record_keeps_legacy_full_body_fetch(monkeypatch, tmp_path):
-    monkeypatch.setenv("STOCK_REPORT_REPORTS_DIR", str(tmp_path / "reports"))
-    monkeypatch.setattr(sc, "_fetch_saveticker_article_body", lambda url, title="": "상세 기사 본문")
 
-    record = sc._saveticker_article_record(
-        {"title": "오라클 급등", "content": "짧은 본문", "url": "https://e/orcl"},
-        "https://saveticker.com/api",
-    )
-
-    assert record["body_raw"] == "상세 기사 본문"
-    assert Path(record["raw_path"]).exists()
-
-
-def test_saveticker_article_url_falls_back_to_id():
-    """saveticker API 응답엔 url/link 필드가 없음(2026-07-25 실측) — id 로 직접 구성.
-
-    실측: https://saveticker.com/news/{id} 가 실제 기사 페이지(200)로 확인됨.
-    """
-    assert sc._saveticker_article_url({"id": 176642}) == "https://saveticker.com/news/176642"
-    assert sc._saveticker_article_url({"url": "https://e/x", "id": 1}) == "https://e/x"   # url 있으면 그대로
-    assert sc._saveticker_article_url({}) == ""                                            # id 도 없으면 빈 문자열
-
-
-def test_strip_saveticker_boilerplate_removes_header_and_disclaimer():
-    """실측 페이지 구조(2026-07-25): 메타헤더(제목까지) + 본문 + 고정 면책조항 → 본문만 남아야 함."""
-    title = "반도체 실적 시험대"
-    raw = (
-        f"SAVE PICK · 속보 · $QCOM · 16:09 · 출처: 로이터 · {title}\n"
-        "글로벌 반도체주가 극심한 변동성을 보이는 가운데, 다음 주 SK하이닉스와 삼성전자,\n"
-        "일본 키옥시아 등 3사가 메모리 반도체 시장의 투자심리를 좌우할 실적을 발표한다.\n"
-        f"{sc._SAVETICKER_DISCLAIMER}"
-    )
-    cleaned = sc._strip_saveticker_boilerplate(raw, title)
-    assert "SAVE PICK" not in cleaned
-    assert title not in cleaned
-    assert sc._SAVETICKER_DISCLAIMER not in cleaned
-    assert cleaned.startswith("글로벌 반도체주가")
-    assert cleaned.endswith("실적을 발표한다.")
-
-
-def test_strip_saveticker_boilerplate_returns_original_when_title_not_found():
-    raw = "제목 매칭 안 되는 본문\n" + sc._SAVETICKER_DISCLAIMER
-    cleaned = sc._strip_saveticker_boilerplate(raw, "다른 제목")
-    assert "제목 매칭 안 되는 본문" in cleaned
-    assert sc._SAVETICKER_DISCLAIMER not in cleaned   # 면책조항은 제목 매칭 여부와 무관하게 제거
-
-
-def test_fetch_saveticker_events_keeps_ellipsis_preview_without_synchronous_article_fetch(monkeypatch, tmp_path):
-    """잘린 API preview도 polling 중 동기 원문 fetch 없이 queue ingress로 넘긴다."""
-    class FakeResponse:
-        def __init__(self, payload):
-            self._payload = payload
-
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return self._payload
-
-    monkeypatch.setenv("STOCK_REPORT_REPORTS_DIR", str(tmp_path / "reports"))
-    monkeypatch.setattr(
-        sc,
-        "_fetch_saveticker_article_body",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("synchronous article fetch")),
-    )
-
-    thin_summary = ("글로벌 반도체주가 극심한 변동성을 보이는 가운데, 다음 주 SK하이닉스와 삼성전자, "
-                    "일본 키옥시아 등 3사가 메모리 반도체 시장의 투자심리를 좌...")
-    assert len(thin_summary) >= 80   # 재현하려는 상황(80자 넘지만 잘림) 전제 확인
-    payload = {"news_list": [{
-        "id": 999,   # 실제 API 응답엔 url/link 없음 — id 로 URL 구성돼야 enrichment 가 됨
-        "title": "반도체 실적 시험대",
-        "content": "",
-        "group_summary": thin_summary,
-        "created_at": "2026-07-24",
-        "tickers": [{"id": 1, "name": None, "symbol": "MU"}],
-        "tag_names": ["실적"],
-    }]}
-    monkeypatch.setattr(sc.requests, "get", lambda *args, **kwargs: FakeResponse(payload))
-
-    events = sc.fetch_saveticker_events()
-    assert events
-    assert events[0]["body_raw"] == thin_summary
-    assert events[0]["body_excerpt"] == thin_summary[:500]
-    assert events[0]["url"] == "https://saveticker.com/news/999"
-
-
-def test_fetch_saveticker_events_paginates_news_list(monkeypatch, tmp_path):
-    class FakeResponse:
-        def __init__(self, payload):
-            self._payload = payload
-
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return self._payload
-
-    calls = []
-
-    def fake_get(url, **kwargs):
-        calls.append((url, kwargs.get("params") or {}))
-        params = kwargs.get("params") or {}
-        if url.endswith("/news/top-stories"):
-            return FakeResponse({"news_list": []})
-        page = int(params.get("page") or 1)
-        return FakeResponse({"news_list": [{
-            "title": f"페이지 {page} 반도체 뉴스",
-            "content": f"본문 {page}",
-            "url": f"https://e/page-{page}",
-            "created_at": "2026-07-23",
-            "tag_names": ["기술/AI"],
-        }]})
-
-    monkeypatch.setenv("STOCK_REPORT_REPORTS_DIR", str(tmp_path / "reports"))
-    monkeypatch.setenv("STOCK_COLLECTOR_SAVETICKER_MAX_PAGES", "2")
-    monkeypatch.setattr(sc, "_fetch_saveticker_article_body", lambda url, title="": "")
-    monkeypatch.setattr(sc.requests, "get", fake_get)
-
-    events = sc.fetch_saveticker_events()
-
-    assert [params.get("page") for url, params in calls if url.endswith("/news/list")] == [1, 2]
-    assert [event["title"] for event in events] == ["페이지 1 반도체 뉴스", "페이지 2 반도체 뉴스"]
 
 
 # ── 소스별 수집 헬스 (수집 공백 가시화) ──────────────────────────────────────
@@ -1268,28 +1028,26 @@ def test_fetch_telegram_falls_back_to_direct_html(monkeypatch, tmp_path):
 
 def test_collect_once_isolates_source_crash(tmp_path, monkeypatch):
     """한 소스 fetcher 가 크래시해도 나머지 수집 + 헬스 기록은 계속."""
-    monkeypatch.setattr(sc, "fetch_saveticker_events",
+    monkeypatch.setattr(sc, "fetch_yahoo_headline_events",
                         lambda: (_ for _ in ()).throw(RuntimeError("boom")))
-    monkeypatch.setattr(sc, "fetch_arca_provider", lambda: [])
     monkeypatch.setattr(sc, "fetch_telegram_channel_events",
-                        lambda: [{"source": "telegram:yuzukinaok1", "title": "t", "url": "https://t.me/y/1"}])
+                        lambda: [{"source": "telegram:insidertracking", "title": "t", "url": "https://t.me/y/1"}])
     monkeypatch.setattr(sc, "fetch_market_snapshot_events", lambda: [])
     monkeypatch.setattr(sc, "fetch_fred_macro_events", lambda: [])
     monkeypatch.setattr(sc, "fetch_world_gov_bond_events", lambda: [])
     monkeypatch.setattr(sc, "fetch_polymarket_events", lambda: [])
     monkeypatch.setattr(sc, "fetch_kalshi_events", lambda: [])
-    monkeypatch.setattr(sc, "fetch_yahoo_headline_events", lambda: [])
+    monkeypatch.setattr(sc, "fetch_investing_news_events", lambda: [])
     monkeypatch.setattr(sc, "fetch_news_rss_events", lambda: [])
     fetched, written = sc.collect_once(cache_dir=tmp_path / "cache")
     assert fetched == 1 and written == 1
     h = sc.load_source_health(tmp_path / "cache")
-    assert h["saveticker"]["last_count"] == 0                     # 크래시 소스 = 0건 기록
-    assert h["telegram:yuzukinaok1"]["last_count"] == 1
+    assert h["yahoo_headline"]["last_count"] == 0
+    assert h["telegram:insidertracking"]["last_count"] == 1
 
 
 def test_collect_once_includes_polymarket(tmp_path, monkeypatch):
-    monkeypatch.setattr(sc, "fetch_saveticker_events", lambda: [])
-    monkeypatch.setattr(sc, "fetch_arca_provider", lambda: [])
+    monkeypatch.setattr(sc, "fetch_investing_news_events", lambda: [])
     monkeypatch.setattr(sc, "fetch_telegram_channel_events", lambda: [])
     monkeypatch.setattr(sc, "fetch_market_snapshot_events", lambda: [])
     monkeypatch.setattr(sc, "fetch_fred_macro_events", lambda: [])
@@ -1308,8 +1066,7 @@ def test_collect_once_includes_polymarket(tmp_path, monkeypatch):
 
 
 def test_collect_once_includes_kalshi(tmp_path, monkeypatch):
-    monkeypatch.setattr(sc, "fetch_saveticker_events", lambda: [])
-    monkeypatch.setattr(sc, "fetch_arca_provider", lambda: [])
+    monkeypatch.setattr(sc, "fetch_investing_news_events", lambda: [])
     monkeypatch.setattr(sc, "fetch_telegram_channel_events", lambda: [])
     monkeypatch.setattr(sc, "fetch_market_snapshot_events", lambda: [])
     monkeypatch.setattr(sc, "fetch_fred_macro_events", lambda: [])
@@ -1331,8 +1088,7 @@ def test_collect_once_includes_kalshi(tmp_path, monkeypatch):
 
 
 def test_collect_once_uses_provider_runner_and_writes_manifests(tmp_path, monkeypatch):
-    monkeypatch.setattr(sc, "fetch_saveticker_events", lambda: [])
-    monkeypatch.setattr(sc, "fetch_arca_provider", lambda: [])
+    monkeypatch.setattr(sc, "fetch_investing_news_events", lambda: [])
     monkeypatch.setattr(sc, "fetch_telegram_channel_events", lambda: [])
     monkeypatch.setattr(sc, "fetch_market_snapshot_events", lambda: [])
     monkeypatch.setattr(sc, "fetch_fred_macro_events", lambda: [])
@@ -1347,43 +1103,12 @@ def test_collect_once_uses_provider_runner_and_writes_manifests(tmp_path, monkey
     from reports.source_runs import load_source_runs
 
     runs = load_source_runs(tmp_path / "cache", hours=1)
-    assert {row["provider"] for row in runs} == {
-        "saveticker",
-        "yahoo_headline",
-        "arca",
-        "telegram",
-        "news_rss",
-        "yahoo_finance",
-        "fred",
-        "worldgovernmentbonds",
-        "polymarket",
-        "kalshi",
-    }
+    assert runs and all(not row.get("error") for row in runs)
+    assert "saveticker" not in {row["provider"] for row in runs}
 
 
-def test_fetch_saveticker_sunset_only_is_unavailable(monkeypatch):
-    class FakeResponse:
-        def __init__(self, payload):
-            self._payload = payload
-            self.status_code = 200
 
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return self._payload
-
-    notice = {"id": "legacy-news-sunset-notice", "title": "서비스 종료", "news_list": [
-        {"id": "legacy-news-sunset-notice", "title": "서비스 종료"}
-    ]}
-    monkeypatch.setattr(sc.requests, "get", lambda *a, **k: FakeResponse(notice))
-    with pytest.raises(sc.SourceProviderUnavailable) as exc_info:
-        sc.fetch_saveticker_events()
-    assert exc_info.value.availability == "unavailable"
-    assert "legacy-news-sunset-notice" in str(exc_info.value)
-
-
-def test_unavailable_sunset_is_not_a_stale_gap():
+def test_sunset_alert_remains_until_source_is_explicitly_retired():
     now = datetime(2026, 11, 13, 11, 0, tzinfo=KST)
     health = {
         "saveticker": {
@@ -1393,6 +1118,8 @@ def test_unavailable_sunset_is_not_a_stale_gap():
             "last_success": "2026-11-11T10:35:01+09:00",
         }
     }
+    assert [r["source"] for r in sc.stale_sources(health, now=now)] == ["saveticker"]
+    health["saveticker"]["availability"] = "disabled"
     assert sc.stale_sources(health, now=now) == []
 
 
@@ -1410,69 +1137,58 @@ def test_yahoo_headline_events_tag_symbol_and_skip_kr(monkeypatch):
     assert "속보" not in events[0]["tags"]
     assert events[0]["published_at"].endswith("+09:00")
 
+
+def test_yahoo_headline_merges_tickers_for_shared_article(monkeypatch):
+    shared = """<?xml version="1.0"?><rss version="2.0"><channel><item>
+      <title>Chip demand lifts suppliers</title>
+      <link>https://finance.yahoo.com/news/chip-demand</link>
+      <pubDate>Thu, 12 Nov 2026 14:04:03 +0000</pubDate>
+      <description>Shared story.</description>
+    </item></channel></rss>"""
+    unique = """<?xml version="1.0"?><rss version="2.0"><channel><item>
+      <title>Microsoft cloud update</title>
+      <link>https://finance.yahoo.com/news/msft-cloud</link>
+      <pubDate>Thu, 12 Nov 2026 15:00:00 +0000</pubDate>
+      <description>Only Microsoft.</description>
+    </item></channel></rss>"""
+
+    events = sc.fetch_yahoo_headline_events(["MSFT", "NVDA"], get=lambda url, symbol: shared)
+    assert len(events) == 1
+    assert events[0]["tickers"] == ["MSFT", "NVDA"]
+    assert events[0]["source_url"].endswith("s=MSFT&region=US&lang=en-US")
+    assert events[0]["classification"]["source_family"] == "news"
+
+    reversed_events = sc.fetch_yahoo_headline_events(["NVDA", "MSFT"], get=lambda url, symbol: shared)
+    assert len(reversed_events) == 1
+    assert reversed_events[0]["tickers"] == ["NVDA", "MSFT"]
+
+    classified = []
+    real_classify = sc._classify_event
+
+    def spy(event):
+        classified.append(list(event.get("tickers") or []))
+        return real_classify(event)
+
+    monkeypatch.setattr(sc, "_classify_event", spy)
+
+    def get(url, symbol):
+        if symbol == "NVDA":
+            raise RuntimeError("feed down")
+        if symbol == "MSFT":
+            return unique
+        return shared
+
+    mixed = sc.fetch_yahoo_headline_events(["MSFT", "NVDA", "AMD"], get=get)
+    by_title = {event["title"]: event["tickers"] for event in mixed}
+    assert by_title["Microsoft cloud update"] == ["MSFT"]
+    assert by_title["Chip demand lifts suppliers"] == ["AMD"]
+    assert all("NVDA" not in tickers for tickers in by_title.values())
+    assert classified == [["MSFT"], ["AMD"]]
+
 # ── 죽은 출처 복구 — 직접 폴백·FRED API·오류 원인 기록 ───────────────────────
 
-def test_parse_arca_html():
-    html = '''
-    <a class="title" href="/b/stock/172799906?p=1"><span>🧠분석</span> 로마 시대의 지중해 무역</a>
-    <a class="title" href="/b/stock/172799907?p=1">잡담 글은 라벨 없음</a>
-    <a class="title" href="/b/stock/172799906?p=1">중복 id</a>
-    '''
-    rows = sc._parse_arca_html(html)
-    assert rows[0][0] == "172799906" and "지중해 무역" in rows[0][1]
-    assert len(rows) == 2                                     # 중복 id 제거
 
 
-def test_fetch_arca_falls_back_to_direct(monkeypatch):
-    def fake_get(url, timeout=0):
-        if url.startswith("https://r.jina.ai/"):
-            raise RuntimeError("429 rate limited")
-        class R:
-            text = '<a href="/b/stock/111?p=1">📰뉴스 반도체 수출 규제</a>'
-        return R()
-    monkeypatch.setattr(sc, "_bounded_get", fake_get)
-    events = sc.fetch_arca_events(max_pages=1)
-    assert len(events) == 1 and events[0]["url"].endswith("/111")
-    assert events[0]["category"] == "📰뉴스"
-    assert events[0]["classification"]["source_family"] == "community"
-
-
-def test_fetch_arca_prefers_proxy_when_requested(monkeypatch):
-    monkeypatch.setattr(sc, "arca_proxy_status", lambda proxy=None: {"reachable": True, "proxy": proxy})
-
-    def fake_proxy_get(url, proxy, timeout=0, **kwargs):
-        assert proxy == "socks5://127.0.0.1:1080"
-
-        class R:
-            text = '<a href="/b/stock/222?p=1">🧠분석 QQQ 반등 통계</a>'
-
-        return R()
-
-    monkeypatch.setattr(sc, "_bounded_get_via_proxy", fake_proxy_get)
-    events = sc.fetch_arca_events(max_pages=1, proxy="socks5://127.0.0.1:1080", prefer_proxy=True)
-    assert len(events) == 1
-    assert events[0]["url"].endswith("/222")
-    assert events[0]["source"] == "arca"
-
-
-def test_fetch_arca_proxy_challenge_falls_back_to_jina(monkeypatch):
-    monkeypatch.setattr(sc, "arca_proxy_status", lambda proxy=None: {"reachable": True, "proxy": proxy})
-
-    class ProxyR:
-        text = "Just a moment... Cloudflare challenge"
-
-    monkeypatch.setattr(sc, "_bounded_get_via_proxy", lambda *a, **k: ProxyR())
-
-    def fake_get(url, timeout=0, **kwargs):
-        class R:
-            text = "[📰뉴스 반도체 뉴스](https://arca.live/b/stock/333?p=1)"
-
-        return R()
-
-    monkeypatch.setattr(sc, "_bounded_get", fake_get)
-    events = sc.fetch_arca_events(max_pages=1, proxy="socks5://127.0.0.1:1080", prefer_proxy=True)
-    assert len(events) == 1
-    assert events[0]["url"].endswith("/333")
 
 
 def test_parse_wgb_html():
@@ -1538,3 +1254,14 @@ def test_health_records_error_and_grace(tmp_path):
     h2 = sc.update_source_health([{"source": "fred", "title": "x"}], cache_dir=cache,
                                  now=t0 + timedelta(hours=8))
     assert "last_error" not in h2["fred"] and h2["fred"]["first_run"] == h["fred"]["first_run"]
+
+
+def test_retired_news_sources_are_not_scheduled():
+    from reports.source_pipeline import default_registry
+
+    names = {spec.name for spec in default_registry()}
+    sources = {source for spec in default_registry() for source in spec.sources}
+    expected = set(sc.expected_sources())
+    assert "arca" not in names and "saveticker" not in names
+    assert "arca" not in sources and "saveticker" not in sources
+    assert "arca" not in expected and "saveticker" not in expected

@@ -528,15 +528,39 @@ def test_market_treemap_tech_subcategories():
     assert tr.values[ids.index("sub:기술/반도체")] == 3e12
 
 
-def test_market_treemap_hides_labels_too_small_to_read_instead_of_shrinking_them():
-    """실측(2026-09-05): 모바일(390px 폭)에서 트리맵을 열면 타일이 잘게 쪼개져
-    라벨이 깨알같이 작아져 못 읽는 수준으로 나왔다 — textfont 크기가 고정이라
-    작은 타일에도 억지로 글자를 욱여넣은 게 원인. uniformtext(mode=hide)를 쓰면
-    최소 크기 밑으로 내려가는 라벨은 아예 숨겨서(작게 찌그러뜨리지 않고),
-    화면 크기와 무관하게 보이는 라벨은 항상 읽을 수 있는 크기를 유지한다."""
-    fig = charts.market_treemap(_HEAT_ROWS)
-    assert fig.layout.uniformtext.mode == "hide"
-    assert fig.layout.uniformtext.minsize and fig.layout.uniformtext.minsize >= 8
+def test_market_treemap_prioritizes_ticker_for_small_tiles():
+    rows = [
+        {"ticker": "BIG", "name": "Large company", "tile": "Large display name", "sector_kr": "기술", "market_cap": 1e12, "pct": 1.5},
+        {"ticker": "SMOL", "name": "Small company", "tile": "Long display name", "sector_kr": "기술",
+         "market_cap": 1e8, "pct": -2.25},
+    ]
+    fig = charts.market_treemap(rows)
+    tr = fig.data[0]
+    small = list(tr.ids).index("t:SMOL")
+    large = list(tr.ids).index("t:BIG")
+    assert tr.text[small] == "SMOL"
+    assert "BIG" in tr.text[large] and "+1.50%" in tr.text[large]
+    assert tr.labels[small] == "SMOL"
+    assert tr.customdata[small] == "Small company"
+    assert tr.hovertext[small] == "-2.25%"
+    assert "%{hovertext}" in tr.hovertemplate
+    assert fig.layout.uniformtext.mode != "hide"
+
+
+def test_market_treemap_small_tiles_keep_ticker_and_move_pct_to_hover():
+    """실측(2026-11-15): 러셀 2000 맵은 모든 타일에 `티커<br>등락%` 두 줄을 넣고 작은 글자를
+    숨기다 보니 2,000개 중 77개만 글자가 보였다. 좁은 타일은 티커만 적고 등락%는 hover 로."""
+    rows = [{"ticker": "BIG", "name": "Big", "sector_kr": "기술", "market_cap": 9e11, "pct": 1.0}] + [
+        {"ticker": f"S{i}", "name": f"Small {i}", "sector_kr": "금융", "market_cap": 1e9, "pct": -0.5}
+        for i in range(700)]
+    fig = charts.market_treemap(rows)
+    tr = fig.data[0]
+    ids = list(tr.ids)
+    assert tr.text[ids.index("t:BIG")] == "BIG<br>+1.00%"
+    assert tr.text[ids.index("t:S1")] == "S1"
+    assert tr.customdata[ids.index("t:S1")] == "Small 1"
+    assert tr.hovertext[ids.index("t:S1")] == "-0.50%"
+    assert fig.layout.height > charts.market_treemap(rows[:100]).layout.height   # 조밀한 맵은 캔버스를 키운다
 
 
 def test_market_treemap_clamps_and_empty():

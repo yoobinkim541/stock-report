@@ -331,17 +331,6 @@ def format_kst_time(iso_text: Optional[str]) -> str:
         return ""
 
 
-def fetch_saveticker_json(path: str, params: Optional[dict] = None) -> Optional[dict]:
-    """Fetch JSON from SaveTicker's public API."""
-    base = os.getenv("SAVE_TICKER_API_BASE", "https://saveticker.com/api")
-    url = f"{base.rstrip('/')}/{path.lstrip('/')}"
-    try:
-        resp = requests.get(url, headers=HEADERS, params=params, timeout=12)
-        resp.raise_for_status()
-        return resp.json()
-    except Exception:
-        return None
-
 
 def load_cached_source_digest() -> str:
     """Return a recent source-cache digest if the collector cache is available."""
@@ -389,91 +378,9 @@ def format_news_item(item: dict, include_snippet: bool = True) -> str:
     return line
 
 
-ARCA_STOCK_LABELS = ("🧠분석", "📰뉴스", "ℹ️정보", "실적")
-ARCA_STOCK_MAX_PAGES = 5
-ARCA_STOCK_MAX_POSTS = 8
 
 
-def fetch_arca_stock_markdown(page: int = 1) -> Optional[str]:
-    """Fetch Arca stock channel listing from the r.jina.ai text mirror."""
-    url = f"https://r.jina.ai/http://arca.live/b/stock?p={page}"
-    try:
-        resp = requests.get(url, headers=HEADERS, timeout=20)
-        resp.raise_for_status()
-        return resp.text
-    except Exception:
-        return None
 
-
-def parse_arca_stock_posts(markdown: str) -> list[dict]:
-    """Parse Arca stock listing markdown into structured relevant posts."""
-    if not markdown:
-        return []
-
-    posts = []
-    seen_ids = set()
-    link_pat = re.compile(r"\[([^\]]+)\]\(https://arca\.live/b/stock/(\d+)\?p=(\d+)\)")
-
-    for match in link_pat.finditer(markdown):
-        link_text = " ".join(match.group(1).split()).replace("**", "").strip()
-        post_id = match.group(2)
-        if post_id in seen_ids:
-            continue
-        if not any(label in link_text for label in ARCA_STOCK_LABELS):
-            continue
-
-        header = re.match(rf"^(?P<num>\d+)\s*(?P<label>{'|'.join(map(re.escape, ARCA_STOCK_LABELS))})\s+(?P<rest>.+)$", link_text)
-        if not header:
-            continue
-
-        body = header.group("rest").strip()
-        meta = re.match(
-            r"^(?P<title>.*?)(?:\s+\[\d+\])?\s+(?P<author>\S+)\s+(?P<when>(?:\d{2}:\d{2}|\d{4}\.\d{2}\.\d{2}))\s+(?P<views>\d+)\s+(?P<likes>\d+)$",
-            body,
-        )
-        if not meta:
-            continue
-
-        seen_ids.add(post_id)
-        title = compact_text(meta.group("title").strip(), 90)
-        posts.append(
-            {
-                "id": post_id,
-                "url": f"https://arca.live/b/stock/{post_id}",
-                "category": header.group("label"),
-                "title": title,
-                "author": meta.group("author").strip(),
-                "when": meta.group("when").strip(),
-                "views": meta.group("views"),
-                "likes": meta.group("likes"),
-            }
-        )
-
-    return posts
-
-
-def fetch_arca_stock_posts(max_pages: int = ARCA_STOCK_MAX_PAGES, limit: int = ARCA_STOCK_MAX_POSTS) -> list[dict]:
-    """Fetch recent relevant Arca stock posts across a few pages."""
-    posts = []
-    seen = set()
-    for page in range(1, max_pages + 1):
-        markdown = fetch_arca_stock_markdown(page)
-        for post in parse_arca_stock_posts(markdown or ""):
-            if post["id"] in seen:
-                continue
-            seen.add(post["id"])
-            posts.append(post)
-            if len(posts) >= limit:
-                return posts
-    return posts
-
-
-def format_arca_post(post: dict) -> str:
-    """Format a parsed Arca post for the report."""
-    return (
-        f"- [{post['title']}]({post['url']})"
-        f" ({post['category']} · {post['author']} · {post['when']} · 조회 {post['views']} · 추천 {post['likes']})"
-    )
 
 
 # ─────────────────────────────────────────────
@@ -581,36 +488,8 @@ def section_2_top_news() -> str:
     lines.append("## 2. 📰 주요 뉴스 & 이슈 (Top News)")
     lines.append("")
 
-    # 1) SaveTicker top stories: market-wide headlines
-    top_stories = []
-    data = fetch_saveticker_json("news/top-stories")
-    if data and data.get("news_list"):
-        top_stories = data["news_list"][:5]
-
-    # 2) SaveTicker portfolio-related news via ticker filter
-    portfolio_news = []
-    portfolio_filter = ",".join(PORTFOLIO_TICKERS)
-    data = fetch_saveticker_json(
-        "news/list",
-        params={"page": 1, "page_size": 6, "sort": "created_at_desc", "tickers": portfolio_filter},
-    )
-    if data and data.get("news_list"):
-        portfolio_news = data["news_list"][:6]
-
-    # 3) Keep a small fallback path for resilience
     headlines = []
     seen_titles = set()
-
-    def add_news_batch(batch, prefix):
-        for item in batch:
-            title = item.get("title") or ""
-            if not title or title in seen_titles:
-                continue
-            seen_titles.add(title)
-            headlines.append((prefix, item))
-
-    add_news_batch(top_stories, "시장")
-    add_news_batch(portfolio_news, "보유종목")
 
     if len(headlines) < 6:
         try:
@@ -699,15 +578,6 @@ def section_2_top_news() -> str:
     cached_digest = load_cached_source_digest()
     if cached_digest:
         lines.append(_compact_cached_digest(cached_digest).rstrip())
-        lines.append("")
-
-    arca_posts = fetch_arca_stock_posts()
-    if arca_posts:
-        lines.append("### 아카라이브 주식 채널 최신 글 (분석/뉴스/정보/실적)")
-        lines.append("")
-        lines.append(f"- 최근 {ARCA_STOCK_MAX_PAGES}페이지에서 {len(arca_posts)}건의 관련 글을 확인했습니다.")
-        for post in arca_posts[:ARCA_STOCK_MAX_POSTS]:
-            lines.append(format_arca_post(post))
         lines.append("")
 
     return "\n".join(lines)
@@ -1338,7 +1208,7 @@ def build_report() -> str:
     lines = []
     lines.append(f"# 📊 주식시장 일일 리포트")
     lines.append(f"**발행일**: {TODAY_STR} (KST 기준)")
-    lines.append(f"**데이터 출처**: Yahoo Finance, SaveTicker API, Google News RSS, CNN Money, Arca Live (r.jina.ai mirror)")
+    lines.append(f"**데이터 출처**: Yahoo Finance, Google News RSS, CNN Money")
     lines.append("---")
     lines.append("")
 

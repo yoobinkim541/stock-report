@@ -57,12 +57,15 @@ def diff_holdings(current: list[dict], fetched: list[dict]) -> list[str]:
 
 def update_overseas_holdings(holdings: list[dict], *, source: str,
                              cash_usd: float | None = None,
-                             portfolio_path: str | None = None) -> str:
+                             portfolio_path: str | None = None,
+                             record_trades: bool = True) -> str:
     """overseas_general.holdings_usd(+cash_usd) 갱신 — can_apply(source) 확인은 호출부 책임.
 
     holdings: [{ticker, name, shares, avg_price_usd, current_price_usd,
                 cost_usd, value_usd, pnl_usd, return_pct}]  (USD 종목만 넣을 것)
     cash_usd: 예수금(주문가능금액). None 이면 기존 값 유지(조회 실패 시 덮어쓰지 않음).
+    record_trades: 수량 변화를 추정 체결로 원장에 남길지 — 브로커 거래내역을 따로 기록하는
+    소스는 False 로 꺼서 같은 체결이 두 번 찍히지 않게 한다.
     반환: 사람용 요약 문자열.
     """
     path = portfolio_path or PORTFOLIO_PATH
@@ -127,7 +130,7 @@ def update_overseas_holdings(holdings: list[dict], *, source: str,
         store.shadow_doc("portfolio_snapshot", snap)
     except Exception as e:
         logger.warning("store 그림자 동기화 실패(무시): %s", e)
-    for rec in trade_recs:
+    for rec in trade_recs if record_trades else []:
         try:
             trade_events.record_trade(**rec)
         except Exception as e:
@@ -138,6 +141,50 @@ def update_overseas_holdings(holdings: list[dict], *, source: str,
     if cash_usd is not None:
         lines.append(f"  예수금 ${cash_usd:,.2f}")
     return "\n".join(lines) or "(보유 없음)"
+
+
+def update_fractional_holdings(holdings: list[dict], *, source: str,
+                               portfolio_path: str | None = None) -> list[str]:
+    """overseas_fractional.holdings 를 최신 값으로 완전 대체 — can_apply(source) 확인은 호출부 책임.
+
+    holdings: update_overseas_holdings 와 같은 행 모양(소수점 보유분만). 전량 매도된 종목은
+    목록에 없으므로 스냅샷에서도 빠진다. summary 는 행 합계로 다시 계산한다.
+    반환: 종목이 새로 생기거나 사라진 변경 줄(수량만 바뀐 날은 빈 목록).
+    """
+    path = portfolio_path or PORTFOLIO_PATH
+    if PROJECT_DIR not in sys.path:
+        sys.path.insert(0, PROJECT_DIR)
+    import safe_io
+
+    with safe_io.file_write_lock(path):
+        shutil.copy2(path, path + ".bak")
+        with open(path, encoding="utf-8") as f:
+            snap = json.load(f)
+        sect = snap.setdefault("overseas_fractional", {})
+        before = {str(h.get("ticker", "")).upper(): float(h.get("shares", 0) or 0)
+                  for h in sect.get("holdings", []) if h.get("ticker")}
+        after = {str(h.get("ticker", "")).upper(): float(h.get("shares", 0) or 0) for h in holdings}
+        cost = sum(float(h.get("cost_usd", 0) or 0) for h in holdings)
+        value = sum(float(h.get("value_usd", 0) or 0) for h in holdings)
+        sect["holdings"] = list(holdings)
+        sect["summary"] = {
+            "total_cost_usd": round(cost, 4), "total_value_usd": round(value, 4),
+            "total_pnl_usd": round(value - cost, 4),
+            "total_return_pct": round((value / cost - 1) * 100, 2) if cost > 0 else 0.0,
+        }
+        snap["last_fractional_sync"] = datetime.now().isoformat()
+        snap["last_fractional_sync_source"] = source
+        safe_io.atomic_write_json(path, snap)
+
+    try:
+        import store
+        store.shadow_doc("portfolio_snapshot", snap)
+    except Exception as e:
+        logger.warning("store 그림자 동기화 실패(무시): %s", e)
+
+    lines = [f"➕ {tk}: {after[tk]:g}주" for tk in sorted(set(after) - set(before))]
+    lines += [f"➖ {tk}: {before[tk]:g}주 → 전량 매도·전환" for tk in sorted(set(before) - set(after))]
+    return lines
 
 
 def load_current_overseas(portfolio_path: str | None = None) -> list[dict]:

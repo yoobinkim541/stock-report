@@ -243,6 +243,7 @@ _OWNER_MENU = [
     {"command": "earnings",  "description": "실적·밸류에이션 — PER/PBR/ROE·서프라이즈·PEAD (예: /earnings NVDA)"},
     {"command": "indicators","description": "종목 기술적 지표 — RSI·이동평균·모멘텀·52주 위치 (예: /indicators QQQ)"},
     {"command": "signals",   "description": "ML·단기 신호 (rank|entry|intraday|lev|meta) — 정보·표시용"},
+    {"command": "save",      "description": "뉴스 수집 전환 안내 — SaveTicker 종료·대체 소스"},
 ]
 
 # 읽기전용 게스트 메뉴 (default·all_private_chats scope — 소유자 메뉴엔 노출 안 함)
@@ -574,7 +575,7 @@ def keep_typing(chat_id: str):
 
 
 def get_updates(offset: int | None = None) -> list | None:
-    params: dict = {"timeout": POLL_TIMEOUT, "allowed_updates": ["message"]}
+    params: dict = {"timeout": POLL_TIMEOUT, "allowed_updates": ["message", "callback_query"]}
     if offset is not None:
         params["offset"] = offset
     resp = _api("getUpdates", _request_timeout=POLL_TIMEOUT + 10, **params)
@@ -2099,6 +2100,40 @@ def _dispatch_phase(chat_id: str, args: list):
         logger.exception("dispatch /phase")
 
 
+def _dispatch_save(chat_id: str, args: list):
+    """/save — SaveTicker 뉴스 종료·대체 소스 안내 (소유자 전용)."""
+    from bot.saveticker_commands import handle
+    handle(chat_id, args, send_fn=send)
+
+
+def _handle_save_recovery_callback(update: dict) -> bool:
+    """옛 인라인 버튼(savecheck:/saveopen: + 24 hex)을 종료 안내로 넘긴다.
+
+    다른 prefix 는 소비하지 않는다. 소유자 채팅·소유자 사용자·형식 일치를 모두
+    만족할 때만 /save 를 큐에 넣고, 아니면 거부 문구로 callback 만 응답한다.
+    """
+    callback = update.get("callback_query", {})
+    data = callback.get("data", "")
+    if not isinstance(data, str) or not data.startswith(("savecheck:", "saveopen:")):
+        return False
+    chat_id = str(callback.get("message", {}).get("chat", {}).get("id", ""))
+    user_id = str(callback.get("from", {}).get("id", ""))
+    owner_user = os.getenv("STOCK_BOT_OWNER_USER_ID", str(OWNER_CHAT_ID))
+    allowed = (
+        chat_id == str(OWNER_CHAT_ID)
+        and user_id == owner_user
+        and re.fullmatch(r"(?:savecheck|saveopen):[a-f0-9]{24}", data)
+    )
+    _api(
+        "answerCallbackQuery",
+        callback_query_id=callback.get("id"),
+        text="SaveTicker 뉴스 수집은 종료되었습니다." if allowed else "소유자만 확인할 수 있습니다.",
+    )
+    if allowed:
+        _DISPATCH_Q.put(("/save", chat_id, "owner"))
+    return True
+
+
 _COMMAND_HANDLERS = {
     "/report": _dispatch_report,
     "/signals": _dispatch_signals,   # 무엣지 신호 우산 (구 ranking·entry·intraday·leverage·meta)
@@ -2114,6 +2149,7 @@ _COMMAND_HANDLERS = {
     "/evolve": _dispatch_evolve,
     "/tax": _dispatch_tax,
     "/ask": _dispatch_ask,
+    "/save": _dispatch_save,
     "/apply_snapshot": _dispatch_apply_snapshot,
     # 읽기전용 게스트 명령 (소유자도 사용 가능)
     "/market":      lambda chat_id, args: _dispatch_guest_market(chat_id),
@@ -2263,6 +2299,8 @@ def _attachment_worker():
 
 def _ingest_update(upd: dict) -> None:
     """업데이트 1건 분류 — 권한 확인 후 첨부/일반 텍스트/명령을 워커 큐로 넘긴다 (폴링 비차단)."""
+    if _handle_save_recovery_callback(upd):
+        return
     msg     = upd.get("message", {})
     chat_id = str(msg.get("chat", {}).get("id", ""))
     text    = msg.get("text", "")

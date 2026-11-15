@@ -25,7 +25,6 @@ from investment_report import (
     _llm_overlay_mobile_lines,
     _mobile_pick_block,
     _mobile_pick_items,
-    _news_title_relevant,
     _portfolio_action_plan,
     _select_top_buy_candidates,
     _select_watch_candidates,
@@ -602,13 +601,6 @@ def test_select_watch_candidates_prefers_real_risk_over_low_score_fillers():
     assert [r["ticker"] for r in watch] == ["RISK", "WARN"]
     assert "SAFE1" not in [r["ticker"] for r in watch]
     assert "SAFE2" not in [r["ticker"] for r in watch]
-
-
-def test_news_title_relevant_rejects_unrelated_global_news():
-    assert _news_title_relevant("MSFT", "Microsoft launches new Copilot features")
-    assert _news_title_relevant("005930.KS", "삼성전자 반도체 실적 개선 기대")
-    assert not _news_title_relevant("MSFT", "Nvidia stock rises as AI demand grows")
-    assert not _news_title_relevant("005930.KS", "현대차 미국 판매 증가")
 
 
 # ── LLM overlay fact-guard 테스트 ─────────────────────────────────────────

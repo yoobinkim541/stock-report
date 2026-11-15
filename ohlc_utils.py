@@ -156,3 +156,35 @@ def align_common_index(a, b, start=None):
         return x.reindex(common), y.reindex(common)
     except Exception:
         return None, None
+
+
+def repair_display_ohlc(df):
+    """표시용 사본에서 OHLC 가 비어 있는 봉을 정리한다 (원본·ML 경로는 건드리지 않음).
+
+    yfinance 는 장중·마감 직후 최신 일봉을 Open/High/Low=NaN(때로 Close 도 NaN)으로
+    준다. 그대로 캔들을 그리면 SVG path 에 NaN 이 들어가 마지막 봉이 깨지고, 실시간
+    patchLast 도 Math.max(NaN, p)=NaN 이라 복구되지 않는다.
+    - Close 가 있으면 Open=직전 Close, High/Low=Open·Close 의 최대/최소로 채운다.
+    - Close 가 없으면 그릴 근거가 없으므로 그 봉을 뺀다.
+    고친/뺀 봉 수는 ``attrs["repaired_bars"]``·``attrs["dropped_bars"]`` 에 남긴다.
+    """
+    cols = ("Open", "High", "Low", "Close")
+    if df is None or getattr(df, "empty", True) or not all(c in df.columns for c in cols):
+        return df
+    ohlc = df[list(cols)]
+    if not ohlc.isna().any().any():
+        return df
+    out = df.copy()
+    out.attrs.update(getattr(df, "attrs", {}) or {})
+    missing_close = out["Close"].isna()
+    if missing_close.any():
+        out = out[~missing_close].copy()
+        out.attrs.update(getattr(df, "attrs", {}) or {})
+    prev_close = out["Close"].shift(1)
+    holes = out[["Open", "High", "Low"]].isna().any(axis=1)
+    out["Open"] = out["Open"].fillna(prev_close).fillna(out["Close"])
+    out["High"] = out["High"].fillna(out[["Open", "Close"]].max(axis=1))
+    out["Low"] = out["Low"].fillna(out[["Open", "Close"]].min(axis=1))
+    out.attrs["repaired_bars"] = int(holes.sum())
+    out.attrs["dropped_bars"] = int(missing_close.sum())
+    return out

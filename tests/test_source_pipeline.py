@@ -22,6 +22,27 @@ def _healthy_subprocess_worker():
     return [{"source": "sibling-test", "title": "ok", "url": "https://e/sibling"}]
 
 
+def _partial_failure_worker():
+    from reports import source_collector as collector
+
+    events = [{"source": "partial:ok", "title": "ok", "url": "https://e/partial-ok"}]
+    if os.environ.get("SOURCE_PIPELINE_TEST_FEED_DOWN") == "1":
+        collector._note_error("partial:down", "feed down")
+    else:
+        events.append({"source": "partial:down", "title": "back", "url": "https://e/partial-down"})
+    return events
+
+
+def _unavailable_after_note_worker():
+    from reports import source_collector as collector
+
+    collector._SOURCE_AVAILABILITY["noted-unavailable"] = {
+        "availability": "unavailable",
+        "availability_reason": "3 of 3 symbols failed",
+    }
+    raise collector.SourceProviderUnavailable("every symbol failed")
+
+
 def _http_error(status: int) -> requests.HTTPError:
     response = type("Response", (), {"status_code": status})()
     error = requests.HTTPError(f"HTTP {status}")
@@ -228,35 +249,63 @@ def test_provider_timeout_terminates_child_and_keeps_sibling_result(tmp_path, mo
     assert manifest_by_provider["healthy-sibling"]["availability"] == "available"
 
 
-def test_module_cli_uses_canonical_arca_worker_target(tmp_path):
-    from reports.source_runs import load_source_runs
 
-    cache_dir = tmp_path / "cache"
-    env = os.environ.copy()
-    env["STOCK_COLLECTOR_ARCA_PAGES"] = "0"
-    completed = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "reports.source_pipeline",
-            "--group",
-            "news",
-            "--source",
-            "arca",
-            "--cache-dir",
-            str(cache_dir),
-        ],
-        cwd=str(Path(__file__).resolve().parents[1]),
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=15,
-    )
+def test_subprocess_partial_failure_marks_only_the_failed_source(tmp_path, monkeypatch):
+    from reports import source_collector
+    from reports.source_pipeline import ProviderSpec, run_providers
 
-    assert completed.returncode == 0, completed.stdout + completed.stderr
-    arca_run = load_source_runs(cache_dir, hours=1)[-1]
-    assert arca_run["provider"] == "arca"
-    assert arca_run["availability"] == "available"
-    assert arca_run["error"] == ""
-    assert arca_run["isolated"] is True
-    assert arca_run["transport"] == "subprocess"
+    monkeypatch.setattr(source_collector, "_LAST_ERRORS", {"partial:ok": "stale parent note"})
+    monkeypatch.setattr(source_collector, "_SOURCE_AVAILABILITY", {})
+    registry = [
+        ProviderSpec(
+            "partial",
+            ("partial:ok", "partial:down"),
+            "partial-test",
+            _partial_failure_worker,
+            timeout_seconds=20,
+        )
+    ]
+
+    monkeypatch.setenv("SOURCE_PIPELINE_TEST_FEED_DOWN", "1")
+    degraded = run_providers(registry=registry, group="partial-test", cache_dir=tmp_path / "cache")
+
+    assert degraded["providers"]["partial"]["transport"] == "subprocess"
+    assert degraded["providers"]["partial"]["fetched"] == 1
+    down = degraded["health"]["partial:down"]
+    assert down["fetch_success"] is False
+    assert down["last_error"] == "feed down"
+    healthy = degraded["health"]["partial:ok"]
+    assert healthy["fetch_success"] is True
+    assert "last_error" not in healthy
+
+    monkeypatch.setenv("SOURCE_PIPELINE_TEST_FEED_DOWN", "0")
+    recovered = run_providers(registry=registry, group="partial-test", cache_dir=tmp_path / "cache")
+
+    assert recovered["providers"]["partial"]["fetched"] == 2
+    assert recovered["health"]["partial:down"]["fetch_success"] is True
+    assert "last_error" not in recovered["health"]["partial:down"]
+
+
+def test_subprocess_failure_keeps_availability_noted_before_raise(tmp_path, monkeypatch):
+    from reports import source_collector
+    from reports.source_pipeline import ProviderSpec, run_providers
+
+    monkeypatch.setattr(source_collector, "_LAST_ERRORS", {})
+    monkeypatch.setattr(source_collector, "_SOURCE_AVAILABILITY", {})
+    registry = [
+        ProviderSpec(
+            "noted",
+            ("noted-unavailable",),
+            "noted-test",
+            _unavailable_after_note_worker,
+            timeout_seconds=20,
+        )
+    ]
+
+    result = run_providers(registry=registry, group="noted-test", cache_dir=tmp_path / "cache")
+
+    assert result["providers"]["noted"]["transport"] == "subprocess"
+    record = result["health"]["noted-unavailable"]
+    assert record["availability"] == "unavailable"
+    assert record["availability_reason"] == "3 of 3 symbols failed"
+    assert record["fetch_success"] is False

@@ -22,8 +22,6 @@ def test_load_portfolio_tickers_uses_snapshot_holdings(tmp_path):
 
 
 def test_section_2_includes_recent_source_cache_digest(monkeypatch):
-    monkeypatch.setattr(mr, "fetch_saveticker_json", lambda *args, **kwargs: None)
-    monkeypatch.setattr(mr, "fetch_arca_stock_posts", lambda: [])
     monkeypatch.setattr(mr.requests, "get", lambda *args, **kwargs: type("Resp", (), {"status_code": 500, "text": ""})())
     monkeypatch.setattr(mr.yf, "Ticker", lambda sym: type("Ticker", (), {"news": []})())
 
