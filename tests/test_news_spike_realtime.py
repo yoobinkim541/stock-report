@@ -49,8 +49,54 @@ def test_tag_skips_unpriced(monkeypatch):
 def test_portfolio_set_derived_from_universe_not_hardcoded():
     """중요도 판정용 _PORTFOLIO 가 portfolio_universe 파생인지 (하드코딩 금지·CLAUDE.md·감사 확정)."""
     from portfolio_universe import load_portfolio_tickers
-    expected = {t.split(".")[0].upper() for t in load_portfolio_tickers()}
+    from providers.news_labels import _ticker_base
+    expected = {_ticker_base(t) for t in load_portfolio_tickers()}
     assert N._PORTFOLIO == expected      # 하드코딩 재도입 시 실패
+
+
+def test_realtime_tag_looks_up_share_class_and_kr_code(monkeypatch):
+    seen = []
+
+    def _gp(symbol, **k):
+        seen.append(symbol)
+        return {"BRK.B": 400.5, "005930": 61200.0}.get(symbol)
+
+    monkeypatch.setattr(rq, "enabled", lambda: True)
+    monkeypatch.setattr(rq, "get_price", _gp)
+    tag = N._realtime_tag(["BRK.B", "005930.KS"])
+    assert seen == ["BRK.B", "005930"]
+    assert "BRK.B $400.50" in tag
+    assert "005930.KS" in tag and "₩61,200" in tag
+    assert "BRK $" not in tag and "BRK ₩" not in tag
+
+
+def test_format_alert_quotes_share_class_not_collapsed(monkeypatch):
+    seen = []
+    monkeypatch.setattr(rq, "enabled", lambda: True)
+    monkeypatch.setattr(rq, "get_price", lambda s, **k: seen.append(s) or (10.0 if s == "BRK.A" else None))
+    text = N._format_alert(
+        {"title": "class", "tickers": ["BRK.A", "005930.KS"],
+         "published_at": "2026-11-15T03:00:00+00:00", "source": "t"},
+        8, "r")
+    assert seen == ["005930", "BRK.A"]
+    assert "BRK.A" in text and "005930" in text
+
+
+def test_issue_region_kr_code_vs_share_class():
+    assert N._issue_region(["005930"]) == "KR"
+    assert N._issue_region(["005930.KS", "BRK.B"]) == "KR"
+    assert N._issue_region(["BRK.A", "BRK.B"]) == "GLOBAL"
+    assert N._issue_region(["BRK"]) == "GLOBAL"
+
+
+def test_rule_score_matches_share_class_portfolio(monkeypatch):
+    monkeypatch.setattr(N, "_PORTFOLIO", {"BRK.B", "005930"})
+    score, reason = N._rule_score({"title": "plain", "tickers": ["BRK.B"]})
+    assert score == 8 and "BRK.B" in reason and "BRK," not in reason and reason.endswith("BRK)") is False
+    other, _ = N._rule_score({"title": "plain", "tickers": ["BRK.A"]})
+    assert other == 5
+    kr, kr_reason = N._rule_score({"title": "plain", "tags": ["$005930.KS"]})
+    assert kr == 8 and "005930" in kr_reason
 
 
 def test_blocked_provider_error_is_logged_once_per_cooldown(monkeypatch, tmp_path, caplog):

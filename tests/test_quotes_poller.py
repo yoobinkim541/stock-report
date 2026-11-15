@@ -47,6 +47,17 @@ def test_is_kr_symbol():
     assert not Q.is_kr_symbol("AAPL") and not Q.is_kr_symbol("BRK.B")
 
 
+def test_cache_key_keeps_share_class(monkeypatch):
+    from providers import toss_api
+    monkeypatch.setattr(Q, "_TOSS_BACKOFF_UNTIL", 0.0)
+    monkeypatch.setattr(toss_api, "prices", lambda symbols: {"brk.b": 410.25, "005930.KS": 70000.0})
+    assert Q.fetch_toss(["BRK.B", "005930.KS"]) == {"BRK.B": 410.25, "005930": 70000.0}
+    assert Q._base("BRK.A") == "BRK.A" and Q._base("BRK-B") == "BRK-B"
+    assert Q._base("005930.ks") == "005930" and Q._base("247540.KQ") == "247540"
+    assert Q.is_kr_symbol("005930") and Q.is_kr_symbol("005930.KS") and Q.is_kr_symbol("247540.KQ")
+    assert not Q.is_kr_symbol("BRK.B") and not Q.is_kr_symbol("AAPL")
+
+
 # ── 키움 ka10095 파서 ────────────────────────────────────────────────────────
 
 def test_parse_kiwoom_quotes_sign_and_comma():
@@ -107,7 +118,7 @@ def test_build_universe_dedupe_cap(monkeypatch):
     monkeypatch.setenv("QUOTES_POLL_EXTRA", "TSLA, tsla ,COIN")
     syms = Q.build_universe(cap=500)
     assert syms.count("TSLA") == 1 and "COIN" in syms
-    assert all("." not in s for s in syms)                            # base 심볼 정규화
+    assert all(not s.endswith((".KS", ".KQ")) for s in syms)
     assert len(syms) <= 500
 
 

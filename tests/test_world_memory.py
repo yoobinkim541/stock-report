@@ -83,3 +83,14 @@ def test_views_world_timeline_graceful(wm, monkeypatch):
     wm.log_issue("테스트 이슈", issue_date="2026-07-10", tickers=["NVDA"])
     out = views.world_timeline("NVDA.KS")   # 접미사 제거 확인 (base 매칭)
     assert isinstance(out.get("issues"), list) and isinstance(out.get("chain"), list)
+
+
+def test_world_timeline_keeps_share_classes(wm):
+    from dashboard import views
+    wm.log_issue("버크셔 B", issue_date="2026-07-10", tickers=["BRK.B"])
+    wm.log_issue("버크셔 A", issue_date="2026-07-10", tickers=["BRK.A"])
+    wm.log_issue("삼성", issue_date="2026-07-10", tickers=["005930"])
+    b = views.world_timeline("BRK.B")
+    assert [i["title"] for i in b["issues"]] == ["버크셔 B"]
+    assert views.world_timeline("BRK.A")["issues"][0]["title"] == "버크셔 A"
+    assert views.world_timeline("005930.KS")["issues"][0]["title"] == "삼성"

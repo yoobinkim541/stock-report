@@ -1162,6 +1162,28 @@ def test_views_chart_news_events(tmp_path, monkeypatch):
     assert views.chart_news_events("NVDA") == []          # 파일 없음 graceful
 
 
+def test_chart_news_events_keep_share_classes(tmp_path, monkeypatch):
+    import json as _json
+    from dashboard import views
+    from providers import news_labels
+    rows = [
+        {"id": "a", "published_at": "2026-07-01T09:00:00+09:00", "tickers": ["BRK.A"],
+         "event_type": "기타", "direction": -1, "strength": 2, "title_head": "class-a"},
+        {"id": "b", "published_at": "2026-07-02T09:00:00+09:00", "tickers": ["BRK.B"],
+         "event_type": "기타", "direction": 1, "strength": 3, "title_head": "class-b"},
+        {"id": "k", "published_at": "2026-07-03T09:00:00+09:00", "tickers": ["005930"],
+         "event_type": "규제", "direction": -1, "strength": 3, "title_head": "kr"},
+    ]
+    p = tmp_path / "labels.jsonl"
+    p.write_text("\n".join(_json.dumps(r) for r in rows), encoding="utf-8")
+    monkeypatch.setattr(news_labels, "LABELS_PATH", p)
+    b = views.chart_news_events("BRK.B")
+    assert [x["title"] for x in b] == ["class-b"]
+    assert views.chart_news_events("BRK.A")[0]["title"] == "class-a"
+    assert views.chart_news_events("BRK") == []
+    assert views.chart_news_events("005930.KS")[0]["title"] == "kr"
+
+
 def test_views_ohlc_tf_2h_4h_resample(monkeypatch):
     """2h/4h 커스텀 봉 — yfinance 1h 조회 후 로컬 리샘플 (interval 인자 검증)."""
     import pandas as pd

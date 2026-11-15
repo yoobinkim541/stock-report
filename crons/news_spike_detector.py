@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-news_spike_detector.py — saveticker 속보 알림
+news_spike_detector.py — 공개 뉴스 캐시의 명시적 속보 알림
 
 동작 흐름:
-  1. saveticker 수집 → JSONL 캐시 저장
-  2. '속보' 태그 이벤트 중 미발송 건 필터
+  1. 예약 수집기가 저장한 RSS·Yahoo 뉴스 캐시 읽기 (추가 네트워크 수집 없음)
+  2. '속보' 태그 또는 '[속보]' 제목 이벤트 중 미발송 건 필터
   3. 규칙 기반 중요도 판단 (포트폴리오 종목/핵심 키워드, 7+ 알림)
      + 경계선(5~6점)만 LLM 2차 판정 (opt-in — NEWS_SPIKE_LLM_ENABLED, 회당 상한·실패 시 규칙 점수 유지)
   4. 텔레그램 발송 + 발송 완료 ID 기록 (재발송 방지)
@@ -139,50 +139,28 @@ def _prune_state(state: dict, now: datetime) -> None:
 # ── Collection ────────────────────────────────────────────────────────────────
 
 def fetch_breaking_news(now: datetime) -> list[dict]:
-    """saveticker에서 속보 태그 이벤트만 반환 (최근 MAX_AGE_HOURS 이내)."""
-    from reports.source_collector import fetch_saveticker_events, append_events, event_id, load_recent_events
-
-    failure = None
-    try:
-        events = fetch_saveticker_events()
-        append_events(events, cache_dir=CACHE_DIR)
-    except Exception as exc:
-        failure = exc
-        events = []
-    private_cache = Path(os.getenv("SAVETICKER_AUTH_CACHE_DIR", "~/reports/private-sources/cache")).expanduser()
-    for cache in {Path(CACHE_DIR), private_cache}:
-        events.extend(load_recent_events(cache_dir=cache, now=now, hours=MAX_AGE_HOURS))
-    preferred = {}
-    for event in events:
-        if event.get("source") != "saveticker":
-            continue
-        identity = event.get("id") or event_id(event)
-        existing = preferred.get(identity)
-        if existing is None or event.get("body_coverage") == "full":
-            preferred[identity] = event
+    """Read explicit breaking news from the scheduled public-feed cache."""
+    from reports.source_collector import event_id, load_recent_events
 
     cutoff = now - timedelta(hours=MAX_AGE_HOURS)
-    breaking = []
-    for e in preferred.values():
-        if "속보" not in (e.get("tags") or []):
+    breaking = {}
+    for event in load_recent_events(cache_dir=CACHE_DIR, now=now, hours=MAX_AGE_HOURS):
+        source = str(event.get("source") or "")
+        if source != "yahoo_headline" and not source.startswith("rss:"):
             continue
-        pub = e.get("published_at") or ""
+        if "속보" not in (event.get("tags") or []) and "[속보]" not in str(event.get("title") or ""):
+            continue
         try:
-            ts = datetime.fromisoformat(pub)
-            if ts.tzinfo is None:
-                ts = ts.replace(tzinfo=KST)
-            if ts < cutoff:
+            published = datetime.fromisoformat(event.get("published_at") or "")
+            if published.tzinfo is None:
+                published = published.replace(tzinfo=KST)
+            if not cutoff <= published <= now:
                 continue
-        except Exception:
+        except (TypeError, ValueError):
             continue
-        e["id"] = e.get("id") or event_id(e)
-        breaking.append(e)
-
-    if failure:
-        if not breaking:
-            raise failure
-        _log_collection_failure(failure, now)
-    return sorted(breaking, key=lambda e: e.get("published_at", ""))
+        event["id"] = event.get("id") or event_id(event)
+        breaking[event["id"]] = event
+    return sorted(breaking.values(), key=lambda event: event.get("published_at", ""))
 
 
 # ── Importance judgment ───────────────────────────────────────────────────────
@@ -192,7 +170,8 @@ def fetch_breaking_news(now: datetime) -> list[dict]:
 # 하드코딩 시 매수/매도로 보유가 바뀌면 관련 속보 누락·은퇴티커 오탐 + 스모크 감사 위반(감사 확정).
 try:
     from portfolio_universe import load_portfolio_tickers
-    _PORTFOLIO = {t.split(".")[0].upper() for t in load_portfolio_tickers()}
+    from providers.news_labels import _ticker_base
+    _PORTFOLIO = {_ticker_base(t) for t in load_portfolio_tickers()}
 except Exception as _e:   # 스냅샷 로드 실패해도 속보 탐지는 계속(포트폴리오 관련성 부스트만 생략)
     logger.warning("보유 종목 로드 실패 — 포트폴리오 관련성 부스트 생략: %s", _e)
     _PORTFOLIO = set()
@@ -342,17 +321,26 @@ def _alert_parts(text: str) -> list[str]:
     return [text[i:i + 2000] for i in range(0, len(text), 2000)] or [""]
 
 
+def _issue_region(tickers) -> str:
+    """숫자 한국 코드면 KR, 클래스주 포함 그 외는 GLOBAL."""
+    from providers.news_labels import _ticker_base
+    return "KR" if any(_ticker_base(t).isdigit() for t in (tickers or [])) else "GLOBAL"
+
+
 def _realtime_tag(tickers: list) -> str:
     """태그된 종목의 실시간 시세 동반표시(REALTIME_ENABLED·신선시). 없으면 빈 문자열(부가·차단無)."""
     try:
         from providers import realtime_quotes
+        from providers.intraday_bars import base_symbol
         if not realtime_quotes.enabled() or not tickers:
             return ""
         bits = []
         for t in tickers[:5]:
-            p = realtime_quotes.get_price(str(t).split(".")[0])
+            p = realtime_quotes.get_price(base_symbol(t))
             if p:
-                bits.append(f"{t} ${p:,.2f}")
+                import ticker_names
+                unit = "₩" if ticker_names.is_kr_listing(str(t)) else "$"
+                bits.append(f"{t} {unit}{p:,.0f}" if unit == "₩" else f"{t} ${p:,.2f}")
         return ("  📈 실시간 " + " · ".join(bits)) if bits else ""
     except Exception:
         return ""
@@ -360,7 +348,8 @@ def _realtime_tag(tickers: list) -> str:
 
 def _format_alert(event: dict, score: int, reason: str) -> str:
     title   = event.get("title") or "[제목 없음]"
-    tickers = [t.lstrip("$") for t in (event.get("tags") or []) if t.startswith("$")]
+    from providers.news_labels import _event_tickers
+    tickers = sorted(_event_tickers(event))
     try:
         published = datetime.fromisoformat(event.get("published_at") or "")
         if published.tzinfo is None:
@@ -382,7 +371,7 @@ def _format_alert(event: dict, score: int, reason: str) -> str:
         rt = _realtime_tag(tickers)
         if rt:
             lines.append(rt)
-    lines.append(f"  {pub} · saveticker")
+    lines.append(f"  {pub} · {event.get('source') or '출처 미확인'}")
     body = event.get("body_raw") or event.get("body")
     if body:
         lines.extend(["", str(body)])
@@ -463,9 +452,10 @@ def main() -> None:
             logger.info("발송 완료: %s", (event.get("title") or "")[:40])
             try:                                 # 중요 속보 → 월드 메모리 영구 축적 (dedupe·실패 무시)
                 from lib.world_memory import log_issue
-                tickers = [t.lstrip("$") for t in (event.get("tags") or []) if str(t).startswith("$")]
+                from providers.news_labels import _event_tickers
+                tickers = sorted(_event_tickers(event))
                 log_issue((event.get("title") or "")[:300], category="속보",
-                          region="KR" if any(t.isdigit() for t in tickers) else "GLOBAL",
+                          region=_issue_region(tickers),
                           importance="high" if score >= 8 else "medium",
                           tickers=tickers, source="news_spike",
                           payload={"score": score, "reason": reason})

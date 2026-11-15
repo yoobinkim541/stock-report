@@ -148,12 +148,13 @@ def _news_section():
 def _ticker_news(ticker: str) -> None:
     st.subheader(f"뉴스 · {ticker_names.label(ticker)}")
     hours = int(st.session_state.get("news_hours") or 48)
-    base = str(ticker or "").split(".")[0].upper()
+    from providers.news_labels import _ticker_base
+    base = _ticker_base(ticker)
     nd = cached.collected_news(hours)
     items = []
     for rows in ((nd or {}).get("groups") or {}).values():
         for it in rows:
-            bases = {str(t).split(".")[0].upper() for t in (it.get("tickers") or [])}
+            bases = {_ticker_base(t) for t in (it.get("tickers") or [])}
             if base and base in bases:
                 items.append(it)
     items.sort(key=lambda x: (int(x.get("score") or 0), str(x.get("published_at") or "")), reverse=True)

@@ -97,9 +97,10 @@ def _rt_ret(h: dict):
     snap_ret = h.get("return_pct", 0) or 0
     try:
         from providers import realtime_quotes
+        from providers.intraday_bars import base_symbol
         avg = float(h.get("avg_price_usd") or 0)
         if realtime_quotes.enabled() and avg > 0:
-            cur = realtime_quotes.get_price(str(h.get("ticker", "")).split(".")[0])
+            cur = realtime_quotes.get_price(base_symbol(str(h.get("ticker", ""))))
             if cur and cur > 0:
                 return (float(cur) - avg) / avg * 100.0, True
     except Exception:

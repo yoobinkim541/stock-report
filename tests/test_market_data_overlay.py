@@ -32,6 +32,15 @@ def test_overlay_kr_suffix_stripped(monkeypatch):
     assert out == {"005930.KS": 71000.0} and seen == ["005930"]
 
 
+def test_overlay_keeps_share_class_key(monkeypatch):
+    monkeypatch.setattr(rq, "enabled", lambda: True)
+    seen = []
+    monkeypatch.setattr(rq, "get_price", lambda s, **k: (seen.append(s), 410.0)[1])
+    out = md._realtime_spot_overlay(["BRK.B", "005930.KS"])
+    assert seen == ["BRK.B", "005930"]
+    assert out["BRK.B"] == 410.0 and out["005930.KS"] == 410.0
+
+
 def test_overlay_never_raises(monkeypatch):
     monkeypatch.setattr(rq, "enabled", lambda: True)
 

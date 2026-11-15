@@ -1250,15 +1250,17 @@ def llm_stock_analysis(ticker: str, facts: dict, force: bool = False):
 def chart_news_events(ticker: str, limit: int = 120) -> list[dict]:
     """차트 뉴스 이벤트 마커 — LLM 구조화 라벨(point-in-time JSONL)에서 해당 종목 추출.
 
-    라벨 tickers 는 base 심볼(무 .KS 접미) — 입력 티커도 base 로 매칭. 파일 없음(라벨
-    크론 미가동)·실패는 [] (graceful). [{date, direction, strength, event_type, title}].
+    라벨 tickers 는 거래소 접미사를 뺀 표기(005930.KS → 005930, BRK.B 는 유지).
+    입력 티커도 같은 규칙으로 매칭. 파일 없음(라벨 크론 미가동)·실패는 [] (graceful).
+    [{date, direction, strength, event_type, title}].
     """
     try:
         from providers import news_labels
-        base = (ticker or "").upper().split(".")[0]
+        base = news_labels._ticker_base(ticker)
         out = []
         for r in news_labels.load_labels():
-            if base not in (r.get("tickers") or []):
+            labeled = {news_labels._ticker_base(t) for t in (r.get("tickers") or [])}
+            if base not in labeled:
                 continue
             d = str(r.get("published_at") or "")[:10]
             if not d:
@@ -1677,7 +1679,8 @@ def world_timeline(ticker: str, limit: int = 10) -> dict:
     """월드 메모리 축적 맥락 — 종목 관련 이슈 타임라인 + 스토리 체인 (read-only). graceful."""
     try:
         from lib.world_memory import stats, story_chain, timeline
-        base = str(ticker or "").split(".")[0].upper()
+        from providers.news_labels import _ticker_base
+        base = _ticker_base(ticker)
         return {"issues": timeline(base, limit=limit),
                 "chain": story_chain(f"ticker:{base}", limit=8),
                 "stats": stats()}

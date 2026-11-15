@@ -113,7 +113,8 @@ def _spot_price(ticker: str):
     try:
         from providers import realtime_quotes
         if realtime_quotes.enabled():
-            rt = realtime_quotes.get_price(ticker.split(".")[0], max_age_s=_ALERT_STALE_S)
+            from providers.intraday_bars import base_symbol
+            rt = realtime_quotes.get_price(base_symbol(ticker), max_age_s=_ALERT_STALE_S)
             if rt:
                 return rt
     except Exception:

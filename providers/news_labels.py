@@ -76,15 +76,37 @@ _NEGATIVE_HINTS = (
 )
 
 
+# 거래소 접미사만 제거. .KS/.KQ 는 intraday_bars.base_symbol·실시간 캐시 키와 같다.
+# .T/.HK/.L 은 source_collector._yahoo_headline_symbol 이 거래소로 다루는 접미사.
+# 클래스 접미사(BRK.A·BRK.B)는 여기 없다 — split(".")[0] 으로 접으면 없는 심볼이 된다.
+_EXCHANGE_SUFFIXES = frozenset({"KS", "KQ", "T", "HK", "L"})
+
+
+def _ticker_base(raw) -> str:
+    """거래소 접미사만 뺀 대문자 티커. 클래스 접미사는 유지한다."""
+    s = str(raw or "").strip().upper()
+    if "." not in s:
+        return s
+    head, suffix = s.rsplit(".", 1)
+    if head and suffix in _EXCHANGE_SUFFIXES:
+        return head
+    return s
+
+
 def _event_tickers(event: dict) -> set[str]:
-    """이벤트 태그의 $티커 집합 (대문자·$ 제거·.KS 등 접미사 유지 없이 base)."""
+    """이벤트 $태그·tickers 의 티커 집합.
+
+    대문자로 맞추고 거래소 접미사만 뺀다(.KS/.KQ, 그리고 이 저장소가 거래소로
+    다루는 .T/.HK/.L). 클래스 접미사(BRK.A·BRK.B)는 유지한다. 한국 코드는
+    포트폴리오·실시간 캐시 키와 같이 base(005930.KS → 005930).
+    """
     out = set()
     for t in (event.get("tags") or []):
         s = str(t)
         if s.startswith("$") and len(s) > 1:
-            out.add(s[1:].split(".")[0].upper())
+            out.add(_ticker_base(s[1:]))
     for t in (event.get("tickers") or []):
-        out.add(str(t).split(".")[0].upper())
+        out.add(_ticker_base(t))
     return {t for t in out if t}
 
 
@@ -190,7 +212,7 @@ def _parse_label_row(raw: str, by_id: dict, seen: set) -> dict | None:
     if not isinstance(raw_tickers, list) or not all(isinstance(t, str) for t in raw_tickers):
         return None
     allowed = _event_tickers(ev)
-    tickers = [t.split(".")[0].upper() for t in raw_tickers]
+    tickers = [_ticker_base(t) for t in raw_tickers]
     if any(t not in allowed for t in tickers):
         return None                                # 입력에 없는 티커 = 환각 → 폐기
     etype = d.get("event_type")
@@ -494,7 +516,7 @@ def news_axis(ticker: str, labels: list[dict] | None = None, asof=None,
     반환 None = 관련 라벨 없음 → score() 재정규화 (graceful — 기존 축 패턴과 동일).
     무룩어헤드: labeled_at <= asof 라벨만 사용 (라벨 생성 전 시점 재계산 오염 차단).
     """
-    base = str(ticker).split(".")[0].upper()
+    base = _ticker_base(ticker)
     if labels is None:
         labels = load_labels(path)
     if not labels:
@@ -507,7 +529,7 @@ def news_axis(ticker: str, labels: list[dict] | None = None, asof=None,
         now = now.replace(tzinfo=KST)
     raw, found = 0.0, False
     for lb in labels:
-        if base not in (lb.get("tickers") or []):
+        if base not in {_ticker_base(t) for t in (lb.get("tickers") or [])}:
             continue
         pub = _parse_ts(lb.get("published_at", ""))
         lab = _parse_ts(lb.get("labeled_at", "")) or pub
