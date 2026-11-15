@@ -677,11 +677,12 @@ def _realtime_spot_overlay(tickers: list) -> dict:
     out: dict = {}
     try:
         from providers import realtime_quotes
+        from providers.intraday_bars import base_symbol
         if not realtime_quotes.enabled():
             return out
         stale = int(os.getenv("REALTIME_SPOT_STALE_S", "60"))
         for t in tickers:
-            p = realtime_quotes.get_price(str(t).split(".")[0], max_age_s=stale)
+            p = realtime_quotes.get_price(base_symbol(str(t)), max_age_s=stale)
             if p and p > 0:
                 out[t] = float(p)
     except Exception:
@@ -693,8 +694,9 @@ def _realtime_current(symbol: str):
     """실시간 캐시 현재가(스트림 가동·신선시). 비활성/없음/stale → None. 예외 무발."""
     try:
         from providers import realtime_quotes
+        from providers.intraday_bars import base_symbol
         if realtime_quotes.enabled():
-            return realtime_quotes.get_price(symbol)
+            return realtime_quotes.get_price(base_symbol(symbol))
     except Exception:
         pass
     return None

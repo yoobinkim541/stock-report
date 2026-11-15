@@ -80,6 +80,18 @@ def test_kr_suffix_stripped_for_cache_lookup(monkeypatch):
     assert seen["sym"] == "005930"      # .KS 접미 제거 후 캐시키 조회
 
 
+def test_share_class_lookup_keeps_dot(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(rq, "enabled", lambda: True)
+
+    def _gp(s, **k):
+        seen["sym"] = s
+        return 410.0
+    monkeypatch.setattr(rq, "get_price", _gp)
+    assert pa._spot_price("BRK.B") == 410.0
+    assert seen["sym"] == "BRK.B"
+
+
 def test_all_sources_fail_returns_none(monkeypatch):
     monkeypatch.setattr(rq, "enabled", lambda: False)
     monkeypatch.setattr(pa, "yf", _fake_yf(None))   # 빈 히스토리

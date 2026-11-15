@@ -150,6 +150,46 @@ def test_axis_ks_suffix_base_match():
     assert NL.news_axis("005930.KS", labels=[_label("005930", 1, 4, pub)], asof=now) > 0.5
 
 
+def test_event_tickers_keep_share_class_and_strip_kr_exchange():
+    """BRK.A/BRK.B 는 구분하고 한국 거래소 접미만 뺀다. $태그와 tickers 필드는 같다."""
+    got = NL._event_tickers({"tickers": ["BRK.A", "BRK.B", "005930.KS"]})
+    assert got == {"BRK.A", "BRK.B", "005930"}
+    assert "BRK" not in got
+    tagged = NL._event_tickers({"tags": ["$BRK.B", "$brk.a", "$005930.ks"]})
+    assert tagged == NL._event_tickers({"tickers": ["BRK.B", "BRK.A", "005930.KS"]})
+    assert NL._event_tickers({"tickers": ["005930.KQ", "7203.T", "0700.HK", "SHEL.L"]}) == {
+        "005930", "7203", "0700", "SHEL",
+    }
+    assert NL._ticker_base("BRK-B") == "BRK-B"
+
+
+def test_label_prompt_and_parse_keep_share_class():
+    events = [{"id": "e-brk", "title": "버크셔 자사주", "tickers": ["BRK.A", "BRK.B", "005930.KS"],
+               "published_at": "2026-07-06T10:00:00+09:00"}]
+    prompt = NL.build_label_prompt(events)
+    assert "BRK.A" in prompt and "BRK.B" in prompt and "005930" in prompt
+    assert '"BRK"' not in prompt
+    ok = NL.parse_labels(
+        '{"id": "e-brk", "tickers": ["brk.b", "005930.KS"], "event_type": "기타", "direction": 0, "strength": 1}',
+        events)
+    assert ok and ok[0]["tickers"] == ["BRK.B", "005930"]
+    collapsed = NL.parse_labels(
+        '{"id": "e-brk", "tickers": ["BRK"], "event_type": "기타", "direction": 0, "strength": 1}',
+        events)
+    assert collapsed == []
+
+
+def test_news_axis_distinguishes_share_classes():
+    now = datetime.now(NL.KST)
+    pub = (now - timedelta(hours=6)).isoformat()
+    labels = [_label("BRK.B", 1, 5, pub), _label("BRK.A", -1, 5, pub)]
+    b = NL.news_axis("BRK.B", labels=labels, asof=now)
+    a = NL.news_axis("BRK.A", labels=labels, asof=now)
+    assert b > 0.5 > a
+    assert NL.news_axis("BRK", labels=labels, asof=now) is None
+    assert NL.news_axis("005930.KQ", labels=[_label("005930", 1, 4, pub)], asof=now) > 0.5
+
+
 # ── 프롬프트: 인젝션 방어 + DATA 경계 ────────────────────────────────────────
 
 def test_prompt_contains_defense_and_markers():

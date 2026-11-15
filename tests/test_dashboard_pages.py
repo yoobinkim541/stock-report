@@ -2649,3 +2649,36 @@ def test_market_source_label_hides_engine_keys():
     assert "polymarket" not in market._source_label("polymarket")
     assert "예측시장" in market._source_label("polymarket")
     assert "연준" in market._source_label("rss:fed")
+
+
+def test_ticker_news_keeps_share_classes(monkeypatch):
+    from dashboard import cached
+    from dashboard.pages import market
+    shown = []
+
+    class _St:
+        session_state = {"news_hours": 48}
+
+        def subheader(self, *a, **k):
+            return None
+
+        def caption(self, *a, **k):
+            return None
+
+        def markdown(self, text, **k):
+            shown.append(text)
+
+    monkeypatch.setattr(market, "st", _St())
+    monkeypatch.setattr(market.ticker_names, "label", lambda t: t)
+    monkeypatch.setattr(market.ui_actions, "mentioned_tickers", lambda items: [])
+    monkeypatch.setattr(cached, "collected_news", lambda hours: {"groups": {"x": [
+        {"title": "class B", "score": 8, "published_at": "2026-11-15", "tickers": ["BRK.B"], "time_str": ""},
+        {"title": "class A", "score": 7, "published_at": "2026-11-15", "tickers": ["BRK.A"], "time_str": ""},
+        {"title": "samsung", "score": 6, "published_at": "2026-11-15", "tickers": ["005930"], "time_str": ""},
+    ]}})
+    market._ticker_news("BRK.B")
+    text = "\n".join(shown)
+    assert "class B" in text and "class A" not in text
+    shown.clear()
+    market._ticker_news("005930.KS")
+    assert "samsung" in "\n".join(shown) and "class B" not in "\n".join(shown)

@@ -29,6 +29,15 @@ def _resolve(module_name: str, qualname: str):
     return current
 
 
+def _source_state() -> dict:
+    """Per-source notes the fetch left in source_collector; they die with this process otherwise."""
+    collector = sys.modules.get("reports.source_collector")
+    return {
+        "source_errors": dict(getattr(collector, "_LAST_ERRORS", None) or {}),
+        "source_availability": dict(getattr(collector, "_SOURCE_AVAILABILITY", None) or {}),
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     args = list(argv or sys.argv[1:])
     if len(args) != 2:
@@ -41,7 +50,7 @@ def main(argv: list[str] | None = None) -> int:
             events = fetch()
         if not isinstance(events, list) or any(not isinstance(row, dict) for row in events):
             raise TypeError("provider fetcher must return list[dict]")
-        print(json.dumps({"ok": True, "events": events}, ensure_ascii=False, default=str))
+        print(json.dumps({"ok": True, "events": events, **_source_state()}, ensure_ascii=False, default=str))
         return 0
     except BaseException as exc:
         status_code = _status_code(exc)
@@ -56,8 +65,10 @@ def main(argv: list[str] | None = None) -> int:
                     "error": str(exc)[:500],
                     "status_code": status_code,
                     "availability": availability,
+                    **_source_state(),
                 },
                 ensure_ascii=False,
+                default=str,
             )
         )
         return 1

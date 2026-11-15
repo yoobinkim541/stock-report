@@ -92,7 +92,9 @@ def us_trading_session(now: datetime | None = None) -> str:
 
 
 def _base(sym: str) -> str:
-    return str(sym or "").strip().upper().split(".")[0]
+    """캐시 키. .KS/.KQ 만 제거 — providers.intraday_bars.base_symbol 과 동일."""
+    from providers.intraday_bars import base_symbol
+    return base_symbol(sym)
 
 
 def is_kr_symbol(sym: str) -> bool:
