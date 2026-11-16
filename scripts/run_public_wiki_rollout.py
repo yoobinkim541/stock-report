@@ -108,6 +108,21 @@ def _balanced(sources, limit, served=None):
     return chosen
 
 
+def _attempted_publisher(journal, revision_id):
+    """Publisher of an attempted revision, from the journal ledger.
+
+    A compiled revision no longer shows up in the scan, so the scan alone cannot
+    tell which publisher was served last.
+    """
+    try:
+        record = json.loads((journal.root / 'sources' / f'{revision_id}.json').read_text())
+    except (OSError, ValueError):
+        return None
+    source = record.get('source') if isinstance(record, dict) else None
+    provider = source.get('provider') if isinstance(source, dict) else None
+    return publisher(provider)['id'] if provider else None
+
+
 @contextmanager
 def discover_source_batch(journal, now, *, limit):
     """Scan the full window, retaining at most limit pending source metadata per publisher.
@@ -130,6 +145,9 @@ def discover_source_batch(journal, now, *, limit):
                 database.execute('INSERT INTO attempts VALUES (?, ?) ON CONFLICT(id) DO UPDATE '
                                  'SET at = max(at, excluded.at)',
                                  (reservation['revision_id'], reservation['at']))
+                name = _attempted_publisher(journal, reservation['revision_id'])
+                if name:
+                    served[name] = max(served.get(name, ''), reservation['at'])
             events = load_source_events(now=now, stats=stats)
             try:
                 for event in events:
