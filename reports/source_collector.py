@@ -39,6 +39,7 @@ _PROJECT_DIR = os.getenv("STOCK_REPORT_PROJECT_DIR",
 if _PROJECT_DIR not in sys.path:
     sys.path.insert(0, _PROJECT_DIR)
 from portfolio_universe import load_portfolio_tickers
+from reports import source_publishers
 
 PORTFOLIO_TICKERS = load_portfolio_tickers()
 MARKET_TICKERS = {
@@ -102,18 +103,8 @@ WORLD_GOV_BOND_COUNTRIES = {
     "south-korea": "한국 국채금리",
 }
 # 뉴스 텔레그램 채널 — env 로 교체 가능(죽은 채널 무배포 교체): STOCK_COLLECTOR_TG_CHANNELS=a,b
-# 공개 미리보기(t.me/s/<채널>)가 열려 있는 증권사·애널리스트·뉴스 채널만 넣는다.
-_DEFAULT_TELEGRAM_CHANNELS = (
-    "insidertracking",        # 미국 주식 인사이더 — 미국 속보·레딧 분석
-    "kwusa",                  # 키움증권 미국주식 톡톡
-    "mirae_dm",               # 미래에셋 선진국 전략 (김성근)
-    "Samsung_Global_AI_SW",   # 삼성증권 글로벌 AI/SW (이영진)
-    "FastStockNewsUSA",       # 급등일보 미국주식 — 미국 뉴스 속보
-    "daishinstrategy",        # 대신증권 전략 (이경민)
-    "yuantais",               # 유안타증권 투자전략
-    "shStrategy",             # 신한투자증권 주식전략·시황·퀀트
-    "thekobeissiletter",      # The Kobeissi Letter — 영문 매크로 코멘트
-)
+# 기본 채널과 발행자·관점(증권사/커뮤니티)은 reports/source_publishers.py 한 곳에서 정한다.
+_DEFAULT_TELEGRAM_CHANNELS = tuple(source_publishers.TELEGRAM_CHANNELS)
 TELEGRAM_NEWS_CHANNELS = [c.strip().lstrip("@") for c in os.getenv(
     "STOCK_COLLECTOR_TG_CHANNELS", ",".join(_DEFAULT_TELEGRAM_CHANNELS)).split(",") if c.strip()]
 
@@ -132,14 +123,41 @@ INVESTING_RSS_FEEDS = (
     ("investing_kr_stock", "https://kr.investing.com/rss/news_25.rss", "Investing.com 주식"),
     ("investing_kr_economy", "https://kr.investing.com/rss/news_14.rss", "Investing.com 경제"),
 )
+# 주제 낱말. 영문·숫자 낱말은 낱말 경계에서만 맞춘다("ai" 가 "said" 에 걸리지 않게).
+# "=" 로 시작하는 한글 낱말은 앞 글자가 한글이면 버린다("~이란" 조사, "개구리").
+# "핵"·"군"·"가자"·"전쟁"·"칩"처럼 다른 말에 묻히는 낱말은 넣지 않는다.
 NEWS_THEME_KEYWORDS = {
-    "중동/전쟁": ("이스라엘", "이란", "가자", "하마스", "우크라이나", "러시아", "전쟁", "군", "미사일", "핵"),
-    "금리/채권": ("금리", "국채", "채권", "연준", "fed", "treasury", "yield"),
-    "유가/원자재": ("유가", "오일", "원유", "석유", "브렌트", "wti", "금 ", "gold"),
-    "인플레/고용": ("cpi", "물가", "인플레", "고용", "실업", "임금"),
-    "기술/AI": ("ai", "엔비디아", "반도체", "칩", "데이터센터"),
-    "정책/재정": ("재무장관", "세금", "관세", "예산", "부채", "재정"),
+    "중동/전쟁": ("이스라엘", "=이란", "가자지구", "하마스", "헤즈볼라", "후티", "호르무즈", "우크라이나",
+              "러시아", "휴전", "공습", "미사일", "핵무기", "핵협상", "핵시설", "지정학",
+              "israel", "iran", "gaza", "ukraine", "russia", "ceasefire", "geopolitical"),
+    "금리/채권": ("금리", "국채", "채권", "연준", "fomc", "fed", "treasury", "yield", "yields"),
+    "유가/원자재": ("유가", "원유", "석유", "브렌트", "천연가스", "금값", "금 가격", "=구리", "원자재",
+               "wti", "opec", "gold", "crude", "oil", "copper"),
+    "인플레/고용": ("물가", "인플레", "고용", "실업", "임금", "cpi", "pce", "ppi", "inflation", "payrolls", "jobless"),
+    "기술/AI": ("인공지능", "엔비디아", "반도체", "데이터센터", "ai", "gpu", "hbm", "nvidia", "semiconductor",
+              "semiconductors"),
+    "정책/재정": ("재무장관", "세금", "관세", "예산", "재정", "셧다운", "부채한도", "tariff", "tariffs", "shutdown"),
 }
+
+
+def _theme_pattern(word: str) -> re.Pattern:
+    bound = word.startswith("=")
+    word = word.lstrip("=").lower()
+    if re.fullmatch(r"[a-z0-9 .&-]+", word):
+        return re.compile(rf"(?<![a-z0-9]){re.escape(word)}(?![a-z0-9])")
+    return re.compile((r"(?<![가-힣])" if bound else "") + re.escape(word))
+
+
+_THEME_PATTERNS = {theme: tuple(_theme_pattern(word) for word in words)
+                   for theme, words in NEWS_THEME_KEYWORDS.items()}
+
+
+def _theme_hits(text: str) -> dict[str, int]:
+    """주제별로 본문에 나온 서로 다른 낱말 수. 0 인 주제는 뺀다."""
+    lower = str(text or "").lower()
+    hits = {theme: sum(1 for pattern in patterns if pattern.search(lower))
+            for theme, patterns in _THEME_PATTERNS.items()}
+    return {theme: count for theme, count in hits.items() if count}
 
 SOURCE_CLASSIFICATION = {
     "saveticker": {"family": "news", "kind": "article", "trust": "B", "horizon": "1d"},
@@ -147,6 +165,9 @@ SOURCE_CLASSIFICATION = {
     "saveticker_report_pdf": {"family": "report", "kind": "report", "trust": "B", "horizon": "1w"},
     "arca": {"family": "community", "kind": "community_signal", "trust": "C", "horizon": "intraday"},
     "telegram": {"family": "community", "kind": "community_signal", "trust": "C", "horizon": "intraday"},
+    # 증권사가 운영하는 채널(source_publishers 의 sell_side)의 글과, 그 글에 걸린 공개 리포트 PDF
+    "telegram_sell_side": {"family": "research", "kind": "broker_comment", "trust": "B", "horizon": "1w"},
+    "broker_report": {"family": "research", "kind": "report", "trust": "B", "horizon": "1w"},
     "rss": {"family": "news", "kind": "headline", "trust": "B", "horizon": "1d"},
     "polymarket": {"family": "prediction_market", "kind": "prediction_market", "trust": "B", "horizon": "intraday"},
     "kalshi": {"family": "prediction_market", "kind": "prediction_market", "trust": "B", "horizon": "intraday"},
@@ -191,12 +212,23 @@ def _normalize_labels(values) -> list[str]:
     return out
 
 
+TOPIC_ROUNDUP = "시황/종합"
+
+
 def _topic_from_text(text: str) -> str:
-    lower = str(text or "").lower()
-    for theme, words in NEWS_THEME_KEYWORDS.items():
-        if any(word.lower() in lower for word in words):
-            return theme
-    return ""
+    """가장 많은 낱말이 맞은 주제. 앞머리(제목)에 나온 낱말은 세 번으로 센다. 동률이면 표의 순서.
+
+    네 주제 이상에 걸치고 1위가 2위의 두 배가 못 되는 글은 한 주제의 글이 아니라 시황 정리다.
+    """
+    hits = _theme_hits(text)
+    if not hits:
+        return ""
+    lead = _theme_hits(str(text or "")[:200])
+    score = {theme: count + 2 * lead.get(theme, 0) for theme, count in hits.items()}
+    ranked = sorted(score, key=lambda theme: -score[theme])
+    if len(ranked) >= 4 and score[ranked[0]] < 2 * score[ranked[1]]:
+        return TOPIC_ROUNDUP
+    return ranked[0]
 
 
 def _classify_event(event: dict) -> dict:
@@ -210,7 +242,10 @@ def _classify_event(event: dict) -> dict:
     incoming_classification = row.get("classification") if isinstance(row.get("classification"), dict) else {}
     source = str(row.get("source") or "unknown").strip() or "unknown"
     root = _source_root(source)
-    profile = SOURCE_CLASSIFICATION.get(root, {"family": "other", "kind": "event", "trust": "C", "horizon": "1d"})
+    publisher = source_publishers.publisher(source)
+    sell_side = root == "telegram" and publisher["role"] == "sell_side"
+    profile = SOURCE_CLASSIFICATION.get("telegram_sell_side" if sell_side else root,
+                                        {"family": "other", "kind": "event", "trust": "C", "horizon": "1d"})
 
     title = _clip(row.get("title") or "", 260)
     body = _clip(row.get("body") or "", 4000)
@@ -224,8 +259,10 @@ def _classify_event(event: dict) -> dict:
         labels.append(category)
 
     kind = str(row.get("kind") or row.get("type") or profile["kind"] or "event").strip() or profile["kind"]
-    if root == "saveticker_report_pdf":
+    if root in {"saveticker_report_pdf", "broker_report"}:
         kind = "report"
+    elif sell_side:
+        kind = "broker_comment"
     elif root == "arca":
         kind = ARCA_KIND_MAP.get(category, "community_signal")
     elif root == "telegram":
@@ -246,7 +283,9 @@ def _classify_event(event: dict) -> dict:
     if root == "polymarket" and labels:
         topic = labels[0]
     if not topic:
-        if root.startswith("telegram"):
+        if sell_side or root == "broker_report":
+            topic = "증권사 리서치"
+        elif root.startswith("telegram"):
             topic = "텔레그램"
         elif root == "rss":
             topic = labels[0] if labels else "뉴스"
@@ -271,6 +310,8 @@ def _classify_event(event: dict) -> dict:
         wiki_eligible = kind in {"analysis", "report"} or text_len >= 700
     elif root == "arca":
         wiki_eligible = kind in {"analysis", "earnings"} or text_len >= 800
+    elif sell_side:
+        wiki_eligible = text_len >= 300
     elif root == "telegram":
         wiki_eligible = kind == "analysis" or text_len >= 900
     elif root == "polymarket":
@@ -294,6 +335,8 @@ def _classify_event(event: dict) -> dict:
         "article_discovery_eligible": article_discovery_eligible,
         "confidence": confidence,
         "labels": labels[:8],
+        "publisher": publisher["name"],
+        "perspective": publisher["role"],
     }
     row["classification"] = classification
     row["source_family"] = classification["source_family"]
@@ -599,9 +642,42 @@ def _extract_tickers(text: str, universe: Iterable[str] = PORTFOLIO_TICKERS) -> 
     return [t for t in universe if f" {t.upper()} " in upper]
 
 
+# 본문에서 종목보다 다른 뜻(업종·지수·일반 약어)으로 더 자주 쓰이는 대문자 약어.
+# 회사 이름, `$IT`, `(IT US)` 표기로 나오면 그대로 잡힌다.
+_PROSE_ACRONYM_RE = re.compile(
+    r"(?<![A-Za-z0-9$])(?:IT|SW|ESS|MSCI|IR|MTD|IP|KEY|GE|MS|ON|ALL|NOW|ES|PM|HD|ICE|FAST|LOW|WELL|APP|DD|CME)"
+    r"(?![A-Za-z0-9])"
+)
+_INDEX_PROXIES = frozenset({"SPY", "QQQ", "IWM", "DIA"})
+# 주소·채널 핸들과 금액 단위("$MLN")는 종목 표기가 아니다.
+_NOT_MENTION_RE = re.compile(r"https?://\S+|@\w+|\$\s?(?:MLN|BLN|BN|TRN|MN|MM)(?![A-Za-z])")
+
+
+def _mention_tickers(text: str, limit: int = 12) -> list[str]:
+    """글이 언급한 종목. 보유 종목 티커가 먼저, 이어 종목 사전의 이름·티커·거래소 표기("네비우스(NBIS US)").
+
+    지수·금리·환율·원자재 같은 시세 심볼과, 지수 이름이 ETF 로 바뀐 것("나스닥" → QQQ)은 종목 언급이
+    아니므로 뺀다. 6자리 숫자는 사전에 있는 종목 코드이거나 `.KS`/`KS` 가 붙었을 때만 종목으로 본다.
+    """
+    import ticker_names
+
+    found = _extract_tickers(text)
+    clean = _PROSE_ACRONYM_RE.sub(" ", _NOT_MENTION_RE.sub(" ", str(text or "")))
+    for ticker in ticker_names.mentions_in(clean, limit=limit * 3):
+        if ticker in found or ticker_names.is_macro(ticker) or re.search(r"[=^]", ticker):
+            continue
+        if ticker in _INDEX_PROXIES and not re.search(rf"(?<![A-Za-z0-9]){ticker}(?![A-Za-z0-9])", clean):
+            continue
+        code = ticker.partition(".")[0]
+        if (code.isdigit() and ticker_names.display_name(ticker, allow_net=False) is None
+                and not re.search(rf"{code}[ .](?:KS|KQ)(?![A-Za-z])", clean)):
+            continue
+        found.append(ticker)
+    return found[:limit]
+
+
 def _extract_news_tags(text: str) -> list[str]:
-    lower = text.lower()
-    return [theme for theme, words in NEWS_THEME_KEYWORDS.items() if any(word.lower() in lower for word in words)]
+    return list(_theme_hits(text))
 
 
 YAHOO_HEADLINE_RSS = "https://feeds.finance.yahoo.com/rss/2.0/headline"
@@ -731,6 +807,27 @@ def _telegram_text_from_fragment(fragment: str) -> str:
     return " ".join(txt.split()).strip()
 
 
+def _telegram_card_extras(card, text_node) -> dict:
+    """카드에 걸린 외부 링크와 첨부 요약.
+
+    텔레그램에 직접 올라간 파일과 사진은 로그인 없이 받을 공개 주소가 없어 이름과 장수만 남긴다.
+    """
+    links: list[str] = []
+    for anchor in text_node.find_all("a", href=True) if text_node is not None else []:
+        href = str(anchor.get("href") or "").strip()
+        host = (urlparse(href).hostname or "").lower()
+        if href.startswith(("http://", "https://")) and host not in {"t.me", "telegram.me"} and href not in links:
+            links.append(href)
+    documents = [" ".join(node.get_text(" ").split())
+                 for node in card.select(".tgme_widget_message_document_title")]
+    extras: dict = {"links": links[:8]}
+    attachments = {"documents": [name for name in documents if name][:5],
+                   "photos": len(card.select(".tgme_widget_message_photo_wrap"))}
+    if attachments["documents"] or attachments["photos"]:
+        extras["attachments"] = attachments
+    return extras
+
+
 def _telegram_messages_from_html(html_text: str, channel: str) -> list[dict]:
     """t.me/s 공개 HTML을 메시지 카드 단위로 파싱한다.
 
@@ -761,11 +858,14 @@ def _telegram_messages_from_html(html_text: str, channel: str) -> list[dict]:
             body_raw = _telegram_text_from_fragment(str(text_node))
             if not body_raw:
                 continue
+            stamp = card.select_one("a.tgme_widget_message_date time[datetime]")
             messages.append({
                 "title": body_raw[:180],
                 "url": _url_from(card),
+                "published_at": str(stamp.get("datetime") or "") if stamp else "",
                 "body_raw": body_raw[:TELEGRAM_BODY_MAX],
                 "raw_html": str(card),
+                **_telegram_card_extras(card, text_node),
             })
         return messages
 
@@ -896,8 +996,9 @@ def fetch_telegram_channel_events(channels: list[str] = TELEGRAM_NEWS_CHANNELS) 
                 "body_raw": body,
                 "body": body,
                 "body_excerpt": body[:500],
-                "tickers": _extract_tickers(scan_text),
+                "tickers": _mention_tickers(scan_text),
                 "tags": tags,
+                **{key: message[key] for key in ("published_at", "links", "attachments") if message.get(key)},
                 "raw_path": archive["raw_path"],
                 "text_path": archive["text_path"],
                 "manifest_path": archive["manifest_path"],
@@ -995,7 +1096,7 @@ def fetch_news_rss_events(feeds=NEWS_RSS_FEEDS) -> list[dict]:
                 "body": item["body"],
                 "body_excerpt": item["body"][:500],
                 "tags": [label],
-                "tickers": _extract_tickers(f"{item['title']} {item['body']}"),
+                "tickers": _mention_tickers(f"{item['title']} {item['body']}"),
                 "fulltext_status": "feed_blurb",
                 "body_raw_source": "rss_description",
                 "body_coverage": "partial",
@@ -1566,6 +1667,12 @@ def fetch_kalshi_events() -> list[dict]:
         return []
 
 
+def fetch_broker_report_events() -> list[dict]:
+    from reports.broker_reports import fetch_broker_report_events as fetch
+
+    return fetch()
+
+
 def fetch_economic_calendar_events() -> list[dict]:
     from reports.operational_events import fetch_economic_calendar_events as fetch
 
@@ -1604,6 +1711,8 @@ def expected_sources() -> list[str]:
 
 def source_collection_mode(source: str, record: dict | None = None) -> str:
     """Separate passive ingress from a sender with an expected delivery cadence."""
+    if str(source).startswith("broker_report:"):
+        return "on_demand"      # 리포트는 채널 글에 링크가 걸릴 때만 생긴다. 공백이 장애가 아니다.
     if source != "hermes_webhook":
         return "scheduled"
     mode = os.getenv("HERMES_SOURCE_COLLECTION_MODE")

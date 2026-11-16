@@ -148,6 +148,10 @@ th.c, td.c { text-align: center; }
 td.name { text-align: left; font-weight: 600; white-space: nowrap; }
 td.name small { font-weight: 400; color: var(--muted); margin-left: 1mm; }
 td.wrap { text-align: left; white-space: normal; }
+/* 증권사 코멘트: 제목 칸이 남는 폭을 다 쓰고, 넘치면 한 줄에서 자른다. */
+.brokers td.clip { width: 100%; max-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.brokers td { padding-top: 0.55mm; padding-bottom: 0.55mm; }
+.brokers td:last-child { font-size: 6.8pt; }
 /* 등락은 칸을 칠하지 않고 글자색으로만 — 상승 빨강, 하락 파랑, 변동이 큰 값은 굵게. */
 .up { color: var(--up); } .down { color: var(--down); } .flat { color: var(--muted); }
 .big, .strong { font-weight: 700; }

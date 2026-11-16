@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from datetime import datetime, timedelta
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parent.parent
@@ -232,9 +233,21 @@ def _transactions() -> list[dict]:
         return []
 
 
+def _source_events(report_date: str) -> list[dict]:
+    """리포트 날짜 기준 최근 24시간 수집 이벤트. 지난 날짜를 다시 만들 때는 그날 것만 본다."""
+    try:
+        from reports import source_collector
+        now = datetime.now(pdf_data.KST)
+        day_end = datetime.fromisoformat(report_date).replace(tzinfo=pdf_data.KST) + timedelta(hours=36)
+        return source_collector.load_recent_events(now=min(now, day_end), hours=24)
+    except Exception as exc:   # 수집 캐시가 없으면 증권사 코멘트 칸만 빠진다.
+        print(f"[WARN] 수집 이벤트 없음: {type(exc).__name__}", file=sys.stderr)
+        return []
+
+
 def build_pdf(report_date: str, reports_dir: Path, out_path: Path, *, fetch=pdf_data.fetch_price_history,
               history_loader=_portfolio_history, transactions_loader=_transactions,
-              browser: str | None = None) -> Path:
+              events_loader=_source_events, browser: str | None = None) -> Path:
     data, investment_md, market_md = pdf_data.load_inputs(report_date, reports_dir)
     transactions = transactions_loader()
     try:
@@ -244,7 +257,7 @@ def build_pdf(report_date: str, reports_dir: Path, out_path: Path, *, fetch=pdf_
         prices = {}
     model = pdf_data.build_model(report_date=report_date, data=data, investment_md=investment_md,
                                  market_md=market_md, prices=prices, portfolio_history=history_loader(),
-                                 transactions=transactions)
+                                 transactions=transactions, source_events=events_loader(report_date))
     basis = model["price_basis"]
     if basis["reused"]:
         print(f"[WARN] 시세 {basis['reused']}개 심볼은 {basis['fetched']} 캐시 사용", file=sys.stderr)

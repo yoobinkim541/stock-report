@@ -15,6 +15,7 @@ from pathlib import Path
 import safe_io
 from agent_console import shared_memory
 from reports import raw_archive, source_collector, wiki_public_budget as quota, wiki_source_revision
+from reports.source_publishers import publisher
 from reports import wiki_source_pipeline as pipeline
 from reports.wiki_source_journal import Journal
 from scripts.run_public_wiki_pilot import source_allowed as is_public, filter_targets, public_target_ids, validate_public_targets, hydrate_public_target
@@ -84,16 +85,39 @@ def _selection_key(source):
             source['revision_id'])
 
 
+def _publisher_id(source):
+    return publisher(source.get('provider'))['id']
+
+
+def _balanced(sources, limit, served=None):
+    """Round-robin across publishers so one busy channel cannot take the whole budget.
+
+    Publishers are visited least-recently-attempted first (``served``), and each
+    publisher's own queue keeps the untouched-then-oldest order.
+    """
+    served = served or {}
+    queues = {}
+    for source in sorted(sources, key=_selection_key):
+        queues.setdefault(_publisher_id(source), []).append(source)
+    order = sorted(queues, key=lambda name: (served.get(name, ''), _selection_key(queues[name][0])))
+    chosen = []
+    while len(chosen) < limit and any(queues.values()):
+        for name in order:
+            if queues[name] and len(chosen) < limit:
+                chosen.append(queues[name].pop(0))
+    return chosen
+
+
 @contextmanager
 def discover_source_batch(journal, now, *, limit):
-    """Scan the full window, retaining at most limit pending source metadata.
+    """Scan the full window, retaining at most limit pending source metadata per publisher.
 
     Verified bodies are released after each discovery. Selected deliveries are
     replayed from a temporary disk spool, and every deferred unique revision is
     counted explicitly; the next run scans it again rather than losing a tail.
     """
     stats = {'eligible_sources': 0, 'pending_sources': 0, 'unavailable_events': 0}
-    selected = []
+    queues, served = {}, {}
     with tempfile.TemporaryDirectory(prefix='wiki-source-batch-') as directory:
         with closing(sqlite3.connect(str(Path(directory) / 'batch.sqlite3'))) as database:
             database.executescript(
@@ -125,18 +149,24 @@ def discover_source_batch(journal, now, *, limit):
                         database.execute('INSERT INTO revisions VALUES (?, ?, ?)', (identity, role, pending))
                         stats['eligible_sources'] += 1
                         stats['pending_sources'] += int(pending)
+                        attempted = database.execute('SELECT at FROM attempts WHERE id=?', (identity,)).fetchone()
+                        name = _publisher_id(source)
+                        if attempted:
+                            served[name] = max(served.get(name, ''), attempted[0])
                         if pending:
-                            attempted = database.execute('SELECT at FROM attempts WHERE id=?', (identity,)).fetchone()
                             source = {key: value for key, value in source.items() if key != 'body'}
                             source['role'] = role
                             source['last_attempt_at'] = attempted[0] if attempted else ''
-                            selected.append(source)
-                            selected.sort(key=_selection_key)
-                            del selected[limit:]
+                            queue = queues.setdefault(name, [])
+                            queue.append(source)
+                            queue.sort(key=_selection_key)
+                            del queue[limit:]
             finally:
                 if hasattr(events, 'close'):
                     events.close()
+            selected = _balanced([source for queue in queues.values() for source in queue], limit, served)
             stats['retained_candidates'] = len(selected)
+            stats['publisher_last_attempt'] = served
             stats['deferred_pending_sources'] = stats['pending_sources'] - len(selected)
 
             def relevant(source):
@@ -151,9 +181,8 @@ def discover_source_batch(journal, now, *, limit):
             yield selected, relevant, already_pending, stats
 
 
-def select_pending(sources, pending, *, limit=5):
-    return sorted([source for source in sources if is_public(source) and pending(source)],
-                  key=_selection_key)[:limit]
+def select_pending(sources, pending, *, limit=5, served=None):
+    return _balanced([source for source in sources if is_public(source) and pending(source)], limit, served)
 
 
 def plan_status(path, *, candidates, limit=5):
@@ -554,7 +583,7 @@ def _run_batch(args, journal, budget_path, now, batch):
         for source in by_id.values():
             source['last_attempt_at'] = attempted.get(source['revision_id'], '')
         chosen = select_pending(by_id.values(), lambda source: pending_public_source(source, journal),
-                                limit=args.source_limit)
+                                limit=args.source_limit, served=discovery_stats.get('publisher_last_attempt'))
         results = []
         for source in chosen:
             attempt = quota.reserve(budget_path, source['revision_id'])

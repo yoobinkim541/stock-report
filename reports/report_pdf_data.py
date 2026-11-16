@@ -3,6 +3,7 @@
 숫자는 investment-data JSON 과 가격 이력에서만 온다. 문장은 이미 생성·검증된
 마크다운(투자 리포트, 시장 리포트)에서 그대로 읽는다. 여기서는 LLM 을 부르지 않고
 판단을 새로 만들지 않는다 — PDF 는 같은 날 마크다운과 같은 내용을 다른 양식으로 보여줄 뿐이다.
+증권사 코멘트 칸만 수집 캐시의 증권사 채널 글 제목을 그대로 싣는다.
 
 입력이 하나 빠지면 그 블록만 비운다(None/빈 리스트). 필수는 investment-data JSON 하나다.
 """
@@ -13,10 +14,12 @@ import math
 import re
 import time
 from datetime import date as _date
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from reports import account_performance
+from reports import account_performance, source_publishers
+
+KST = timezone(timedelta(hours=9))
 
 WEEKDAYS = "월화수목금토일"
 
@@ -618,6 +621,57 @@ def _news(lines: list[str], limit: int = 6) -> list[dict]:
     return out
 
 
+_BROKER_PHONE = r"\(?\d{2,3}-\d{3,4}-\d{4}\)?"
+_BROKER_EMOJI = r"[\U0001F000-\U0001FAFF\u2600-\u27BF\uFE0F\u200D]"
+_BROKER_NOISE = re.compile(rf"https?://\S+|텔레그램 링크\s*:?|#\S+|{_BROKER_PHONE}|{_BROKER_EMOJI}|[━★◆▶]|보내드립니다\.")
+
+
+def _broker_headline(title: str, broker: str) -> str:
+    """채널 글 첫머리에서 담당자·연락처·장식을 걷어 낸 제목. 내용은 고치지 않는다."""
+    short = re.escape(broker.replace("증권", "").replace("투자", "")[:2] or broker)
+    # 담당자 표기: 전화번호가 든 괄호, 증권사 이름이나 '리서치'가 든 괄호, '시황 홍길동 ☎…', 이모지 뒤 증권사 이름.
+    # '[장 중 시황]' 같은 글 종류 괄호는 남긴다.
+    text = re.sub(rf"[\[［][^\]］]*(?:{_BROKER_PHONE}|{short}|리서치)[^\]］]*[\]］]|[가-힣]{{2,4}}\s+[가-힣]{{2,4}}\s*☎\S*\s*{_BROKER_PHONE}"
+                  rf"|{_BROKER_EMOJI}+\s*{short}(?:증권|타)?(?![가-힣])", " ", str(title or ""))
+    text = " ".join(_BROKER_NOISE.sub(" ", text).split())
+    text = re.sub(r"^[\s\-–—]*(?:제목\s*:\s*|안녕하세요[^.]*\.\s*|[^.]{0,40}담당[^.]{0,20}입니다\.\s*)?", "", text)
+    return text.strip(" -–—·")
+
+
+def broker_notes(events: list[dict] | None, limit: int = 6) -> list[dict]:
+    """증권사 채널 글을 증권사별로 번갈아 최신순으로 고른다. 한 곳이 칸을 다 차지하지 않게 한다."""
+    queues: dict[str, list[dict]] = {}
+    for event in events or []:
+        source = str(event.get("source") or "")
+        who = source_publishers.publisher(source)
+        if who["role"] != "sell_side" or not source.startswith("telegram:"):
+            continue
+        headline = _broker_headline(event.get("title"), who["name"])
+        if len(re.sub(r"[^\w가-힣]", "", headline)) < 8:
+            continue
+        stamp = str(event.get("published_at") or event.get("collected_at") or "")
+        try:
+            at = datetime.fromisoformat(stamp).astimezone(KST)
+        except ValueError:
+            continue
+        queues.setdefault(who["name"], []).append({
+            "broker": who["name"], "at": at, "when": f"{at.month}/{at.day} {at:%H:%M}", "headline": headline,
+            "tickers": [str(t) for t in event.get("tickers") or []][:4]})
+    for rows in queues.values():
+        rows.sort(key=lambda row: row["at"], reverse=True)
+    order = sorted(queues, key=lambda name: queues[name][0]["at"], reverse=True)
+    out: list[dict] = []
+    seen: set[str] = set()
+    depth = 0
+    while len(out) < limit and any(depth < len(queues[name]) for name in order):
+        for name in order:
+            if depth < len(queues[name]) and len(out) < limit and queues[name][depth]["headline"] not in seen:
+                seen.add(queues[name][depth]["headline"])
+                out.append({k: v for k, v in queues[name][depth].items() if k != "at"})
+        depth += 1
+    return out
+
+
 def _subsections(lines: list[str]) -> list[dict]:
     out: list[dict] = []
     for line in lines:
@@ -631,7 +685,7 @@ def _subsections(lines: list[str]) -> list[dict]:
 
 def build_model(*, report_date: str, data: dict, investment_md: str = "", market_md: str = "",
                 prices: dict | None = None, portfolio_history: list[dict] | None = None,
-                transactions: list[dict] | None = None) -> dict:
+                transactions: list[dict] | None = None, source_events: list[dict] | None = None) -> dict:
     """PDF 템플릿이 그대로 쓰는 모델. 순수 함수 — 네트워크·파일 접근 없음."""
     reused = sorted({str(f.attrs["cached"]) for f in (prices or {}).values() if getattr(f, "attrs", {}).get("cached")})
     reused_count = sum(1 for f in (prices or {}).values() if getattr(f, "attrs", {}).get("cached"))
@@ -746,6 +800,7 @@ def build_model(*, report_date: str, data: dict, investment_md: str = "", market
             "technical": _technical(stats),
             "fear_greed": _fear_greed(section(mkt, "공포·탐욕")),
             "news": _news(section(mkt, "주요 뉴스", deep=True)),
+            "brokers": broker_notes(source_events),
             "calendar": _calendar(section(mkt, "경제 일정")),
         },
         "portfolio": {

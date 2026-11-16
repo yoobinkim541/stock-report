@@ -19,7 +19,7 @@ import requests
 from dotenv import load_dotenv          # crons/*.py 관례 — uv run 은 .env 를 자동 주입 안 함
 load_dotenv()
 
-from reports import article_queue, source_collector
+from reports import article_queue, source_collector, source_publishers
 from reports.source_runs import record_source_run
 
 
@@ -58,6 +58,14 @@ def default_registry() -> list[ProviderSpec]:
             source_collector.fetch_telegram_channel_events,
             timeout_seconds=90,     # 채널 수만큼 순차 요청 — 기본 30초로는 모자란다
             retries=1,
+        ),
+        ProviderSpec(
+            "broker_report",
+            tuple(f"broker_report:{channel}" for channel in source_collector.TELEGRAM_NEWS_CHANNELS
+                  if source_publishers.publisher(f"telegram:{channel}")["role"] == "sell_side"),
+            "news",
+            source_collector.fetch_broker_report_events,
+            timeout_seconds=180,    # 채널 화면 6회 + PDF 최대 4건(건당 15MB 상한)
         ),
         ProviderSpec(
             "news_rss",

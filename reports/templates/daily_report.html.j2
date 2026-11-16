@@ -201,7 +201,7 @@
 </section>
 
 {#- ───────────── 3. 시장: 추세 그림·섹터·일정·등락 상위 ───────────── #}
-{% if f.spy or f.qqq or m.market.sectors or m.market.calendar or m.market.movers.up %}
+{% if f.spy or f.qqq or m.market.sectors or m.market.calendar or m.market.movers.up or m.market.brokers %}
 <section class="page market">
   {% if f.spy or f.qqq %}
   <div class="grid2">
@@ -262,6 +262,16 @@
     {{ movers(m.market.movers.down, "NASDAQ 100 일일 하락률 상위") }}
   </div>
   <div class="src">자료: Yahoo Finance · NASDAQ 100 스캔 대상 종목의 전 거래일 등락률 · 재무는 자체 재무 점수(0~100)와 등급</div>
+  {% endif %}
+  {% if m.market.brokers %}
+  <div class="tbl brokers">{{ band("증권사 코멘트", "최근 24시간 채널 글 첫머리 · 각 증권사의 견해이며 검증 전") }}
+    <table><tbody>
+    {% for b in m.market.brokers[:5] %}
+      <tr><td class="l flat">{{ b.when }}</td><td class="l"><b>{{ b.broker }}</b></td>
+      <td class="l clip">{{ b.headline | truncate(140, true, "…") }}</td><td class="flat">{{ b.tickers[:3] | join(" · ") }}</td></tr>
+    {% endfor %}
+    </tbody></table>
+  </div>
   {% endif %}
 </section>
 {% endif %}
@@ -398,7 +408,7 @@
     <li>본 자료는 공개 시세·공시 데이터와 자체 규칙으로 자동 생성한 개인 참고 자료이며, 금융투자업자의 조사분석자료나 투자 권유가 아닙니다. 투자 판단과 책임은 본인에게 있습니다.</li>
     <li>수치는 모두 규칙 기반 계산값입니다. 언어모델(LLM) 코멘트는 계산값을 바꾸지 못하며, 사실 검증을 통과한 경우에만 Analyst Comment 에 수록됩니다.</li>
     <li>판단(보유·관심·비중점검 등)은 재무 점수·가격 신호·실적 일정·보유 비중을 조합한 규칙 결과이고, 자동 매매 신호가 아닙니다.</li>
-    <li>자료 출처: 시세·지수·금리·환율·원자재·재무 지표는 Yahoo Finance, 보유 수량·평균단가는 증권사 계좌 동기화 스냅샷, 기관 보유는 미국 SEC 13F, 공포·탐욕은 CNN(수집되지 않은 날은 VIX 기반 추정), 경제 일정은 SaveTicker 캘린더, 뉴스는 수집 캐시와 Google News RSS 입니다.</li>
+    <li>자료 출처: 시세·지수·금리·환율·원자재·재무 지표는 Yahoo Finance, 보유 수량·평균단가는 증권사 계좌 동기화 스냅샷, 기관 보유는 미국 SEC 13F, 공포·탐욕은 CNN(수집되지 않은 날은 VIX 기반 추정), 경제 일정은 SaveTicker 캘린더, 뉴스는 수집 캐시와 Google News RSS, 증권사 코멘트는 각 증권사의 공개 텔레그램 채널입니다.</li>
     <li>계좌 수익률은 키움 미국주식 거래내역과 종가로 다시 계산한 시간가중 수익률입니다. 매수·매도·입출금으로는 움직이지 않고, 배당은 원천징수(15%) 후 금액을 더합니다. 거래내역은 결제 기준이라 최근 2거래일 체결은 현재 보유 수량으로 맞춥니다.{% if m.portfolio.performance.missing %} 시세가 없어 계산에서 뺀 종목: {{ m.portfolio.performance.missing | join(", ") }}.{% endif %}</li>
     {% if m.price_basis.reused %}<li>오늘은 시세 조회가 일부 막혀 {{ m.price_basis.reused }}개 심볼에 {{ m.price_basis.fetched }} 조회분을 썼습니다.</li>{% endif %}
     <li>시세는 Yahoo Finance 일봉(수정주가) 기준으로 지연·누락이 있을 수 있습니다. 기준일 {{ m.date }}{% if m.generated_at %} · 데이터 생성 {{ m.generated_at }} KST{% endif %}.</li>

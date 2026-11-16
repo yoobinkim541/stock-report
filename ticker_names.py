@@ -498,6 +498,8 @@ def search_label(ticker: str) -> str:
 _MENTION_ALIAS_BLOCK = frozenset({
     "금", "은", "비트", "다우", "환율", "이더", "골드", "실버", "달러",
     "eth", "btc", "유가",
+    # 본문에서 다른 뜻으로 더 자주 걸리는 별칭: 빅스텝, Fed's target, 인명(존슨·애벗), 에스큐브드
+    "빅스", "target", "존슨", "애벗", "에스큐",
 })
 # 본문 티커 뒤에 붙는 조사. "NVDA는"은 단어이고 "IT서비스"는 한 단어라 조사 외의
 # 한글이 바로 붙으면 티커로 보지 않는다.
@@ -525,6 +527,13 @@ _BODY_CODE_RE = re.compile(
     + _MENTION_PARTICLE +
     _BODY_EDGE,
     re.IGNORECASE,
+)
+
+
+# 애널리스트 표기 "네비우스(NBIS US)", "삼성전자(005930 KS)". 거래소 접미가 붙은 괄호 표기는
+# 종목 사전에 없어도 티커로 받는다 (글쓴이가 종목이라고 밝힌 표기).
+_EXCHANGE_NOTE_RE = re.compile(
+    r"[(\[]\s*(?P<raw>[A-Z]{1,5}(?:[.\-][A-Z])?|\d{6})[ .:/](?P<ex>US|UN|UW|UQ|UA|UR|KS|KQ)\s*[)\]]"
 )
 
 
@@ -617,6 +626,15 @@ def _overlaps(start: int, end: int, spans: list[tuple[int, int]]) -> bool:
     return any(start < stop and end > begin for begin, stop in spans)
 
 
+_NAMED_TICKER_RE = re.compile(r"\s*[(（]\s*([A-Z]{1,5})(?![A-Za-z])")
+
+
+def _named_other(text: str, end: int, ticker: str) -> bool:
+    """별칭 바로 뒤 괄호에 다른 알려진 티커가 적혀 있으면 그쪽이 맞다: `엑슨(AXON)` 은 XOM 이 아니다."""
+    m = _NAMED_TICKER_RE.match(text, end)
+    return bool(m and m.group(1) != ticker and m.group(1) in _ALL_TICKERS)
+
+
 def mentions_in(text: str, *, limit: int = 6) -> list[str]:
     """뉴스 제목의 종목 언급을 티커로 뽑는다. 등장 순서·중복 제거·무네트워크.
 
@@ -625,7 +643,8 @@ def mentions_in(text: str, *, limit: int = 6) -> list[str]:
     있을 때만. 본문 단어 티커는 대문자이고 길이 2 이상인 알려진 심볼만. 6자리
     코드(0167A0 포함)는 `005930.KS`(또는 `.KQ`)로 정규화한다. 한글·영문 별칭은
     길이 2 이상이고 제목에 포함될 때만. 오탐 별칭(금·은·비트·다우·환율·이더·
-    골드·실버·달러·eth·btc·유가)은 제외한다. limit 가 0 이하이면 빈 목록.
+    골드·실버·달러·eth·btc·유가)은 제외한다. 거래소 접미가 붙은 괄호 표기
+    (`(NBIS US)`, `(005930 KS)`)는 사전에 없는 종목도 받는다. limit 가 0 이하이면 빈 목록.
     """
     if not isinstance(text, str) or not text or limit <= 0:
         return []
@@ -637,6 +656,10 @@ def mentions_in(text: str, *, limit: int = 6) -> list[str]:
             hits.append((m.start(), m.end(), sym))
         else:
             blocked.append((m.start(), m.end()))
+    for m in _EXCHANGE_NOTE_RE.finditer(text):
+        raw, korean = m.group("raw"), m.group("ex") in {"KS", "KQ"}
+        if raw.isdigit() == korean:
+            hits.append((m.start(), m.end(), f"{raw}.{m.group('ex')}" if korean else raw))
     for m in _BODY_TICKER_RE.finditer(text):
         raw = m.group("raw")
         if raw in _ALL_TICKERS:
@@ -653,7 +676,7 @@ def mentions_in(text: str, *, limit: int = 6) -> list[str]:
             if i < 0:
                 break
             end = i + len(alias)
-            if _alias_span_ok(text, i, end, alias):
+            if _alias_span_ok(text, i, end, alias) and not _named_other(text, end, ticker):
                 hits.append((i, end, ticker))
             start = i + 1
     hits.sort(key=lambda item: (item[0], -(item[1] - item[0])))

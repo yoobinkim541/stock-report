@@ -41,6 +41,15 @@ def test_event_to_evidence_card_preserves_raw_text_and_payload():
     assert "AI 데이터센터 전력 수요 증가" in data["summary"]
 
 
+def test_sell_side_channel_post_is_not_typed_as_a_rumor():
+    card = event_to_evidence_card({
+        "source": "telegram:kwusa", "title": "코어위브 기업리포트", "url": "https://t.me/kwusa/10",
+        "classification": {"kind": "broker_comment", "topic": "기술/AI", "trust": "B"},
+    }, now=datetime(2026, 11, 16, 10, 0, tzinfo=KST)).to_dict()
+
+    assert (card["event_type"], card["confidence"]) == ("broker_comment", 0.78)
+
+
 def test_cards_to_source_refs_keeps_url_and_raw_paths_deduped():
     first = event_to_evidence_card({
         "source": "saveticker",
