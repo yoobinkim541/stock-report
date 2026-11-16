@@ -58,6 +58,10 @@ _KO_LARGE_UNIT = {"만": 4, "억": 8, "조": 12}
 _NUMBER_WORDS = {"one": "1", "two": "2", "three": "3", "four": "4", "five": "5", "six": "6", "seven": "7",
                  "eight": "8", "nine": "9", "ten": "10", "eleven": "11", "twelve": "12", "dozen": "12"}
 _MULTIPLIER_NUMBERS = {"x2": "2", "x3": "3", "x4": "4"}
+# Evidence-side only: a two-digit year supports its four-digit form ("29년부터" = 2029, "'26" = 2026).
+# "년" alone is not enough: "10년물", "3년간" and "30년 국채" are durations, so a date word must follow.
+_SHORT_YEAR = re.compile(r"(?<![0-9.,])(?:['\u2019]([0-9]{2})(?![0-9])"
+                         r"|([0-9]{2})년\s?(?=부터|까지|에\b|에는|말|초(?!과)|상반기|하반기|[0-9]{1,2}월|[1-4]분기|[1-4]q))")
 # Certainty and multiplier expressions, keyed by meaning so English and Korean
 # forms of the same unit correspond. A claim/prose may use one only when its
 # evidence asserts the same unit (negated uses are not assertions).
@@ -79,6 +83,9 @@ _KOREAN_NEGATION = ("않", "없", "아니", "못")
 _NEGATION = re.compile(
     r"\b(?:not|no|never|without|cannot|neither|nor|none|nothing|unrealized|unconfirmed|unproven"
     r"|unverified|uncertain|unclear)\b|n't\b|않|없|아니|(?<!잘)못|미실현|미확정|미확인|미입증|미검증"
+    # "미성사 전망" is restated as "성사되지 않을 전망". Only words whose plain restatement is a negation:
+    # "미달" is left out because it is restated as "하회".
+    r"|미성사|미반영|미발표|미공개|미해결|미체결|미이행|미승인|미적용|미포함|미완료|미개최|미출시|미충족|미지급|미참여"
     r"|불확실|불분명|불투명")
 _NOT_NEGATION = re.compile(r"\bnot only\b|\bno doubt\b|\bwithout (?:a )?doubt\b"
                            r"|틀림없|끊임없|어김없|변함없|관계없|상관없|빠짐없|거침없")
@@ -89,6 +96,12 @@ _HEDGE = re.compile(
     r"|target(?:s|ed|ing)?|uncertain\w*|unclear|intend\w*|scheduled|proposed)\b"
     r"|전망|예상|예측|추정|계획|가능|불확실|불분명|불투명|목표|예정|우려|수\s?있|것으로\s?보|관측|추진")
 _MODAL_MAY = re.compile(r"\bmay\b")  # case-sensitive: "May" the month is not a hedge
+# A data release puts the consensus beside the reported figure: "PPI: 0.3/6.5 (예측치: 0.4/6.6)", "예상치 하회".
+# The consensus is what the figure is measured against, not a forecast of it.
+_CONSENSUS = r"(?:시장\s?)?(?:예측치|예상치|전망치|추정치|기대치|컨센서스|consensus|forecast|expected|est\.?)"
+_CONSENSUS_NOTE = re.compile(
+    _CONSENSUS + r"\s?[:\uff1a]\s?[^,)\n]*"
+    r"|" + _CONSENSUS + r"(?:을|를|에|보다|\s)*(?:상회|하회|부합|웃돌|밑돌|넘어|못\s?미)", re.IGNORECASE)
 # Rise/fall vocabulary per content token (English whole word, Korean anywhere in the token).
 _DIRECTION_EN = {
     "up": re.compile(r"ris(?:e|es|en|ing)|rose|increas\w*|grow(?:s|n|ing|th)?|grew|gain(?:s|ed|ing)?"
@@ -187,6 +200,7 @@ def grounding_numbers(text: str) -> set[str]:
     words = set(re.findall(r"[a-z]+", _plain(text).casefold()))
     numbers.update(digit for word, digit in _NUMBER_WORDS.items() if word in words)
     numbers.update(_MULTIPLIER_NUMBERS[key] for key in assertive_terms(text) if key in _MULTIPLIER_NUMBERS)
+    numbers.update("20" + (match.group(1) or match.group(2)) for match in _SHORT_YEAR.finditer(_plain(text).casefold()))
     return numbers
 
 
@@ -221,7 +235,8 @@ def _stem(token: str) -> str:
 
 
 def _mentions(stem: str, text: str) -> bool:
-    return re.search(r"(?<!\w)" + re.escape(stem), text) is not None
+    """stem starts a word of text. A word may follow digits, as content tokens do: "10년물" holds "년물"."""
+    return re.search(r"(?<![^\W\d_])" + re.escape(stem), text) is not None
 
 
 def _script(token: str) -> str:
@@ -339,6 +354,21 @@ def _negated(text: str) -> bool:
 def _hedged(text: str) -> bool:
     plain = _plain(text)
     return _HEDGE.search(plain.casefold()) is not None or _MODAL_MAY.search(plain) is not None
+
+
+def _realized_beyond(text: str, quote: str) -> bool:
+    """The text states as fact what the quote only expects.
+
+    A quote whose only forecast wording is a consensus note supports the figures reported beside the note,
+    never the consensus figure itself.
+    """
+    if _hedged(text) or not _hedged(quote):
+        return False
+    reported = _CONSENSUS_NOTE.sub(" ", _plain(quote))
+    if _hedged(reported):
+        return True
+    supported = grounding_numbers(reported)
+    return any(not forms & supported for forms in _number_mentions(text))
 
 
 def normalized_term(value: str) -> str:
@@ -459,7 +489,7 @@ def claim_grounding_violation(text: str, quote: str, source_body: str) -> str | 
     if (not directions <= quote_directions.union(*moves.values()) or _sign_contradicted(text, moves)
             or (language and _direction_contradicted(pairs, quote_pairs))):
         return "claim_direction_unsupported"
-    if _hedged(quote) and not _hedged(text):
+    if _realized_beyond(text, quote):
         return "claim_modality_unsupported"
     return None
 

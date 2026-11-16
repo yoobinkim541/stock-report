@@ -394,6 +394,38 @@ def test_signed_moves_and_known_short_names_support_a_spelled_out_claim(quote, c
     assert compile_claim(quote, claim)["claims"][0]["text"] == claim
 
 
+# 두 자리 연도, "미-" 부정, 숫자에 붙은 단어, 지표 발표의 예측치 표기.
+@pytest.mark.parametrize("quote,claim", [
+    ("삼성SDI 16GWh LFP 배터리 계약(29년부터 3년) 체결", "삼성SDI는 2029년부터 3년간 16GWh LFP 배터리 계약을 체결했다."),
+    ("금주 APEC 계기 北美 정상회담 미성사 전망", "자료는 금주 APEC 계기 北美 정상회담이 성사되지 않을 것으로 전망한다."),
+    ("10년물은 한때 5.17%를 재돌파했습니다.", "미국 10년물 금리는 한때 5.17%를 다시 넘어섰다."),
+    ("미국, PPI (10월) (MoM/YoY): 0.3/6.5 (예측치: 0.4/6.6, 이전치: 1.4/6.3)",
+     "미국의 10월 PPI는 전월 대비 0.3, 전년 대비 6.5였다."),
+    ("美 10월 PPI(+6.5% YoY)는 예상치 하회에도 4년 만에 최고였고", "미국 10월 PPI는 전년 대비 6.5% 상승해 4년 만에 최고였다."),
+])
+def test_broker_notation_supports_the_plainly_written_claim(quote, claim):
+    assert compile_claim(quote, claim)["claims"][0]["text"] == claim
+
+
+@pytest.mark.parametrize("quote,claim,code", [
+    # 예측치로 적힌 수치를 실적처럼 쓴 claim
+    ("미국, PPI (10월) (MoM/YoY): 0.3/6.5 (예측치: 0.4/6.6, 이전치: 1.4/6.3)",
+     "미국의 10월 PPI는 전월 대비 0.4, 전년 대비 6.6이었다.", "claim_modality_unsupported"),
+    # 전망치 자체가 내용인 글은 여전히 전망이다
+    ("내년 매출 전망치 10조원, 영업이익 전망치 2조원 제시", "내년 매출은 10조원이고 영업이익은 2조원이다.",
+     "claim_modality_unsupported"),
+    # 기간은 연도가 아니다
+    ("30년 국채 금리가 5.2%까지 올랐습니다.", "2030년 국채 금리가 5.2%까지 올랐다.", "claim_number_unsupported"),
+    ("10년물은 한때 5.17%를 재돌파했습니다.", "2010년물은 한때 5.17%를 재돌파했다.", "claim_number_unsupported"),
+    # 부정이 없는 글을 부정으로 쓴 claim
+    ("금주 APEC 계기 北美 정상회담 성사 전망", "자료는 금주 APEC 계기 北美 정상회담이 성사되지 않을 것으로 전망한다.",
+     "claim_negation_unsupported"),
+])
+def test_broker_notation_does_not_admit_a_forecast_duration_or_negation_swap(quote, claim, code):
+    with pytest.raises(ValueError, match=code):
+        compile_claim(quote, claim)
+
+
 @pytest.mark.parametrize("quote,claim,code", [
     # 부호가 가리키는 방향과 반대로 쓴 claim
     ("삼전 -4.5%, 하닉 +7.9%", "삼성전자는 4.5% 상승했고 하이닉스는 7.9% 하락했다.", "claim_direction_unsupported"),
