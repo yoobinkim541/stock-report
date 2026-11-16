@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import uuid
@@ -11,7 +12,9 @@ from pathlib import Path
 from safe_io import atomic_write_json, file_write_lock
 
 SCHEMA = 1
-DEFAULT_LIMIT = 20
+# 80 is where research posts stop gaining: they are compiled within the hour they appear, and every
+# further slot only widens community-relay coverage (measured inflow: ~30 research and ~130 relay posts a day).
+DEFAULT_LIMIT = 80
 MAX_LIMIT = 1000
 KST = timezone(timedelta(hours=9))
 _REVISION_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -34,6 +37,17 @@ def _limit(value: int) -> int:
 
 def configured_limit() -> int:
     return _limit(int(os.getenv("WIKI_SOURCE_DAILY_LIMIT", str(DEFAULT_LIMIT))))
+
+
+def paced_limit(now: datetime | None = None, limit: int | None = None) -> int:
+    """The share of the daily limit that the elapsed part of the KST day has earned (at least 1).
+
+    Reserving against it spreads work over the day instead of spending the day's budget in its first hours.
+    """
+    limit = configured_limit() if limit is None else _limit(limit)
+    local = _now(now).astimezone(KST)
+    elapsed = (local - local.replace(hour=0, minute=0, second=0, microsecond=0)).total_seconds() / 86400
+    return max(1, math.ceil(limit * elapsed))
 
 
 def _read(path: str | Path) -> dict:

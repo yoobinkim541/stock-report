@@ -217,6 +217,72 @@ def agy_structured_call(prompt: str, *, timeout: float, runner=None) -> str | No
     return None
 
 
+_USAGE_REQUESTS = "".join(json.dumps(request) + "\n" for request in (
+    {"id": 1, "method": "initialize",
+     "params": {"clientInfo": {"name": "stock-report", "title": "stock-report", "version": "1"}}},
+    {"method": "initialized"},
+    {"id": 2, "method": "account/rateLimits/read"}))
+
+
+def _codex_rate_limits(timeout: float) -> dict | None:
+    """``account/rateLimits/read`` over ``codex app-server`` (JSON-RPC on stdio). No model call, about 1 s.
+
+    The server quits as soon as stdin closes, before it has answered, so stdin stays open until the answer.
+    """
+    try:
+        proc = subprocess.Popen(["codex", "app-server"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, text=True, start_new_session=True)
+    except OSError:
+        return None
+    answer: list[dict] = []
+
+    def read() -> None:
+        with contextlib.suppress(OSError, ValueError):
+            for line in proc.stdout:
+                with contextlib.suppress(ValueError):
+                    message = json.loads(line)
+                    if isinstance(message, dict) and message.get("id") == 2:
+                        answer.append(message)
+                        return
+
+    reader = threading.Thread(target=read, daemon=True)
+    try:
+        reader.start()
+        proc.stdin.write(_USAGE_REQUESTS)
+        proc.stdin.flush()
+        reader.join(timeout)
+    except (OSError, ValueError):
+        pass
+    finally:
+        terminate_process_group(proc)
+        _close_pipes(proc)
+    result = answer[0].get("result") if answer else None
+    return result if isinstance(result, dict) else None
+
+
+def codex_usage(*, timeout: float = 15, read=None) -> dict | None:
+    """How much of the Codex account's usage windows is spent, or None when it cannot be read.
+
+    ``{"allowed": bool, "reached": str | None, "plan": str | None,
+       "windows": [{"minutes": 300, "used_percent": 5, "resets_at": 1794845213}, ...]}``.
+    The Codex CLI and the Hermes ``openai-codex`` provider draw on this same account.
+    """
+    result = (read or _codex_rate_limits)(timeout)
+    limits = result.get("rateLimits") if result else None
+    if not isinstance(limits, dict):
+        return None
+    windows = []
+    for window in (limits.get("primary"), limits.get("secondary")):
+        if (isinstance(window, dict) and isinstance(window.get("usedPercent"), (int, float))
+                and isinstance(window.get("windowDurationMins"), int)):
+            windows.append({"minutes": window["windowDurationMins"], "used_percent": window["usedPercent"],
+                            "resets_at": window.get("resetsAt")})
+    reached = limits.get("rateLimitReachedType") or result.get("rateLimitReachedType")
+    allowed = result.get("ordinaryUsageAllowed", limits.get("ordinaryUsageAllowed", True))
+    return {"allowed": allowed is not False, "reached": reached or None,
+            "plan": limits.get("planType") or result.get("planType"), "windows": windows}
+
+
 def structured_providers(raw: str | None = None) -> list[str] | None:
     """WIKI_STRUCTURED_PROVIDERS(또는 ``raw``) → 검증된 순서 목록. 알 수 없는 이름이 하나라도 있으면 None.
 

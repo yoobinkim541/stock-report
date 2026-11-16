@@ -235,3 +235,23 @@ def test_run_cli_timeout_exception_does_not_carry_prompt():
         L.run_cli([sys.executable, "-c", "import time; time.sleep(30)", SECRET],
                   capture_output=True, text=True, timeout=0.3)
     assert SECRET not in str(info.value)
+
+
+def test_codex_usage_reads_both_windows_and_a_reached_limit():
+    from lib import llm_cli
+    limits = {"primary": {"usedPercent": 6, "windowDurationMins": 300, "resetsAt": 1794845167},
+              "secondary": {"usedPercent": 73, "windowDurationMins": 10080, "resetsAt": 1794933133},
+              "planType": "plus", "rateLimitReachedType": None}
+    open_account = llm_cli.codex_usage(read=lambda timeout: {"ordinaryUsageAllowed": True, "rateLimits": limits})
+    assert open_account == {"allowed": True, "reached": None, "plan": "plus", "windows": [
+        {"minutes": 300, "used_percent": 6, "resets_at": 1794845167},
+        {"minutes": 10080, "used_percent": 73, "resets_at": 1794933133}]}
+    spent = llm_cli.codex_usage(read=lambda timeout: {
+        "ordinaryUsageAllowed": False, "rateLimits": {**limits, "rateLimitReachedType": "primary"}})
+    assert (spent["allowed"], spent["reached"]) == (False, "primary")
+
+
+@pytest.mark.parametrize("answer", [None, {}, {"rateLimits": None}, {"rateLimits": "unavailable"}])
+def test_codex_usage_is_unknown_when_the_cli_gives_no_limits(answer):
+    from lib import llm_cli
+    assert llm_cli.codex_usage(read=lambda timeout: answer) is None

@@ -117,7 +117,7 @@ def test_streamed_discovery_bounds_candidates_counts_backlog_and_replays_evidenc
         event = events[0]
         seen.append(event['id'])
         return {'eligible': [{'revision_id': event['id'], 'role': 'support', 'provider': 'arca',
-                             'scope': 'article_fulltext', 'body': 'full body',
+                             'scope': 'article_fulltext', 'body': 'a full paragraph of the article body',
                              'canonical_url': event['url'], 'published_at': event['id']}],
                 'unavailable': [], 'pending_chunking': []}
     monkeypatch.setattr(runner.wiki_source_revision, 'discover_revisions', discover)
@@ -342,16 +342,122 @@ def test_selection_takes_turns_between_publishers_and_starts_with_the_longest_wa
         return {'revision_id': f'{channel}-{day:02d}', 'provider': f'telegram:{channel}', 'scope': 'public_message',
                 'canonical_url': f'https://t.me/{channel}/{day}', 'published_at': f'2026-10-{day:02d}', 'collected_at': ''}
     busy = [post('insidertracking', day) for day in range(1, 9)]
-    sources = [*busy, post('kwusa', 20), post('kwusa', 21), post('mirae_dm', 22)]
+    sources = [*busy, post('FastStockNewsUSA', 20), post('FastStockNewsUSA', 21), post('thekobeissiletter', 22)]
     runner = module()
 
     # 글이 많은 채널도 한도 5건을 혼자 쓰지 못하고, 각 채널에서는 최신 글부터 나온다.
     assert [s['revision_id'] for s in runner.select_pending(sources, lambda source: True)] == [
-        'mirae_dm-22', 'kwusa-21', 'insidertracking-08', 'kwusa-20', 'insidertracking-07']
+        'thekobeissiletter-22', 'FastStockNewsUSA-21', 'insidertracking-08', 'FastStockNewsUSA-20',
+        'insidertracking-07']
     # 방금 다룬 발행자는 뒤로 가고, 한 번도 다루지 못한 발행자가 먼저 온다.
-    served = {'미국 주식 인사이더': '2026-10-16T03:00:00', '키움증권': '2026-10-16T02:00:00'}
+    served = {publisher_name('insidertracking'): '2026-10-16T03:00:00',
+              publisher_name('FastStockNewsUSA'): '2026-10-16T02:00:00'}
     assert [s['revision_id'] for s in runner.select_pending(sources, lambda source: True, limit=3, served=served)] == [
-        'mirae_dm-22', 'kwusa-21', 'insidertracking-08']
+        'thekobeissiletter-22', 'FastStockNewsUSA-21', 'insidertracking-08']
+
+
+def publisher_name(channel):
+    from reports.source_publishers import publisher
+    return publisher(f'telegram:{channel}')['id']
+
+
+def channel_post(channel, day, **extra):
+    return {'revision_id': f'{channel}-{day:02d}', 'provider': f'telegram:{channel}', 'scope': 'public_message',
+            'canonical_url': f'https://t.me/{channel}/{day}', 'published_at': f'2026-10-{day:02d}',
+            'collected_at': '', **extra}
+
+
+def test_untried_research_goes_ahead_of_relays_and_of_its_own_retries():
+    sources = [channel_post('insidertracking', 25), channel_post('insidertracking', 24),
+               channel_post('kwusa', 20), channel_post('kwusa', 21), channel_post('mirae_dm', 22),
+               # 이미 실패한 증권사 글은 우선권이 없다: 다른 채널과 같은 순번을 기다린다.
+               channel_post('mirae_dm', 23, last_attempt_at='2026-10-16T01:00:00+00:00')]
+    # 방금 다룬 증권사도 새 글은 먼저 나온다. 이어서 발행자별 순번(가장 오래 기다린 채널부터).
+    served = {publisher_name('kwusa'): '2026-10-16T03:00:00', publisher_name('mirae_dm'): '2026-10-16T02:00:00'}
+    picked = module().select_pending(sources, lambda source: True, limit=6, served=served)
+    assert [s['revision_id'] for s in picked] == [
+        'mirae_dm-22', 'kwusa-21', 'kwusa-20', 'insidertracking-25', 'mirae_dm-23', 'insidertracking-24']
+
+
+def test_a_post_that_just_failed_waits_before_it_is_tried_again():
+    runner = module()
+    sources = [channel_post('kwusa', 20, last_attempt_at='2026-10-16T09:00:00+00:00'),
+               channel_post('kwusa', 21, last_attempt_at='2026-10-16T05:00:00+00:00'),
+               channel_post('insidertracking', 22)]
+    waiting = (NOW - runner.RETRY_AFTER).isoformat()   # 06:00 UTC
+    assert [s['revision_id'] for s in runner.select_pending(sources, lambda source: True, retry_before=waiting)] == [
+        'insidertracking-22', 'kwusa-21']
+
+
+@pytest.mark.parametrize('body,contentless', [
+    ('https://youtu.be/pJl3U24udLw 프리마켓 현황', True),
+    ('코어위브 애프터 7% 상승 확대', True),
+    ('코스트코는 $30 특별 배당 발표후 애프터마켓 상승.', False),
+    ('공포 탐욕지수는 FEAR 33에서 37로 상승', False),
+])
+def test_a_bare_link_caption_or_price_tick_is_contentless(body, contentless):
+    assert module()._contentless({'body': body}) is contentless
+
+
+WINDOWS = [{'minutes': 300, 'used_percent': 6, 'resets_at': 1}, {'minutes': 10080, 'used_percent': 73, 'resets_at': 2}]
+
+
+def account(short=6, weekly=73, **changes):
+    return {'allowed': True, 'reached': None, 'plan': 'plus', 'windows': [
+        {**WINDOWS[0], 'used_percent': short}, {**WINDOWS[1], 'used_percent': weekly}], **changes}
+
+
+@pytest.mark.parametrize('usage,order,reason', [
+    (account(), ['codex', 'hermes'], None),
+    (account(short=69, weekly=89), ['codex'], None),
+    (account(short=70), ['codex'], 'usage_window_300m_at_70'),
+    (account(weekly=90), ['codex'], 'usage_window_10080m_at_90'),
+    (account(allowed=False), ['codex'], 'usage_limit_reached'),
+    (account(reached='primary'), ['codex'], 'usage_limit_reached'),
+    # 측정값을 못 읽었거나 Codex 가 첫 제공자가 아니면 막지 않는다.
+    (None, ['codex'], None),
+    (account(short=99), ['openrouter', 'codex'], None),
+])
+def test_provider_is_busy_near_the_end_of_a_usage_window(usage, order, reason):
+    assert module().provider_busy(usage, order) == reason
+
+
+def test_apply_leaves_a_busy_provider_alone_without_scanning_or_reserving(tmp_path, monkeypatch, capsys):
+    runner = module()
+    root = _apply_setup(runner, tmp_path, monkeypatch)
+    root.mkdir(parents=True)
+    monkeypatch.delenv('WIKI_STRUCTURED_PROVIDERS', raising=False)
+    monkeypatch.setattr(runner.llm_cli, 'codex_usage', lambda: account(short=88))
+    monkeypatch.setattr(runner, 'load_source_events', lambda **kw: pytest.fail('scanned sources with a busy provider'))
+    assert runner.main() == 0
+    summary = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert (summary['skipped'], summary['reason'], summary['attempted']) == (
+        'provider_busy', 'usage_window_300m_at_88', 0)
+    assert summary['usage']['before']['windows'][0]['used_percent'] == 88
+    assert not (root / 'automatic-budget.json').exists() and not (root / 'backups').exists()
+
+
+def test_relays_wait_for_the_days_pace_while_untried_research_does_not(tmp_path, monkeypatch, capsys):
+    runner = module()
+    _apply_setup(runner, tmp_path, monkeypatch)
+    channels = {1: 'insidertracking', 2: 'kwusa', 3: 'thekobeissiletter', 4: 'mirae_dm'}
+    monkeypatch.setattr(runner, 'load_source_events', lambda **kw: iter([{'n': n} for n in channels]))
+    monkeypatch.setattr(runner.wiki_source_revision, 'discover_revisions', lambda events, **kw: {
+        'eligible': [{'revision_id': format(events[0]['n'], '064x'), 'role': 'evidence',
+                      'provider': f"telegram:{channels[events[0]['n']]}", 'scope': 'public_message',
+                      'canonical_url': f"https://t.me/{channels[events[0]['n']]}/{events[0]['n']}",
+                      'published_at': f"2026-10-0{events[0]['n']}"}], 'unavailable': []})
+    monkeypatch.setattr(runner.pipeline, '_pending_source', lambda *args: True)
+    seen = []
+    monkeypatch.setattr(runner, 'process',
+                        lambda source, *args, **kw: seen.append(source['revision_id']) or {'data_committed': 1})
+    # 하루의 이 시각까지 허용된 몫은 3건: 증권사 글 2건은 그와 무관하게 들어가고, 전달 채널은 1건만 들어간다.
+    monkeypatch.setattr(runner.quota, 'paced_limit', lambda: 3)
+
+    assert runner.main() == 0
+    assert seen == [format(4, '064x'), format(2, '064x'), format(3, '064x')]
+    summary = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert (summary['quota']['count'], summary['quota']['paced_limit']) == (3, 3)
 
 
 def test_selection_compares_instants_and_retries_after_untouched_posts():
@@ -377,10 +483,12 @@ def test_discovery_puts_the_publisher_compiled_last_run_at_the_back(tmp_path, mo
     monkeypatch.setenv('WIKI_SOURCE_PIPELINE_ENABLED', '1')
     monkeypatch.delenv('WIKI_SOURCE_ALLOW_PRIVATE', raising=False)
     providers = {'i1': 'telegram:insidertracking', 'i2': 'telegram:insidertracking', 'k1': 'telegram:kwusa'}
+    bodies = {'i2': 'https://youtu.be/pJl3U24udLw 프리마켓 현황'}
     write_cache(runner, tmp_path / 'cache', [cached_event(identity) for identity in providers])
     monkeypatch.setattr(runner.wiki_source_revision, 'discover_revisions', lambda events, **kwargs: {
         'eligible': [{'revision_id': events[0]['id'], 'role': 'support', 'provider': providers[events[0]['id']],
-                      'scope': 'public_message_text', 'body': 'full body', 'canonical_url': events[0]['url'],
+                      'scope': 'public_message_text', 'canonical_url': events[0]['url'],
+                      'body': bodies.get(events[0]['id'], 'a full paragraph of the post body'),
                       'published_at': events[0]['id']}],
         'unavailable': [], 'pending_chunking': []})
     monkeypatch.setattr(runner, 'pending_public_source', lambda source, _: True)
@@ -392,9 +500,12 @@ def test_discovery_puts_the_publisher_compiled_last_run_at_the_back(tmp_path, mo
         (journal.root / folder).mkdir(parents=True, exist_ok=True)
         (journal.root / folder / name).write_text(json.dumps(payload))
 
-    with runner.discover_source_batch(journal, NOW, limit=2) as (sources, _, _, stats):
+    with runner.discover_source_batch(journal, NOW, limit=2) as (sources, _, already_pending, stats):
         assert [source['revision_id'] for source in sources] == ['k1', 'i1']
         assert stats['publisher_last_attempt'] == {'미국 주식 인사이더': '2026-10-16T03:00:00'}
+        # 링크뿐인 글은 후보가 아니고, 밀린 글 수에도 들지 않는다.
+        assert (stats['contentless_sources'], stats['pending_sources']) == (1, 2)
+        assert not already_pending({'revision_id': 'i2', 'role': 'support'})
 
 
 def test_dry_plan_never_reserves_daily_quota(tmp_path):

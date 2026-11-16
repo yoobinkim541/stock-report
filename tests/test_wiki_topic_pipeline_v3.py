@@ -298,7 +298,7 @@ def test_rollout_shared_reservation_is_spent_once_and_history_spends_none(worker
     batch = ([source], lambda source: [], lambda source: False, {"pending_sources": 1})
     assert rollout._run_batch(SimpleNamespace(apply=True, source_limit=1), journal, budget, NOW, batch) == 0
     assert len(calls) == 1
-    assert rollout.quota.status(budget)["count"] == 2 and rollout.quota.status(budget)["limit"] == 20
+    assert rollout.quota.status(budget)["count"] == 2 and rollout.quota.status(budget)["limit"] == rollout.quota.DEFAULT_LIMIT
     budget_bytes = budget.read_bytes()
     rollout._run_batch(SimpleNamespace(apply=True, source_limit=1), journal, budget, NOW, batch)
     assert len(calls) == 1 and budget.read_bytes() == budget_bytes

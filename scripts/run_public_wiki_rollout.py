@@ -15,6 +15,7 @@ from pathlib import Path
 
 import safe_io
 from agent_console import shared_memory
+from lib import llm_cli
 from reports import raw_archive, source_collector, wiki_public_budget as quota, wiki_source_revision
 from reports.source_publishers import publisher
 from reports import wiki_source_pipeline as pipeline
@@ -25,6 +26,12 @@ from reports.wiki_source_compiler import structured_llm_call
 # A broker post takes 40-60 s to compile, right at the shared 60 s provider share. 90 s is the provider CLIs' own
 # ceiling and half of the unchanged 180 s total cap, so one fallback provider still gets a full turn.
 COMPILE_PROVIDER_TIMEOUT = 90
+# The Codex account is shared with the chat bot and interactive use, and a spent window answers nothing for up
+# to five hours. Background work steps aside before that: at 70 % of a short window, 90 % of the weekly one.
+BUSY_PERCENT, BUSY_PERCENT_WEEKLY = 70, 90
+RETRY_AFTER = timedelta(hours=6)   # a post that failed is not tried again sooner
+MIN_TEXT_CHARS = 20   # below this a post is a bare link, an image caption or a price tick
+_URL = re.compile(r'https?://\S+|www\.\S+')
 BACKUP_RETENTION = 30   # events.jsonl 백업 보존 개수 (매 apply run마다 ~20MB 생성)
 
 
@@ -101,23 +108,50 @@ def _publisher_id(source):
     return publisher(source.get('provider'))['id']
 
 
-def _balanced(sources, limit, served=None):
-    """Round-robin across publishers so one busy channel cannot take the whole budget.
+def _fresh_research(source):
+    """An untried post from a sell-side research desk: written analysis, not a relay of someone else's news."""
+    return not source.get('last_attempt_at') and publisher(source.get('provider'))['role'] == 'sell_side'
+
+
+def _contentless(source):
+    """A newly discovered post with almost no text of its own. A source without a body is not judged."""
+    return 'body' in source and len(re.sub(r'\s+', '', _URL.sub('', source['body'] or ''))) < MIN_TEXT_CHARS
+
+
+def provider_busy(usage, order=None):
+    """Why the first provider should be left alone for now, or None. Unreadable usage never blocks."""
+    order = llm_cli.structured_providers() if order is None else order
+    if not usage or not order or order[0] != 'codex':
+        return None
+    if not usage['allowed'] or usage['reached']:
+        return 'usage_limit_reached'
+    for window in usage['windows']:
+        if window['used_percent'] >= (BUSY_PERCENT if window['minutes'] <= 1440 else BUSY_PERCENT_WEEKLY):
+            return f"usage_window_{window['minutes']}m_at_{window['used_percent']:g}"
+    return None
+
+
+def _balanced(sources, limit, served=None, retry_before=None):
+    """Fresh research first, then round-robin across publishers so one busy channel cannot take the rest.
 
     Publishers are visited least-recently-attempted first (``served``), and each
     publisher's own queue keeps the untouched-then-newest order: more posts arrive
     than the daily budget covers, so the ones left over are the old ones.
+    A post tried after ``retry_before`` waits: research queues drain every day, and without the wait a
+    publisher's turn would go to the same failed post run after run.
     """
     served = served or {}
     queues = {}
     for source in sorted(sources, key=_selection_key):
-        queues.setdefault(_publisher_id(source), []).append(source)
+        if retry_before is None or source.get('last_attempt_at', '') <= retry_before:
+            queues.setdefault(_publisher_id(source), []).append(source)
     order = sorted(queues, key=lambda name: (served.get(name, ''), _selection_key(queues[name][0])))
     chosen = []
-    while len(chosen) < limit and any(queues.values()):
-        for name in order:
-            if queues[name] and len(chosen) < limit:
-                chosen.append(queues[name].pop(0))
+    for wanted in (_fresh_research, lambda source: True):
+        while len(chosen) < limit and any(queue and wanted(queue[0]) for queue in queues.values()):
+            for name in order:
+                if queues[name] and wanted(queues[name][0]) and len(chosen) < limit:
+                    chosen.append(queues[name].pop(0))
     return chosen
 
 
@@ -144,7 +178,8 @@ def discover_source_batch(journal, now, *, limit):
     replayed from a temporary disk spool, and every deferred unique revision is
     counted explicitly; the next run scans it again rather than losing a tail.
     """
-    stats = {'eligible_sources': 0, 'pending_sources': 0, 'unavailable_events': 0}
+    stats = {'eligible_sources': 0, 'pending_sources': 0, 'contentless_sources': 0, 'unavailable_events': 0}
+    retry_before = (now - RETRY_AFTER).isoformat()
     queues, served = {}, {}
     with tempfile.TemporaryDirectory(prefix='wiki-source-batch-') as directory:
         with closing(sqlite3.connect(str(Path(directory) / 'batch.sqlite3'))) as database:
@@ -177,6 +212,9 @@ def discover_source_batch(journal, now, *, limit):
                         if existing:
                             continue
                         pending = pending_public_source(source, journal)
+                        if pending and _contentless(source):
+                            stats['contentless_sources'] += 1
+                            pending = False
                         database.execute('INSERT INTO revisions VALUES (?, ?, ?)', (identity, role, pending))
                         stats['eligible_sources'] += 1
                         stats['pending_sources'] += int(pending)
@@ -195,7 +233,8 @@ def discover_source_batch(journal, now, *, limit):
             finally:
                 if hasattr(events, 'close'):
                     events.close()
-            selected = _balanced([source for queue in queues.values() for source in queue], limit, served)
+            selected = _balanced([source for queue in queues.values() for source in queue], limit, served,
+                                 retry_before)
             stats['retained_candidates'] = len(selected)
             stats['publisher_last_attempt'] = served
             stats['deferred_pending_sources'] = stats['pending_sources'] - len(selected)
@@ -212,8 +251,9 @@ def discover_source_batch(journal, now, *, limit):
             yield selected, relevant, already_pending, stats
 
 
-def select_pending(sources, pending, *, limit=5, served=None):
-    return _balanced([source for source in sources if is_public(source) and pending(source)], limit, served)
+def select_pending(sources, pending, *, limit=5, served=None, retry_before=None):
+    return _balanced([source for source in sources if is_public(source) and pending(source)],
+                     limit, served, retry_before)
 
 
 def plan_status(path, *, candidates, limit=5):
@@ -548,7 +588,8 @@ def process(source, events, journal, attempt, *, context_mode="legacy_pages", no
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--apply', action='store_true')
-    parser.add_argument('--source-limit', type=int, default=5)
+    # 8 a run clears a morning burst of research within the hour (5 took 1.2 h at the 90th percentile).
+    parser.add_argument('--source-limit', type=int, default=8)
     args = parser.parse_args(argv)
     if not 1 <= args.source_limit <= 20:
         raise ValueError('source_limit_invalid')
@@ -557,20 +598,24 @@ def main(argv=None):
     journal = Journal(raw_archive.reports_root() / 'public-wiki-pilot-20261013')
     budget_path = journal.root / 'automatic-budget.json'
     now = datetime.now(timezone.utc)
+    usage = llm_cli.codex_usage() if args.apply else None
     if args.apply and os.getenv('AGENT_CONSOLE_PUBLIC_TOPIC_BOOTSTRAP_ENABLED', '0') != '1':
         budget = quota.status(budget_path, now)
-        if budget['count'] >= budget['limit']:
-            # 쿼터 소진 시 소스 스캔(CPU 2분+)·이벤트 백업 없이 종료. 토픽 복구는 bootstrap 활성 시만 필요.
+        busy = provider_busy(usage)
+        if busy or budget['count'] >= budget['limit']:
+            # 쿼터 소진·제공자 한도 임박 시 소스 스캔(CPU 2분+)·이벤트 백업 없이 종료. 토픽 복구는 bootstrap 활성 시만 필요.
             summary = {'attempted': 0, 'results': [], 'quota': budget,
-                       'skipped': 'quota_exhausted'}
+                       'skipped': 'provider_busy' if busy else 'quota_exhausted'}
+            if busy:
+                summary.update(reason=busy, usage={'before': usage})
             safe_io.atomic_write_json(str(journal.root / 'automatic-latest.json'), summary)
             print(json.dumps(summary), flush=True)
             return 0
     with discover_source_batch(journal, now, limit=args.source_limit) as batch:
-        return _run_batch(args, journal, budget_path, now, batch)
+        return _run_batch(args, journal, budget_path, now, batch, usage)
 
 
-def _run_batch(args, journal, budget_path, now, batch):
+def _run_batch(args, journal, budget_path, now, batch, usage=None):
     candidates, relevant_events, already_pending, discovery_stats = batch
     topic_sources, topic_reasons = resume_topic_sources(journal, now)
     if not args.apply:
@@ -627,10 +672,14 @@ def _run_batch(args, journal, budget_path, now, batch):
         for source in by_id.values():
             source['last_attempt_at'] = attempted.get(source['revision_id'], '')
         chosen = select_pending(by_id.values(), lambda source: pending_public_source(source, journal),
-                                limit=args.source_limit, served=discovery_stats.get('publisher_last_attempt'))
+                                limit=args.source_limit, served=discovery_stats.get('publisher_last_attempt'),
+                                retry_before=(now - RETRY_AFTER).isoformat())
         results = []
         for source in chosen:
-            attempt = quota.reserve(budget_path, source['revision_id'])
+            # Fresh research may use the whole day's limit the moment it appears and is first in the list;
+            # everything after it is spread over the day.
+            attempt = quota.reserve(budget_path, source['revision_id'],
+                                    limit=None if _fresh_research(source) else quota.paced_limit())
             if attempt is None:
                 break
             local = ({'context_mode': source['context_mode'], 'note_ids': source['note_ids']}
@@ -643,7 +692,9 @@ def _run_batch(args, journal, budget_path, now, batch):
                 # the same silence. The next run starts from another post.
                 quota.release(budget_path, attempt['id'])
                 break
-        summary = {'attempted': len(results), 'results': results, 'quota': quota.status(budget_path),
+        summary = {'attempted': len(results), 'results': results,
+                   'quota': {**quota.status(budget_path), 'paced_limit': quota.paced_limit()},
+                   'usage': {'before': usage, 'after': llm_cli.codex_usage() if results else usage},
                    'discovery': discovery_stats,
                    'resume_unavailable': len(reasons) + len(topic_reasons), 'unrestricted_pipeline_enabled': pipeline._mode_enabled()}
         if topic_recovery:

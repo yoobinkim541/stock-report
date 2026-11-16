@@ -1,12 +1,14 @@
 import json
 import multiprocessing
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from contextlib import contextmanager
 
 from reports import wiki_public_budget
+
+PACED_LIMIT = wiki_public_budget.paced_limit   # conftest replaces the module attribute for every test
 
 
 def test_clock_is_captured_after_lock_acquisition(tmp_path, monkeypatch):
@@ -72,7 +74,8 @@ def test_status_does_not_initialize_missing_file(tmp_path):
     path = tmp_path / "missing.json"
 
     now = datetime(2026, 10, 13, 14, 59, tzinfo=timezone.utc)
-    assert wiki_public_budget.status(path, now=now) == {"day": "2026-10-13", "count": 0, "limit": 20}
+    assert wiki_public_budget.status(path, now=now) == {
+        "day": "2026-10-13", "count": 0, "limit": wiki_public_budget.DEFAULT_LIMIT}
     assert not path.exists()
 
 
@@ -102,7 +105,17 @@ def test_corrupt_or_unknown_state_is_rejected_not_reset(tmp_path, payload):
     assert path.read_text() == payload
 
 
-def test_reservations_are_atomic_across_processes_at_limit(tmp_path):
+@pytest.mark.parametrize("kst_time,allowed", [
+    ((0, 0), 1), ((0, 30), 2), ((6, 0), 20), ((9, 30), 32), ((12, 0), 40), ((23, 59), 80)])
+def test_paced_limit_grows_with_the_kst_day_and_starts_at_one(kst_time, allowed):
+    # KST = UTC+9: 2026-11-16 00:00 KST is 2026-11-15 15:00 UTC.
+    start = datetime(2026, 11, 15, 15, tzinfo=timezone.utc)
+    now = start + timedelta(hours=kst_time[0], minutes=kst_time[1])
+    assert PACED_LIMIT(now, limit=80) == allowed
+
+
+def test_reservations_are_atomic_across_processes_at_limit(tmp_path, monkeypatch):
+    monkeypatch.setenv("WIKI_SOURCE_DAILY_LIMIT", "20")
     path = str(tmp_path / "budget.json")
     ctx = multiprocessing.get_context("fork")
     output = ctx.Queue()

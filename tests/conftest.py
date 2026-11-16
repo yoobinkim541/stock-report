@@ -56,6 +56,20 @@ def _isolate_agent_background_jobs(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_wiki_rollout_from_account_and_clock(monkeypatch):
+    """The wiki rollout reads the Codex account's usage meter and paces work by the time of day.
+
+    A test run must neither start the Codex CLI nor pass or fail by the hour it runs at.
+    """
+    from lib import llm_cli
+    from reports import wiki_public_budget
+
+    monkeypatch.setattr(llm_cli, "_codex_rate_limits", lambda timeout: None)
+    monkeypatch.setattr(wiki_public_budget, "paced_limit",
+                        lambda now=None, limit=None: limit or wiki_public_budget.configured_limit())
+
+
+@pytest.fixture(autouse=True)
 def _isolate_ohlc_cache():
     """매 테스트 전에 OHLC 디스크 캐시를 비운다.
 
