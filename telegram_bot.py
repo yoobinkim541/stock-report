@@ -72,7 +72,7 @@ from bot.attachment_parser import (
 )
 from bot.price_alerts import load_alerts, add_alert, remove_alert, check_alerts
 from portfolio_tracker import (
-    load_history, calc_performance,
+    load_history, load_account, calc_performance,
     build_performance_report,
 )
 from bot.order_generator import generate as generate_order
@@ -952,8 +952,9 @@ def cmd_history(d: dict) -> str:
             "  python3 portfolio_tracker.py"
         )
     latest = records[-1]
-    perf   = calc_performance(records)
-    series = [r.get("total_usd") for r in records[-30:] if r.get("total_usd") is not None]
+    account = load_account()
+    perf   = calc_performance(records, account)
+    series = account["twr"][-30:] if account else None      # 수익률 추이 — 총액은 매수만큼 커져서 쓰지 않는다
     return build_performance_report(perf, latest, value_series=series, html=True)
 
 

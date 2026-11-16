@@ -11,8 +11,12 @@ from __future__ import annotations
 import json
 import math
 import re
+import time
 from datetime import date as _date
+from datetime import timedelta
 from pathlib import Path
+
+from reports import account_performance
 
 WEEKDAYS = "월화수목금토일"
 
@@ -40,6 +44,11 @@ KPI_ROWS = (("KOSPI", "^KS11", "pt"), ("USD/KRW", "KRW=X", "원"), ("미국채 1
 MINI_CHARTS = (("S&P 500", "^GSPC", 0), ("미국채 10년 금리 (%)", "^TNX", 2),
                ("달러인덱스", "DX-Y.NYB", 1), ("WTI (달러/배럴)", "CL=F", 1))
 BENCHMARK = "SPY"
+BENCHMARKS = ("SPY", "QQQ")
+# 시세 조회가 막힌 날 쓰는 마지막 조회분. 이보다 오래된 캐시는 쓰지 않는다.
+PRICE_CACHE = Path.home() / "reports" / "ml-cache" / "report-pdf-prices.json"
+PRICE_CACHE_MAX_AGE_DAYS = 7
+FUND_WINDOWS = (("1M", "m1"), ("3M", "m3"), ("6M", "m6"), ("12M", "y1"))
 # (표시 이름, price_stats 키, 거래일 수). 1M 은 리포트 본문(daily_signals)과 같은 20거래일이다.
 RETURN_WINDOWS = (("1D", "d1", 1), ("1W", "d5", 5), ("1M", "m1", 20), ("3M", "m3", 63),
                   ("6M", "m6", 126), ("12M", "y1", 252))
@@ -261,26 +270,94 @@ def clip_history(prices: dict, report_date: str) -> dict:
     return out
 
 
-def fetch_price_history(symbols: list[str], *, period: str = "2y") -> dict:
-    """심볼별 일봉(Close·Volume). 실패한 심볼은 빠진다 — 호출부는 해당 그림만 생략한다."""
+def _download(symbols: list[str], period: str) -> dict:
+    """Yahoo Finance 일봉 → 심볼별 표. Close 는 배당·분할을 반영한 수정주가, Raw 는 분할만 반영한 종가."""
+    import pandas as pd
     import yfinance as yf
+
+    data = yf.download(symbols, period=period, interval="1d", group_by="ticker",
+                       auto_adjust=False, actions=True, progress=False, threads=True)
+    out = {}
+    for symbol in symbols:
+        try:
+            raw = data[symbol] if isinstance(data.columns, pd.MultiIndex) else data
+            raw = raw.dropna(subset=["Close"])
+            if len(raw) < 2:
+                continue
+            adjusted = raw["Adj Close"] if "Adj Close" in raw else raw["Close"]
+            frame = pd.DataFrame({
+                "Close": adjusted.fillna(raw["Close"]), "Volume": raw["Volume"].fillna(0.0), "Raw": raw["Close"],
+                "Dividends": raw["Dividends"].fillna(0.0) if "Dividends" in raw else 0.0,
+                "Splits": raw["Stock Splits"].fillna(0.0) if "Stock Splits" in raw else 0.0,
+            })
+            if getattr(frame.index, "tz", None) is not None:
+                frame = frame.tz_localize(None)
+            out[symbol] = frame
+        except Exception:
+            continue
+    return out
+
+
+def _cache_entry(frame, fetched: str) -> dict:
+    return {
+        "fetched": fetched, "index": [ts.strftime("%Y-%m-%d") for ts in frame.index],
+        **{column: [round(float(v), 6) for v in frame[column].tolist()] for column in ("Close", "Volume", "Raw")},
+        **{column: {ts.strftime("%Y-%m-%d"): float(v) for ts, v in frame[column].items() if v}
+           for column in ("Dividends", "Splits")},
+    }
+
+
+def _cache_frame(entry: dict):
+    import pandas as pd
+
+    index = pd.DatetimeIndex(entry["index"])
+    frame = pd.DataFrame({column: entry[column] for column in ("Close", "Volume", "Raw")}, index=index)
+    for column in ("Dividends", "Splits"):
+        events = pd.Series({pd.Timestamp(day): value for day, value in entry[column].items()}, dtype=float)
+        frame[column] = events.reindex(index).fillna(0.0)
+    frame.attrs["cached"] = entry["fetched"]
+    return frame
+
+
+def fetch_price_history(symbols: list[str], *, period: str = "2y", cache_path: Path | None = PRICE_CACHE,
+                        download=_download, today: _date | None = None, pause: float = 3.0) -> dict:
+    """심볼별 일봉(Close·Volume·Raw·Dividends·Splits).
+
+    받지 못한 심볼은 한 번 더 받고, 그래도 없으면 최근에 받아 둔 캐시로 채운다 — 그 표에는
+    attrs["cached"](받은 날짜)가 붙는다. 캐시에도 없는 심볼은 빠지고 호출부가 그 블록만 접는다.
+    """
+    from lib import file_cache
 
     wanted = sorted({s for s in symbols if s})
     if not wanted:
         return {}
-    data = yf.download(wanted, period=period, interval="1d", group_by="ticker",
-                       auto_adjust=True, progress=False, threads=True)
-    out = {}
-    for symbol in wanted:
+    out: dict = {}
+    for attempt in range(2):
+        need = [s for s in wanted if s not in out]
+        if not need:
+            break
+        if attempt:
+            time.sleep(pause)
         try:
-            frame = data[symbol] if len(wanted) > 1 else data
-            frame = frame[["Close", "Volume"]].dropna(subset=["Close"])
-            if len(frame) >= 2:
-                if getattr(frame.index, "tz", None) is not None:
-                    frame = frame.tz_localize(None)
-                out[symbol] = frame
+            out.update(download(need, period))
         except Exception:
             continue
+    if not cache_path:
+        return out
+    today = today or _date.today()
+    oldest = (today - timedelta(days=PRICE_CACHE_MAX_AGE_DAYS)).isoformat()
+    cached = {symbol: entry for symbol, entry in (file_cache.read_json(cache_path) or {}).items()
+              if isinstance(entry, dict) and str(entry.get("fetched") or "") >= oldest}
+    fresh = dict(out)
+    for symbol in wanted:
+        if symbol not in out and symbol in cached:
+            try:
+                out[symbol] = _cache_frame(cached[symbol])
+            except Exception:
+                continue
+    if fresh:
+        cached.update({symbol: _cache_entry(frame, today.isoformat()) for symbol, frame in fresh.items()})
+        file_cache.write_json_atomic(cache_path, cached)
     return out
 
 
@@ -298,31 +375,14 @@ def market_kinds() -> dict[str, str]:
     return {row[1]: (row[2] if len(row) > 2 else "price") for _title, _unit, rows in MARKET_GROUPS for row in rows}
 
 
-def history_symbols(data: dict) -> list[str]:
-    holdings = [str(p.get("ticker") or "") for p in data.get("portfolio") or []]
+def history_symbols(data: dict, transactions: list[dict] | None = None) -> list[str]:
+    """가격 이력이 필요한 심볼: 보유·비교 ETF·시장 표·섹터·스캔 대상, 그리고 과거에 거래한 종목."""
+    portfolio = data.get("portfolio") or []
+    holdings = [str(p.get("ticker") or "") for p in portfolio]
+    peers = [str(peer) for p in portfolio for peer in ((p.get("etf_comparison") or {}).get("peers") or [])]
     universe = [str(i.get("ticker") or "") for i in (data.get("nasdaq_100_scan") or {}).get("all") or []]
-    return [*holdings, *market_kinds(), *sector_etfs(), *universe]
-
-
-def basket_series(prices: dict, weights: dict[str, float], *, sessions: int = 63, calendar: str = BENCHMARK):
-    """현재 보유 비중을 고정한 바스켓의 과거 궤적 — (index, 값). 실제 계좌 수익률이 아니다.
-
-    거래일은 calendar 심볼(비교 대상인 SPY)을 따른다. 시작값 100, 길이는 sessions + 1.
-    """
-    usable = {t: w for t, w in weights.items() if w and t in prices and len(prices[t]) > sessions}
-    if not usable or calendar not in prices or len(prices[calendar]) <= sessions:
-        return None, []
-    index = prices[calendar]["Close"].dropna().index[-sessions - 1:]
-    total_weight = sum(usable.values())
-    values = [0.0] * len(index)
-    for ticker, weight in usable.items():
-        closes = prices[ticker]["Close"].reindex(index).ffill().bfill()
-        base = float(closes.iloc[0])
-        if not base:
-            return None, []
-        for i, close in enumerate(closes.tolist()):
-            values[i] += weight / total_weight * float(close) / base * 100.0
-    return index, values
+    traded = [str(r.get("ticker") or "") for r in transactions or []]
+    return [*holdings, *peers, *BENCHMARKS, *market_kinds(), *sector_etfs(), *universe, *traded]
 
 
 def aligned(prices: dict, symbol: str, index) -> list[float]:
@@ -331,30 +391,46 @@ def aligned(prices: dict, symbol: str, index) -> list[float]:
     return [float(v) for v in prices[symbol]["Close"].reindex(index).ffill().bfill().tolist()]
 
 
-def basket_returns(prices: dict, weights: dict[str, float], benchmarks: tuple[str, ...] = ("SPY", "QQQ")) -> dict:
-    """바스켓의 기간 수익률과 벤치마크 대비 차이(%p). 계산할 수 없는 기간은 빠진다."""
+def account_summary(account: dict | None, prices: dict, benchmarks: tuple[str, ...] = BENCHMARKS) -> dict:
+    """계좌의 기간 수익률과 벤치마크 대비 차이(%p). 계좌 궤적이 없으면 rows 가 빈다."""
+    if not account:
+        return {"benchmarks": list(benchmarks), "rows": [], "since": None, "total": None, "net_invested": None,
+                "income": None, "missing": []}
+    index, twr = account["index"], account["twr"]
+    lines = [aligned(prices, symbol, index) for symbol in benchmarks]
     rows = []
     for label, _key, sessions in RETURN_WINDOWS[2:5]:
-        index, values = basket_series(prices, weights, sessions=sessions)
-        if index is None:
+        own = account_performance.period_return(twr, sessions)
+        if own is None:
             continue
-        basket = values[-1] - 100.0
-        versus = []
-        for symbol in benchmarks:
-            series = aligned(prices, symbol, index)
-            versus.append(basket - (series[-1] / series[0] - 1.0) * 100.0 if series and series[0] else None)
-        rows.append({"label": label, "basket": basket, "vs": versus})
-    return {"benchmarks": list(benchmarks), "rows": rows}
+        others = [account_performance.period_return(line, sessions) for line in lines]
+        rows.append({"label": label, "account": own, "vs": [own - o if o is not None else None for o in others]})
+    return {
+        "benchmarks": list(benchmarks), "rows": rows,
+        "since": index[0].strftime("%Y.%m.%d"), "total": twr[-1] - 100.0,
+        "net_invested": account["net_invested"][-1], "income": account["income"][-1],
+        "missing": account["missing"],
+    }
 
 
 # ── 모델 조립 ────────────────────────────────────────────────────────────────
 
-def _fund_compare(comparison: object, max_peers: int = 3) -> dict | None:
-    """ETF 의 기간별 총수익과 비교 ETF 대비 차이(%p). 비교 자료가 없으면 None."""
+def _fund_compare(comparison: object, own: dict, stats: dict, max_peers: int = 3) -> dict | None:
+    """ETF 의 기간별 총수익과 비교 ETF 대비 차이(%p). 비교 자료가 없으면 None.
+
+    가격 이력이 있으면 카드의 수익률 표와 같은 거래일 구간으로 직접 계산한다(basis="sessions").
+    없을 때만 리포트 JSON 의 값을 쓴다 — 그쪽은 달력일 구간이라 숫자가 조금 다르다(basis="calendar").
+    """
     if not isinstance(comparison, dict):
         return None
     peers = [str(p) for p in (comparison.get("peers") or [])][:max_peers]
-    rows = []
+    if not peers:
+        return None
+    rows = [{"label": label, "ret": own[key],
+             "diffs": [own[key] - stats[p][key] if (stats.get(p) or {}).get(key) is not None else None for p in peers]}
+            for label, key in FUND_WINDOWS if own.get(key) is not None]
+    if rows:
+        return {"peers": peers, "rows": rows, "basis": "sessions"}
     for period in comparison.get("periods") or []:
         versus = period.get("vs") or {}
         rows.append({
@@ -364,10 +440,11 @@ def _fund_compare(comparison: object, max_peers: int = 3) -> dict | None:
                       for p in peers],
         })
     rows = [r for r in rows if r["ret"] is not None]
-    return {"peers": peers, "rows": rows[:5]} if peers and rows else None
+    return {"peers": peers, "rows": rows[:5], "basis": "calendar"} if rows else None
 
 
-def _holding(entry: dict, stats: dict, bench: dict) -> dict:
+def _holding(entry: dict, all_stats: dict, bench: dict) -> dict:
+    stats = all_stats.get(str(entry.get("ticker")), {})
     decision = entry.get("decision_v2") or {}
     context = entry.get("decision_context") or {}
     held = entry.get("holding_context") or {}
@@ -410,7 +487,7 @@ def _holding(entry: dict, stats: dict, bench: dict) -> dict:
         "confidence": _num(decision.get("confidence")),
         "pillars": pillars,
         "role": clean(context.get("role")),
-        "fund_compare": _fund_compare(entry.get("etf_comparison")) if is_fund else None,
+        "fund_compare": _fund_compare(entry.get("etf_comparison"), stats, all_stats) if is_fund else None,
         "reasons": _points(entry.get("reasons")),
         "risks": _points(entry.get("risks")),
         # 재점검 조건이 리스크 문장을 그대로 되풀이하는 경우가 많다 — 새 정보만 남긴다.
@@ -553,14 +630,25 @@ def _subsections(lines: list[str]) -> list[dict]:
 
 
 def build_model(*, report_date: str, data: dict, investment_md: str = "", market_md: str = "",
-                prices: dict | None = None, portfolio_history: list[dict] | None = None) -> dict:
+                prices: dict | None = None, portfolio_history: list[dict] | None = None,
+                transactions: list[dict] | None = None) -> dict:
     """PDF 템플릿이 그대로 쓰는 모델. 순수 함수 — 네트워크·파일 접근 없음."""
+    reused = sorted({str(f.attrs["cached"]) for f in (prices or {}).values() if getattr(f, "attrs", {}).get("cached")})
+    reused_count = sum(1 for f in (prices or {}).values() if getattr(f, "attrs", {}).get("cached"))
     prices = clip_history(prices or {}, report_date)
     kinds = market_kinds()
     stats = {symbol: price_stats(frame, kinds.get(symbol, "price")) for symbol, frame in prices.items()}
     bench = stats.get(BENCHMARK) or {}
-    holdings = [_holding(p, stats.get(str(p.get("ticker")), {}), bench) for p in data.get("portfolio") or []]
+    holdings = [_holding(p, stats, bench) for p in data.get("portfolio") or []]
     holdings.sort(key=lambda h: -(h["weight"] or 0.0))
+    # 수량을 모르는 보유 종목이 있으면 거래내역의 수량을 그대로 둔다 — 0주로 맞추면 다 판 것이 된다.
+    shares = {h["ticker"]: h["shares"] for h in holdings if h["shares"] is not None}
+    account = account_performance.daily_account(
+        transactions, prices, holdings=shares if len(shares) == len(holdings) else None) if transactions else None
+    asof = None
+    if BENCHMARK in prices and len(prices[BENCHMARK]):
+        last = prices[BENCHMARK].index[-1]
+        asof = f"{last.month}/{last.day}"
 
     inv = md_sections(investment_md)
     mkt = md_sections(market_md)
@@ -596,13 +684,8 @@ def build_model(*, report_date: str, data: dict, investment_md: str = "", market
     weighted_d1 = sum((h["weight"] or 0.0) * (h["d1"] or 0.0) for h in holdings) / 100.0 if value else None
     scored = [h["score"] for h in holdings if h["score"] is not None]
     counts = {tone: sum(1 for h in holdings if h["tone"] == tone) for tone in ("pos", "neu", "warn", "neg")}
-    history = [
-        {"date": str(r.get("date")), "total_usd": _num(r.get("total_usd"))}
-        for r in (portfolio_history or [])
-        if r.get("date") and _num(r.get("total_usd")) and str(r.get("date")) <= report_date
-    ]
-    latest = history[-1] if history else {}
-    raw_latest = next((r for r in reversed(portfolio_history or []) if str(r.get("date")) == latest.get("date")), {})
+    raw_latest = next((r for r in reversed(portfolio_history or [])
+                       if r.get("date") and _num(r.get("total_usd")) and str(r.get("date")) <= report_date), {})
 
     try:
         day = _date.fromisoformat(report_date)
@@ -670,9 +753,9 @@ def build_model(*, report_date: str, data: dict, investment_md: str = "", market
             "pnl_pct": (value / cost - 1.0) * 100.0 if value and cost else None,
             "weighted_d1": weighted_d1,
             "avg_score": sum(scored) / len(scored) if scored else None,
-            "signal_counts": counts, "history": history,
+            "signal_counts": counts, "account": account,
             "actions": sorted(actions.items(), key=lambda kv: -kv[1]),
-            "basket": basket_returns(prices, {h["ticker"]: h["weight"] or 0.0 for h in holdings}),
+            "performance": account_summary(account, prices),
             "return_scale": max([abs(h["ret_pct"] or 0.0) for h in holdings] + [1.0]),
             "total_krw": _num(raw_latest.get("total_krw")), "phase": raw_latest.get("phase"),
             "drawdown_pct": _num(raw_latest.get("drawdown_pct")),
@@ -684,6 +767,8 @@ def build_model(*, report_date: str, data: dict, investment_md: str = "", market
         },
         "accumulation": accumulation,
         "prices": prices,
+        # asof: 표·그림이 쓴 마지막 종가의 날짜. reused: 시세 조회가 막혀 캐시로 채운 심볼 수와 그 캐시를 받은 날짜.
+        "price_basis": {"asof": asof, "reused": reused_count, "fetched": reused[0] if reused else None},
     }
 
 

@@ -23,11 +23,13 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+from reports import account_performance
 from reports import report_pdf_charts as charts
 from reports import report_pdf_data as pdf_data
 
 TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
 RENDER_TIMEOUT_SECONDS = 120
+RELATIVE_SESSIONS = 63      # 표지의 계좌·벤치마크 비교 구간(3개월)
 
 
 # ── 템플릿 필터 ──────────────────────────────────────────────────────────────
@@ -106,12 +108,16 @@ def build_figures(model: dict) -> dict:
     """모델에서 그림을 만든다. 데이터가 없는 그림은 None — 템플릿이 자리를 접는다."""
     prices = model.get("prices") or {}
     holdings = model["portfolio"]["holdings"]
-    weights = {h["ticker"]: h["weight"] or 0.0 for h in holdings}
+    account = model["portfolio"]["account"]
 
-    index, basket = pdf_data.basket_series(prices, weights)
-    relative = charts.relative_chart(
-        [("보유 바스켓", basket), ("SPY", pdf_data.aligned(prices, "SPY", index)),
-         ("QQQ", pdf_data.aligned(prices, "QQQ", index))], index, size=(118, 42)) if index is not None else None
+    relative = equity = None
+    if account:
+        index = account["index"][-RELATIVE_SESSIONS - 1:]
+        relative = charts.relative_chart(
+            [("계좌", account["twr"][-len(index):]),
+             *[(symbol, pdf_data.aligned(prices, symbol, index)) for symbol in pdf_data.BENCHMARKS]],
+            index, size=(118, 42))
+        equity = charts.equity_chart(account["index"], account["value"], account["net_invested"], size=(88, 44))
 
     minis = []
     for title, symbol, digits in pdf_data.MINI_CHARTS:
@@ -121,7 +127,7 @@ def build_figures(model: dict) -> dict:
     return {
         "relative": relative,
         "minis": minis,
-        "equity": charts.equity_chart(model["portfolio"]["history"], size=(88, 44)),
+        "equity": equity,
         "spy": charts.price_chart(prices["SPY"], averages=(20, 60, 120), size=(88, 42)) if "SPY" in prices else None,
         "qqq": charts.price_chart(prices["QQQ"], averages=(20, 60, 120), size=(88, 42)) if "QQQ" in prices else None,
         "allocation": charts.donut_chart(
@@ -218,16 +224,30 @@ def _portfolio_history() -> list[dict]:
         return []
 
 
-def build_pdf(report_date: str, reports_dir: Path, out_path: Path, *, fetch=pdf_data.fetch_price_history,
-              history_loader=_portfolio_history, browser: str | None = None) -> Path:
-    data, investment_md, market_md = pdf_data.load_inputs(report_date, reports_dir)
+def _transactions() -> list[dict]:
     try:
-        prices = fetch(pdf_data.history_symbols(data))
+        return account_performance.load_transactions()
+    except Exception as exc:   # 거래내역이 없으면 계좌 수익률·평가액 추이만 빠진다.
+        print(f"[WARN] 거래내역 없음: {type(exc).__name__}", file=sys.stderr)
+        return []
+
+
+def build_pdf(report_date: str, reports_dir: Path, out_path: Path, *, fetch=pdf_data.fetch_price_history,
+              history_loader=_portfolio_history, transactions_loader=_transactions,
+              browser: str | None = None) -> Path:
+    data, investment_md, market_md = pdf_data.load_inputs(report_date, reports_dir)
+    transactions = transactions_loader()
+    try:
+        prices = fetch(pdf_data.history_symbols(data, transactions))
     except Exception as exc:   # 시세 조회가 막혀도 표·문장만으로 발행한다.
         print(f"[WARN] 가격 이력 조회 실패, 그림 없이 발행: {type(exc).__name__}", file=sys.stderr)
         prices = {}
     model = pdf_data.build_model(report_date=report_date, data=data, investment_md=investment_md,
-                                 market_md=market_md, prices=prices, portfolio_history=history_loader())
+                                 market_md=market_md, prices=prices, portfolio_history=history_loader(),
+                                 transactions=transactions)
+    basis = model["price_basis"]
+    if basis["reused"]:
+        print(f"[WARN] 시세 {basis['reused']}개 심볼은 {basis['fetched']} 캐시 사용", file=sys.stderr)
     return html_to_pdf(render_html(model), out_path, browser=browser)
 
 

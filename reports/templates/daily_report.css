@@ -57,6 +57,30 @@ h1 { font-size: 17.5pt; font-weight: 700; line-height: 1.28; color: var(--navy);
 .kpi .c { font-size: 7.6pt; font-weight: 600; }
 
 .cols { display: grid; grid-template-columns: 1fr 58mm; gap: 5mm; align-items: start; }
+/* 표지는 한 쪽(297 − 위 13 − 아래 16mm)을 넘지 않는다. 높이를 고정했으니 무엇이 와도 2쪽으로 밀리지 않는다.
+   문장이 길면 줄 수를 자른다(.clamp). 요약 아래 남은 자리(.fit)가 좁아지면 표의 줄 수를 더 줄이고,
+   표 아래 남은 자리(.room)가 그림보다 좁으면 그림이 줄며, 30mm 도 안 되면 그림을 뺀다. */
+.cover { height: 267mm; display: flex; flex-direction: column; overflow: hidden; break-inside: avoid; }
+.cover > * { flex: none; }
+.cover > .cols { flex: 1 1 0; min-height: 0; grid-template-rows: minmax(0, 1fr); align-items: stretch; }
+.cover .main { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+.cover .main > * { flex: none; }
+.cover .main > .fit { flex: 1 1 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden;
+                      container: region / size; }
+.fit > * { flex: none; }
+.fit > .tbl { margin-top: 3.6mm; }
+.fit > .room { flex: 1 1 0; min-height: 0; container: room / size; }
+.room > figure { display: flex; flex-direction: column; max-height: 100%; margin-bottom: 0; }
+.room > figure > * { flex: none; }
+.room > figure > img { flex: 0 1 auto; min-height: 0; object-fit: contain; object-position: left top; }
+.cover .side { overflow: hidden; align-self: start; max-height: 100%; }
+.cover .clamp2, .cover .clamp3 { display: -webkit-box; -webkit-box-orient: vertical; overflow: hidden; }
+.cover .clamp2 { -webkit-line-clamp: 2; } .cover .clamp3 { -webkit-line-clamp: 3; }
+@container room (max-height: 30mm) { .room > figure { display: none; } }
+@container region (max-height: 96mm) { .fit .clamp3 { -webkit-line-clamp: 2; } }
+@container region (max-height: 77mm) { .fit .clamp3 { -webkit-line-clamp: 1; } }
+@container region (max-height: 64mm) { .fit tbody tr:nth-child(n+5) { display: none; } }
+.note { font-size: 6.6pt; color: var(--muted); margin-top: 1mm; }
 .lead-pts { font-size: 9.4pt; line-height: 1.45; color: #24313f; margin-bottom: 3mm; }
 .lead-pts li { position: relative; padding-left: 3.6mm; margin-bottom: 0.9mm; }
 .lead-pts li::before { content: ""; position: absolute; left: 0; top: 0.66em; width: 1.7mm; height: 0.4mm; background: var(--gold); }
@@ -97,7 +121,6 @@ h3 small { font-size: 6.5pt; font-weight: 400; color: var(--muted); margin-left:
 /* 표·그림 */
 .src { font-size: 6.3pt; color: var(--muted); margin-top: 0.8mm; }
 .tbl, figure { break-inside: avoid; margin-bottom: 3.6mm; }
-.main > .tbl { margin-top: 3.6mm; }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; column-gap: 6mm; align-items: start; margin-bottom: 3.6mm; }
 /* 격자 안의 마지막 여백이 쪽을 넘기면 빈 쪽이 생긴다 — 여백은 격자가 갖는다. */
 .grid2 > div > :last-child { margin-bottom: 0; }

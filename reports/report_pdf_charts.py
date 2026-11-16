@@ -284,34 +284,28 @@ def donut_chart(rows: list[tuple[str, float]], *, size: tuple[float, float] = (8
         return _encode(fig)
 
 
-def equity_chart(history: list[dict], *, size: tuple[float, float] = (88, 52)) -> str | None:
-    """평가액 추이(입출금 포함). history 는 {date, total_usd} 목록."""
-    points = [(str(r["date"]), float(r["total_usd"])) for r in history if r.get("total_usd")]
-    if len(points) < 5:
+def equity_chart(index, value: list[float], invested: list[float], *,
+                 size: tuple[float, float] = (88, 52)) -> str | None:
+    """평가액과 누적 순투입(매수 − 매도). 두 선의 간격이 그동안의 손익이다."""
+    if index is None or len(value) < 5 or len(value) != len(index) or len(invested) != len(index):
         return None
     _ensure_fonts()
-    x = list(range(len(points)))
-    values = [p[1] for p in points]
+    x = list(range(len(index)))
     with rc_context(_rc()):
         fig = _figure(*size)
-        ax = fig.add_axes(_rect(size, right=3, top=3))
-        floor = min(values) - (max(values) - min(values)) * 0.08
-        ax.fill_between(x, values, floor, color=NAVY, alpha=0.08, linewidth=0)
-        ax.plot(x, values, color=NAVY, linewidth=1.2)
-        ax.scatter([x[-1]], [values[-1]], s=9, color=NAVY, zorder=5)
-        ax.annotate(f"${values[-1]:,.0f}", (x[-1], values[-1]), xytext=(-2, 6), textcoords="offset points",
-                    ha="right", fontsize=6.8, fontweight="bold", color=NAVY)
+        ax = fig.add_axes(_rect(size, right=3))
+        floor = min(value + invested)
+        floor -= (max(value + invested) - floor) * 0.08
+        ax.fill_between(x, value, floor, color=NAVY, alpha=0.08, linewidth=0)
+        ax.plot(x, value, color=NAVY, linewidth=1.2, label=f"평가액  ${value[-1]:,.0f}")
+        ax.step(x, invested, where="post", color=ACCENT, linewidth=1.0, label=f"누적 순투입  ${invested[-1]:,.0f}")
+        ax.scatter([x[-1]], [value[-1]], s=9, color=NAVY, zorder=5)
         ax.set_ylim(bottom=floor)
         ax.yaxis.set_major_formatter(lambda v, _pos: f"{v:,.0f}")
         ax.margins(x=0.01)
         _clean_axes(ax)
-        ticks, labels, seen = [], [], None
-        for i, (day, _value) in enumerate(points):
-            if day[:7] != seen:
-                seen = day[:7]
-                if i:
-                    ticks.append(i)
-                    labels.append(f"{day[2:4]}.{day[5:7]}")
+        _legend_above(ax, ncols=2)
+        ticks, labels = _month_ticks(index)
         ax.set_xticks(ticks, labels)
         return _encode(fig)
 
