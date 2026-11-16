@@ -16,7 +16,10 @@ INVESTMENT_MD = """# 투자 리포트
 ## 0. 오늘 한눈에
 
 - Phase 2 · QQQ -10.1%
+- **포트폴리오(종목 단순평균):** 오늘 -0.5%
 - **신호 분포:** 1 / 1 / 0 / 0
+- **오늘 할 일:** 비중점검 — MSFT 외 1건
+- **포트 점수 해석:** 주의 · 신규매수는 소액/선별
 
 **오늘 결론**
 - 하락 심화: 계획된 분할만
@@ -140,16 +143,25 @@ def test_model_reads_text_blocks_from_generated_markdown():
 
     assert model["headline"] == "하락 심화: 계획된 분할만"
     assert model["conclusion"] == ["우선 확인: MSFT"]
-    assert model["glance"] == ["Phase 2 · QQQ -10.1%"]
+    assert model["glance"] == ["포트폴리오(종목 단순평균): 오늘 -0.5%"]     # 전용 칸이 있는 불릿은 빠진다
+    assert model["stance"] == {"label": "주의", "note": "신규매수는 소액/선별", "tone": "warn",
+                               "todo": "비중점검 — MSFT 외 1건", "phase": "Phase 2 · QQQ -10.1%"}
     assert model["priorities"][1] == ["매수관심", "Microsoft (MSFT)", "분할매수 검토", "소량 분할매수만 검토"]
     assert model["fx"] == ["현재 1,334.6원 · 12%ile"]
     assert model["risk_flags"] == ["NVDA: 1개월 -23.5% 하락"]
     assert model["market"]["summary"] == ["시장: 시장 혼조/보합권", "섹터: 강세 Energy +1.5%"]
-    assert model["market"]["fear_greed"] == {"value": 75, "label": "탐욕 (Greed)"}
+    assert model["market"]["fear_greed"] == {"value": 75, "label": "탐욕 (Greed)", "estimated": True}
     assert model["market"]["calendar"] == [
         {"group": "오늘", "date": "11/13", "time": "09:00", "event": "10월 기존주택판매", "importance": 3},
         {"group": "예정", "date": "11/14", "time": "07:30", "event": "10월 PPI 상승률", "importance": 2},
     ]
+
+
+def test_fear_greed_tells_cnn_value_from_vix_estimate():
+    cnn = ["- **CNN 공포·탐욕 지수**: 62.4", "- **상태**: 탐욕 (Greed)"]
+
+    assert report_pdf_data._fear_greed(cnn) == {"value": 62, "label": "탐욕 (Greed)", "estimated": False}
+    assert report_pdf_data._fear_greed(["[데이터 없음] (사유: VIX 데이터 없음)"]) is None
 
 
 def test_model_orders_holdings_by_weight_and_separates_funds():
@@ -187,7 +199,11 @@ def test_html_renders_without_prices_markdown_or_history():
     html = report_pdf.render_html(model)
 
     assert model["headline"] == "오늘의 포트폴리오·시장 점검"
-    assert [r["label"] for r in model["market"]["indices"]] == ["S&P 500 (SPY)", "NASDAQ 100 (QQQ)"]
+    assert model["stance"] is None
+    assert [(g["title"], [r["label"] for r in g["rows"]]) for g in model["market"]["groups"]] == [
+        ("대표 ETF", ["S&P 500 (SPY)", "나스닥 100 (QQQ)"])]
+    assert model["market"]["movers"] == {"up": [], "down": []}
+    assert model["portfolio"]["basket"]["rows"] == []
     assert "가격 이력 없음" in html
     assert html.count('<article class="stock">') == 2
     assert "소량 진입 후 관찰" in html
@@ -200,12 +216,13 @@ def test_charts_return_none_without_data():
     assert report_pdf_charts.equity_chart([{"date": "2026-11-12", "total_usd": 1000.0}]) is None
     assert report_pdf_charts.histogram_chart([]) is None
     assert report_pdf_charts.price_chart(_frame(REPORT_DATE, sessions=1)) is None
+    assert report_pdf_charts.line_chart(_frame(REPORT_DATE, sessions=1)) is None
 
 
 def test_basket_series_starts_at_100_and_follows_weights():
     prices = {"A": _frame(REPORT_DATE, start_price=100.0), "B": _frame(REPORT_DATE, start_price=50.0)}
-    index, basket = report_pdf_charts.basket_series(prices, {"A": 75.0, "B": 25.0, "MISSING": 10.0},
-                                                    sessions=10, calendar="A")
+    index, basket = report_pdf_data.basket_series(prices, {"A": 75.0, "B": 25.0, "MISSING": 10.0},
+                                                  sessions=10, calendar="A")
 
     a = prices["A"]["Close"].iloc[-11:]
     b = prices["B"]["Close"].iloc[-11:]
@@ -213,6 +230,59 @@ def test_basket_series_starts_at_100_and_follows_weights():
     assert len(index) == len(basket) == 11
     assert basket[0] == pytest.approx(100.0)
     assert basket[-1] == pytest.approx(expected)
+
+
+def test_yield_rows_move_in_basis_points_and_prices_in_percent():
+    index = pd.bdate_range(end="2026-11-12", periods=30)
+    frame = pd.DataFrame({"Close": [4.00 + i * 0.01 for i in range(30)]}, index=index)
+
+    as_yield = report_pdf_data.price_stats(frame, "yield")
+    as_price = report_pdf_data.price_stats(frame)
+
+    assert as_yield["d1"] == pytest.approx(1.0)        # 4.28% → 4.29% = +1bp
+    assert as_yield["m1"] == pytest.approx(20.0)       # 1M 은 20거래일
+    assert as_price["d1"] == pytest.approx((4.29 / 4.28 - 1) * 100)
+    assert as_yield["y1"] is None                      # 이력이 모자란 기간은 비운다
+
+
+def test_holding_returns_are_absolute_and_relative_to_spy():
+    prices = {s: _frame(REPORT_DATE) for s in ("SPY", "QQQ", "QLD")}
+    prices["MSFT"] = _frame(REPORT_DATE, start_price=50.0)      # 같은 폭으로 오르지만 출발가가 낮아 더 가파르다
+    model = _model(prices=prices)
+    stock = model["portfolio"]["holdings"][0]
+    by_label = {r["label"]: r for r in stock["returns"]}
+
+    msft = prices["MSFT"]["Close"].iloc[:-1]                    # 리포트 날짜의 봉은 빠진다
+    spy = prices["SPY"]["Close"].iloc[:-1]
+    absolute = (msft.iloc[-1] / msft.iloc[-21] - 1) * 100
+    assert by_label["1M"]["abs"] == pytest.approx(absolute)
+    assert by_label["1M"]["rel"] == pytest.approx(absolute - (spy.iloc[-1] / spy.iloc[-21] - 1) * 100)
+    assert by_label["12M"] == {"label": "12M", "abs": None, "rel": None}
+
+    basket = model["portfolio"]["basket"]
+    assert basket["benchmarks"] == ["SPY", "QQQ"]
+    assert [r["label"] for r in basket["rows"]] == ["1M", "3M", "6M"]
+    assert basket["rows"][0]["vs"][0] > 0                       # MSFT 비중만큼 SPY 를 앞선다
+
+
+def test_movers_rank_scan_universe_by_one_day_change():
+    scan = [{"ticker": f"T{i:02d}", "company_name": f"Name {i}", "total_score": 50 + i} for i in range(16)]
+    stats = {f"T{i:02d}": {"last": 10.0, "d1": float(i - 8), "d5": 0.0, "spark": []} for i in range(16)}
+
+    movers = report_pdf_data._movers(scan, stats)
+
+    assert [r["ticker"] for r in movers["up"]][:2] == ["T15", "T14"]
+    assert [r["ticker"] for r in movers["down"]][:2] == ["T00", "T01"]
+    assert report_pdf_data._movers(scan[:15], stats) == {"up": [], "down": []}   # 표 두 개를 못 채우면 싣지 않는다
+
+
+def test_in_cell_graphics_scale_and_skip_short_series():
+    assert report_pdf._bar_width(2.5, 5.0) == "25.0"
+    assert report_pdf._bar_width(-40.0, 5.0) == "50.0"          # 0 기준 한쪽 최대폭
+    assert report_pdf._bar_width(None, 5.0) == "0"
+    assert report_pdf._sparkline([1.0, 2.0]) == ""
+    falling = report_pdf._sparkline([5.0, 4.0, 4.5, 3.0, 2.0])
+    assert 'class="spark down"' in falling and falling.count(",") == 5
 
 
 def test_print_failure_raises_and_leaves_no_partial_file(tmp_path, monkeypatch):

@@ -16,20 +16,33 @@ from pathlib import Path
 
 WEEKDAYS = "월화수목금토일"
 
-# 지수·자산 표 순서. (표시 이름, 심볼, 단위)
-MARKET_ROWS = (
-    ("S&P 500 (SPY)", "SPY", "$"),
-    ("NASDAQ 100 (QQQ)", "QQQ", "$"),
-    ("다우 (DIA)", "DIA", "$"),
-    ("KOSPI", "^KS11", "pt"),
-    ("VIX", "^VIX", "pt"),
-    ("USD/KRW", "KRW=X", "원"),
-    ("미 장기국채 (TLT)", "TLT", "$"),
-    ("하이일드 (HYG)", "HYG", "$"),
-    ("금 선물", "GC=F", "$"),
-    ("WTI 선물", "CL=F", "$"),
-    ("비트코인", "BTC-USD", "$"),
+# 자산 표: (묶음 제목, 단위 표기, ((표시 이름, 심볼[, 종류]), …)).
+# 종류 "yield" 는 금리(%) 계열 — 변동을 비율이 아니라 차이(bp)로 적는다.
+MARKET_GROUPS = (
+    ("주요국 증시", "pt, %", (
+        ("S&P 500", "^GSPC"), ("NASDAQ", "^IXIC"), ("다우", "^DJI"), ("러셀 2000", "^RUT"),
+        ("필라델피아 반도체", "^SOX"), ("KOSPI", "^KS11"), ("KOSDAQ", "^KQ11"),
+        ("닛케이 225", "^N225"), ("상해종합", "000001.SS"), ("유로스톡스 50", "^STOXX50E"), ("VIX", "^VIX"))),
+    ("미국 금리", "%, bp", (
+        ("미국채 3개월", "^IRX", "yield"), ("미국채 5년", "^FVX", "yield"),
+        ("미국채 10년", "^TNX", "yield"), ("미국채 30년", "^TYX", "yield"))),
+    ("통화", "%", (
+        ("달러인덱스", "DX-Y.NYB"), ("원/달러", "KRW=X"), ("엔/달러", "JPY=X"), ("달러/유로", "EURUSD=X"))),
+    ("원자재·대체자산", "달러, %", (
+        ("WTI", "CL=F"), ("금", "GC=F"), ("구리", "HG=F"), ("비트코인", "BTC-USD"))),
+    ("대표 ETF", "달러, %", (
+        ("S&P 500 (SPY)", "SPY"), ("나스닥 100 (QQQ)", "QQQ"),
+        ("미 장기국채 (TLT)", "TLT"), ("하이일드 (HYG)", "HYG"))),
 )
+# 표지 지표 띠: (표시 이름, 심볼, 단위). SPY·QQQ 는 리포트 본문과 같은 값을 쓰려고 따로 넣는다.
+KPI_ROWS = (("KOSPI", "^KS11", "pt"), ("USD/KRW", "KRW=X", "원"), ("미국채 10년", "^TNX", "%"), ("VIX", "^VIX", "pt"))
+# 시장 쪽의 작은 그림 넷: (제목, 심볼, 소수 자리)
+MINI_CHARTS = (("S&P 500", "^GSPC", 0), ("미국채 10년 금리 (%)", "^TNX", 2),
+               ("달러인덱스", "DX-Y.NYB", 1), ("WTI (달러/배럴)", "CL=F", 1))
+BENCHMARK = "SPY"
+# (표시 이름, price_stats 키, 거래일 수). 1M 은 리포트 본문(daily_signals)과 같은 20거래일이다.
+RETURN_WINDOWS = (("1D", "d1", 1), ("1W", "d5", 5), ("1M", "m1", 20), ("3M", "m3", 63),
+                  ("6M", "m6", 126), ("12M", "y1", 252))
 SIGNAL_LABEL = {"Positive": "긍정", "Neutral": "중립", "Warning": "경고", "Critical": "심각"}
 SIGNAL_TONE = {"Positive": "pos", "Neutral": "neu", "Warning": "warn", "Critical": "neg"}
 
@@ -168,6 +181,13 @@ def pct_change(closes: list[float], sessions: int) -> float | None:
     return (closes[-1] / closes[-1 - sessions] - 1.0) * 100.0
 
 
+def bp_change(closes: list[float], sessions: int) -> float | None:
+    """금리(%) 계열의 변동폭(bp)."""
+    if len(closes) <= sessions:
+        return None
+    return (closes[-1] - closes[-1 - sessions]) * 100.0
+
+
 def rsi(closes: list[float], period: int = 14) -> float | None:
     """Wilder RSI 마지막 값."""
     if len(closes) <= period:
@@ -187,11 +207,15 @@ def rsi(closes: list[float], period: int = 14) -> float | None:
     return 100.0 - 100.0 / (1.0 + avg_gain / avg_loss)
 
 
-def price_stats(frame) -> dict:
-    """가격 이력 하나에서 표·카드가 쓰는 값. 이력이 없으면 빈 dict."""
+def price_stats(frame, kind: str = "price") -> dict:
+    """가격 이력 하나에서 표·카드가 쓰는 값. 이력이 없으면 빈 dict.
+
+    kind="yield" 면 기간 변동(d1…y1, ytd)이 등락률(%)이 아니라 차이(bp)다.
+    """
     closes = _closes(frame)
     if len(closes) < 2:
         return {}
+    change = bp_change if kind == "yield" else pct_change
     window = closes[-252:]
     low, high = min(window), max(window)
     ytd = None
@@ -200,7 +224,7 @@ def price_stats(frame) -> dict:
         year = index[-1].year
         prior = [c for ts, c in zip(index, closes) if ts.year < year]
         if prior and prior[-1]:
-            ytd = (closes[-1] / prior[-1] - 1.0) * 100.0
+            ytd = (closes[-1] - prior[-1]) * 100.0 if kind == "yield" else (closes[-1] / prior[-1] - 1.0) * 100.0
     except Exception:
         ytd = None
 
@@ -208,12 +232,13 @@ def price_stats(frame) -> dict:
         return sum(closes[-n:]) / n if len(closes) >= n else None
 
     return {
-        "last": closes[-1],
-        "d1": pct_change(closes, 1), "d5": pct_change(closes, 5),
-        "m1": pct_change(closes, 21), "m3": pct_change(closes, 63), "ytd": ytd,
+        "kind": kind, "last": closes[-1],
+        "d1": change(closes, 1), "d5": change(closes, 5), "m1": change(closes, 20),
+        "m3": change(closes, 63), "m6": change(closes, 126), "y1": change(closes, 252), "ytd": ytd,
         "low52": low, "high52": high,
         "pos52": (closes[-1] - low) / (high - low) * 100.0 if high > low else None,
         "rsi": rsi(closes), "ma20": ma(20), "ma60": ma(60), "ma120": ma(120),
+        "spark": closes[-60:],
     }
 
 
@@ -236,7 +261,7 @@ def clip_history(prices: dict, report_date: str) -> dict:
     return out
 
 
-def fetch_price_history(symbols: list[str], *, period: str = "1y") -> dict:
+def fetch_price_history(symbols: list[str], *, period: str = "2y") -> dict:
     """심볼별 일봉(Close·Volume). 실패한 심볼은 빠진다 — 호출부는 해당 그림만 생략한다."""
     import yfinance as yf
 
@@ -268,9 +293,58 @@ def sector_etfs() -> dict[str, str]:
         return {}
 
 
+def market_kinds() -> dict[str, str]:
+    """자산 표에 나오는 심볼 → 종류("price" | "yield")."""
+    return {row[1]: (row[2] if len(row) > 2 else "price") for _title, _unit, rows in MARKET_GROUPS for row in rows}
+
+
 def history_symbols(data: dict) -> list[str]:
     holdings = [str(p.get("ticker") or "") for p in data.get("portfolio") or []]
-    return [*holdings, *(row[1] for row in MARKET_ROWS), *sector_etfs()]
+    universe = [str(i.get("ticker") or "") for i in (data.get("nasdaq_100_scan") or {}).get("all") or []]
+    return [*holdings, *market_kinds(), *sector_etfs(), *universe]
+
+
+def basket_series(prices: dict, weights: dict[str, float], *, sessions: int = 63, calendar: str = BENCHMARK):
+    """현재 보유 비중을 고정한 바스켓의 과거 궤적 — (index, 값). 실제 계좌 수익률이 아니다.
+
+    거래일은 calendar 심볼(비교 대상인 SPY)을 따른다. 시작값 100, 길이는 sessions + 1.
+    """
+    usable = {t: w for t, w in weights.items() if w and t in prices and len(prices[t]) > sessions}
+    if not usable or calendar not in prices or len(prices[calendar]) <= sessions:
+        return None, []
+    index = prices[calendar]["Close"].dropna().index[-sessions - 1:]
+    total_weight = sum(usable.values())
+    values = [0.0] * len(index)
+    for ticker, weight in usable.items():
+        closes = prices[ticker]["Close"].reindex(index).ffill().bfill()
+        base = float(closes.iloc[0])
+        if not base:
+            return None, []
+        for i, close in enumerate(closes.tolist()):
+            values[i] += weight / total_weight * float(close) / base * 100.0
+    return index, values
+
+
+def aligned(prices: dict, symbol: str, index) -> list[float]:
+    if symbol not in prices or index is None:
+        return []
+    return [float(v) for v in prices[symbol]["Close"].reindex(index).ffill().bfill().tolist()]
+
+
+def basket_returns(prices: dict, weights: dict[str, float], benchmarks: tuple[str, ...] = ("SPY", "QQQ")) -> dict:
+    """바스켓의 기간 수익률과 벤치마크 대비 차이(%p). 계산할 수 없는 기간은 빠진다."""
+    rows = []
+    for label, _key, sessions in RETURN_WINDOWS[2:5]:
+        index, values = basket_series(prices, weights, sessions=sessions)
+        if index is None:
+            continue
+        basket = values[-1] - 100.0
+        versus = []
+        for symbol in benchmarks:
+            series = aligned(prices, symbol, index)
+            versus.append(basket - (series[-1] / series[0] - 1.0) * 100.0 if series and series[0] else None)
+        rows.append({"label": label, "basket": basket, "vs": versus})
+    return {"benchmarks": list(benchmarks), "rows": rows}
 
 
 # ── 모델 조립 ────────────────────────────────────────────────────────────────
@@ -293,7 +367,7 @@ def _fund_compare(comparison: object, max_peers: int = 3) -> dict | None:
     return {"peers": peers, "rows": rows[:5]} if peers and rows else None
 
 
-def _holding(entry: dict, stats: dict) -> dict:
+def _holding(entry: dict, stats: dict, bench: dict) -> dict:
     decision = entry.get("decision_v2") or {}
     context = entry.get("decision_context") or {}
     held = entry.get("holding_context") or {}
@@ -308,6 +382,9 @@ def _holding(entry: dict, stats: dict) -> dict:
         part = decision.get(key) or {}
         if part.get("status"):
             pillars.append({"label": label, "status": clean(part.get("status"))})
+    returns = [{"label": label, "abs": stats.get(key),
+                "rel": stats[key] - bench[key] if stats.get(key) is not None and bench.get(key) is not None else None}
+               for label, key, _sessions in RETURN_WINDOWS]
     return {
         "ticker": str(entry.get("ticker") or ""),
         "name": clean(entry.get("company_name") or held.get("name") or entry.get("ticker")),
@@ -315,10 +392,14 @@ def _holding(entry: dict, stats: dict) -> dict:
         "price": _num(price.get("current_price")) or stats.get("last"),
         "d1": _num(price.get("1d_change_pct")), "d5": _num(price.get("5d_change_pct")),
         "m1": _num(price.get("1mo_change_pct")),
+        "m3": stats.get("m3"), "m6": stats.get("m6"), "y1": stats.get("y1"), "ytd": stats.get("ytd"),
+        "returns": returns if any(r["abs"] is not None for r in returns) else [],
+        "spark": stats.get("spark") or [],
         "rsi": stats.get("rsi"), "pos52": stats.get("pos52"),
+        "high52": stats.get("high52"), "low52": stats.get("low52"),
         "weight": _num(held.get("weight_pct")), "value_usd": _num(held.get("value_usd")),
         "cost_usd": _num(held.get("cost_usd")), "ret_pct": _num(held.get("return_pct")),
-        "avg_price": _num(held.get("avg_price_usd")),
+        "avg_price": _num(held.get("avg_price_usd")), "shares": _num(held.get("shares")),
         "score": None if is_fund else _num(entry.get("fundamental_score")),
         "grade": "ETF" if is_fund else grade,
         "signal_label": SIGNAL_LABEL.get(signal, signal),
@@ -335,7 +416,8 @@ def _holding(entry: dict, stats: dict) -> dict:
         # 재점검 조건이 리스크 문장을 그대로 되풀이하는 경우가 많다 — 새 정보만 남긴다.
         "triggers": [t for t in _points(context.get("recheck_triggers"))
                      if t not in _points(entry.get("risks"))][:2],
-        "next_earnings": earnings.get("next_earnings_date"),
+        # 이미 지난 날짜가 '다음 실적'으로 남아 있는 경우가 있다 — 그때는 비운다.
+        "next_earnings": earnings.get("next_earnings_date") if (_num(earnings.get("days_until")) or 0) >= 0 else None,
         "earnings_days": _num(earnings.get("days_until")),
         "per": _num(earnings.get("per")), "fwd_pe": _num(earnings.get("forward_pe")),
         "roe_pct": roe * 100.0 if roe is not None else None,
@@ -382,6 +464,40 @@ def _scan_rows(items: list[dict]) -> list[dict]:
     return rows
 
 
+def _movers(items: list[dict], stats: dict, limit: int = 8) -> dict:
+    """스캔 유니버스의 1일 상승·하락 상위. 시세가 붙은 종목이 모자라면 양쪽 다 비운다."""
+    rows = []
+    for item in items or []:
+        s = stats.get(str(item.get("ticker") or "")) or {}
+        if s.get("d1") is None:
+            continue
+        rows.append({
+            "ticker": str(item.get("ticker")), "name": clean(item.get("company_name")),
+            "last": s["last"], "d1": s["d1"], "d5": s.get("d5"), "spark": s.get("spark") or [],
+            "score": _num(item.get("total_score")), "grade": str(item.get("grade") or ""),
+        })
+    if len(rows) < limit * 2:
+        return {"up": [], "down": []}
+    rows.sort(key=lambda r: -r["d1"])
+    return {"up": rows[:limit], "down": rows[::-1][:limit]}
+
+
+def _stance(glance: list[str]) -> dict | None:
+    """'오늘 한눈에' 불릿에서 표지의 스탠스 칸을 읽는다. 해석 문구가 없으면 None."""
+    def labelled(prefix: str) -> str:
+        return next((g[len(prefix):].lstrip(": ").strip() for g in glance if g.startswith(prefix)), "")
+
+    text = labelled("포트 점수 해석")
+    if not text:
+        return None
+    label, _sep, note = text.partition(" · ")
+    tone = ("pos" if any(k in label for k in ("양호", "안정", "우수", "긍정")) else
+            "neg" if any(k in label for k in ("위험", "경고", "심각")) else
+            "warn" if any(k in label for k in ("주의", "경계")) else "neu")
+    return {"label": label, "note": note, "tone": tone, "todo": labelled("오늘 할 일"),
+            "phase": next((g for g in glance if g.startswith("Phase")), "")}
+
+
 def _calendar(lines: list[str]) -> list[dict]:
     rows, group = [], ""
     for line in lines:
@@ -400,10 +516,16 @@ def _calendar(lines: list[str]) -> list[dict]:
 
 
 def _fear_greed(lines: list[str]) -> dict | None:
-    for text in bullets(lines):
-        m = re.search(r"공포·탐욕 지수\s*:\s*(\d{1,3})\s*-\s*(.+)$", text)
+    """시장 리포트의 공포·탐욕 값. CNN 수집이 실패한 날은 VIX 구간으로 추정한 3단계 값이다(estimated)."""
+    items = bullets(lines)
+    for text in items:
+        m = re.search(r"추정 공포·탐욕 지수\s*:\s*(\d{1,3})\s*-\s*(.+)$", text)
         if m and 0 <= int(m.group(1)) <= 100:
-            return {"value": int(m.group(1)), "label": m.group(2).strip()}
+            return {"value": int(m.group(1)), "label": m.group(2).strip(), "estimated": True}
+        m = re.search(r"CNN 공포·탐욕 지수\s*:\s*(\d{1,3}(?:\.\d+)?)", text)
+        if m and 0 <= float(m.group(1)) <= 100:
+            label = next((t.partition(":")[2].strip() for t in items if t.startswith("상태")), "")
+            return {"value": round(float(m.group(1))), "label": label, "estimated": False}
     return None
 
 
@@ -434,32 +556,37 @@ def build_model(*, report_date: str, data: dict, investment_md: str = "", market
                 prices: dict | None = None, portfolio_history: list[dict] | None = None) -> dict:
     """PDF 템플릿이 그대로 쓰는 모델. 순수 함수 — 네트워크·파일 접근 없음."""
     prices = clip_history(prices or {}, report_date)
-    stats = {symbol: price_stats(frame) for symbol, frame in prices.items()}
-    holdings = [_holding(p, stats.get(str(p.get("ticker")), {})) for p in data.get("portfolio") or []]
+    kinds = market_kinds()
+    stats = {symbol: price_stats(frame, kinds.get(symbol, "price")) for symbol, frame in prices.items()}
+    bench = stats.get(BENCHMARK) or {}
+    holdings = [_holding(p, stats.get(str(p.get("ticker")), {}), bench) for p in data.get("portfolio") or []]
     holdings.sort(key=lambda h: -(h["weight"] or 0.0))
 
     inv = md_sections(investment_md)
     mkt = md_sections(market_md)
     glance_lines = section(inv, "오늘 한눈에")
     conclusion = bullets(block_after(glance_lines, "오늘 결론"))
-    # 신호 분포·오늘 할 일·환전은 표지의 막대, 우선순위 표, 환전 타이밍 칸이 같은 내용을 보여준다.
-    glance = [g for g in leading_bullets(glance_lines) if not g.startswith(("신호 분포", "오늘 할 일", "환전"))]
+    # 신호 분포·오늘 할 일·환전·점수 해석·Phase 는 표지의 전용 칸(막대, 우선순위 표, 스탠스)이 보여준다.
+    all_glance = leading_bullets(glance_lines)
+    glance = [g for g in all_glance
+              if not g.startswith(("신호 분포", "오늘 할 일", "환전", "포트 점수 해석", "Phase"))]
     priorities = md_table(block_after(glance_lines, "실행 우선순위"))
     analyst = _subsections(section(inv, "LLM 애널리스트 코멘트", deep=True))
 
     market = data.get("market") or {}
-    index_rows = []
-    for label, symbol, unit in MARKET_ROWS:
-        s = stats.get(symbol)
-        if s:
-            index_rows.append({"label": label, "symbol": symbol, "unit": unit, **s})
-    if not index_rows:   # 가격 이력이 없으면 리포트가 이미 가진 1일 값만 보여준다.
-        for label, key in (("S&P 500 (SPY)", "spy"), ("NASDAQ 100 (QQQ)", "qqq")):
-            if _num(market.get(f"{key}_price")) is not None:
-                index_rows.append({**dict.fromkeys(("d5", "m1", "m3", "ytd", "pos52", "rsi")),
-                                   "label": label, "symbol": key.upper(), "unit": "$",
-                                   "last": _num(market.get(f"{key}_price")),
-                                   "d1": _num(market.get(f"{key}_change"))})
+    groups = []
+    for title, unit, rows in MARKET_GROUPS:
+        found = [{"label": row[0], "symbol": row[1], **stats[row[1]]} for row in rows if stats.get(row[1])]
+        if found:
+            groups.append({"title": title, "unit": unit, "rows": found})
+    if not groups:   # 가격 이력이 없으면 리포트가 이미 가진 1일 값만 보여준다.
+        found = [{**dict.fromkeys(("d5", "m1", "m3", "ytd", "y1", "pos52")), "spark": [], "kind": "price",
+                  "label": label, "symbol": key.upper(), "last": _num(market.get(f"{key}_price")),
+                  "d1": _num(market.get(f"{key}_change"))}
+                 for label, key in (("S&P 500 (SPY)", "spy"), ("나스닥 100 (QQQ)", "qqq"))
+                 if _num(market.get(f"{key}_price")) is not None]
+        if found:
+            groups.append({"title": "대표 ETF", "unit": "달러, %", "rows": found})
     sectors = [{"label": name, "symbol": symbol, **stats[symbol]}
                for symbol, name in sector_etfs().items() if stats.get(symbol)]
     sectors.sort(key=lambda r: -(r.get("d1") or 0.0))
@@ -488,15 +615,18 @@ def build_model(*, report_date: str, data: dict, investment_md: str = "", market
     spy, qqq = stats.get("SPY") or {}, stats.get("QQQ") or {}
     kpis = [
         {"label": "S&P 500 (SPY)", "value": spy.get("last") or _num(market.get("spy_price")), "unit": "$",
-         "change": spy.get("d1") if spy else _num(market.get("spy_change"))},
+         "kind": "price", "change": spy.get("d1") if spy else _num(market.get("spy_change"))},
         {"label": "NASDAQ 100 (QQQ)", "value": qqq.get("last") or _num(market.get("qqq_price")), "unit": "$",
-         "change": qqq.get("d1") if qqq else _num(market.get("qqq_change"))},
+         "kind": "price", "change": qqq.get("d1") if qqq else _num(market.get("qqq_change"))},
     ]
-    for label, symbol, unit in (("KOSPI", "^KS11", "pt"), ("USD/KRW", "KRW=X", "원"), ("VIX", "^VIX", "pt")):
+    for label, symbol, unit in KPI_ROWS:
         if stats.get(symbol):
-            kpis.append({"label": label, "value": stats[symbol]["last"], "unit": unit, "change": stats[symbol]["d1"]})
-    if weighted_d1 is not None:
-        kpis.append({"label": "보유 종목 (비중 가중)", "value": weighted_d1, "unit": "%", "change": weighted_d1})
+            kpis.append({"label": label, "value": stats[symbol]["last"], "unit": unit,
+                         "kind": stats[symbol]["kind"], "change": stats[symbol]["d1"]})
+    actions: dict[str, int] = {}
+    for h in holdings:
+        if h["action"]:
+            actions[h["action"]] = actions.get(h["action"], 0) + 1
 
     nasdaq = data.get("nasdaq_100_scan") or {}
     kospi = data.get("kospi_top30_scan") or {}
@@ -520,13 +650,16 @@ def build_model(*, report_date: str, data: dict, investment_md: str = "", market
         "headline": headline,
         "conclusion": conclusion[1:] if conclusion and headline == conclusion[0] else conclusion,
         "glance": glance, "priorities": priorities, "analyst": analyst,
+        "stance": _stance(all_glance),
         "fx": bullets(block_after(glance_lines, "환전 타이밍")),
         "risk_flags": bullets(block_after(section(inv, "전체 요약"), "주요 위험 신호"))[:6],
         "kpis": kpis,
         "market": {
             "summary": [_dedupe_label(b) for b in bullets(section(mkt, "오늘 요약"))
                         if b.startswith(("시장", "섹터"))],
-            "indices": index_rows, "sectors": sectors,
+            "groups": groups, "sectors": sectors,
+            "sector_scale": max([abs(s.get("d1") or 0.0) for s in sectors] + [0.5]),
+            "movers": _movers((data.get("nasdaq_100_scan") or {}).get("all"), stats),
             "technical": _technical(stats),
             "fear_greed": _fear_greed(section(mkt, "공포·탐욕")),
             "news": _news(section(mkt, "주요 뉴스", deep=True)),
@@ -538,6 +671,9 @@ def build_model(*, report_date: str, data: dict, investment_md: str = "", market
             "weighted_d1": weighted_d1,
             "avg_score": sum(scored) / len(scored) if scored else None,
             "signal_counts": counts, "history": history,
+            "actions": sorted(actions.items(), key=lambda kv: -kv[1]),
+            "basket": basket_returns(prices, {h["ticker"]: h["weight"] or 0.0 for h in holdings}),
+            "return_scale": max([abs(h["ret_pct"] or 0.0) for h in holdings] + [1.0]),
             "total_krw": _num(raw_latest.get("total_krw")), "phase": raw_latest.get("phase"),
             "drawdown_pct": _num(raw_latest.get("drawdown_pct")),
         },

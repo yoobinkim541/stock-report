@@ -9,27 +9,68 @@
 </style>
 </head>
 <body>
-{%- set n = namespace(fig=0, tbl=0, sec=0) -%}
-{%- macro chg(v, digits=2) -%}
+{#- 양식은 국내 증권사 리포트의 공통 관행을 따른다(구조만 참고, 문구·로고·색은 자체 것):
+    · 데일리 시황지 — 색 띠 제목과 오른쪽 단위 표기, 종가·1D·1W·1M·YTD 수익률 표, 표 안 추이선,
+      작은 그림 넷을 한 줄에, 섹터 등락 막대, 상승·하락 상위, 경제 일정 표
+    · 기업 리포트 첫 쪽 — 제목 아래 본문(굵은 머리말)과 오른쪽 사이드바(의견 상자, 데이터 표, 수익률 표)
+    · 안쪽 쪽 — 쪽마다 같은 머리글과 쪽번호, 표는 위 굵은 선·세로선 없음, 등락은 글자색(상승 빨강·하락 파랑) -#}
+{%- macro chg(v, digits=1, big=none) -%}
   {%- if v is none -%}<span class="flat">–</span>
-  {%- else -%}<span class="{{ v | tone }}">{{ v | pct(digits) }}</span>{%- endif -%}
+  {%- else -%}<span class="{{ v | tone }}{{ ' big' if big is not none and (v | abs) >= big else '' }}">{{ v | pct(digits) }}</span>{%- endif -%}
 {%- endmacro -%}
-{%- macro heat(v, scale=5.0) -%}
-  {%- if v is none -%}<td class="flat">–</td>
-  {%- else -%}<td class="heat {{ v | tone }}" style="background: {{ v | heat(scale) }}">{{ v | pct(1) }}</td>{%- endif -%}
+{%- macro delta(v, unit, big=none) -%}
+  {%- if v is none -%}<span class="flat">–</span>
+  {%- else -%}<span class="{{ v | tone }}{{ ' big' if big is not none and (v | abs) >= big else '' }}">{{ "%+.1f" | format(v) }}{{ unit }}</span>{%- endif -%}
 {%- endmacro -%}
-{%- macro figure(src, title, source="Yahoo Finance, 자체 계산") -%}
-  {%- if src -%}{%- set n.fig = n.fig + 1 -%}
-  <figure><div class="cap"><b>그림 {{ n.fig }}</b>{{ title }}</div><img src="{{ src }}" alt="{{ title }}"><div class="src">자료: {{ source }}</div></figure>
+{#- 자산 표의 변동 칸: 금리는 bp 차이(단위는 띠에 적는다), 나머지는 등락률. big 은 굵게 적는 기준(%) — 금리는 그 5배(bp). -#}
+{%- macro mv(r, key, big) -%}
+  {%- if r.kind == "yield" -%}{{ delta(r[key], "", big * 5) }}{%- else -%}{{ chg(r[key], 1, big) }}{%- endif -%}
+{%- endmacro -%}
+{%- macro band(title, unit="", light=false) -%}
+  <div class="band{{ ' light' if light else '' }}"><b>{{ title }}</b>{% if unit %}<span>{{ unit }}</span>{% endif %}</div>
+{%- endmacro -%}
+{%- macro figure(src, title, unit="", source="Yahoo Finance, 자체 계산") -%}
+  {%- if src -%}
+  <figure>{{ band(title, unit, true) }}<img src="{{ src }}" alt="{{ title }}"><div class="src">자료: {{ source }}</div></figure>
   {%- endif -%}
 {%- endmacro -%}
-{%- macro tcap(title) -%}{%- set n.tbl = n.tbl + 1 -%}<div class="cap"><b>표 {{ n.tbl }}</b>{{ title }}</div>{%- endmacro -%}
-{%- macro sec(title, english) -%}{%- set n.sec = n.sec + 1 -%}
-  <h2 class="sec"><span class="no">{{ "%02d" | format(n.sec) }}</span>{{ title }}<small>{{ english }}</small></h2>
+{#- "머리말: 내용" 꼴 문장은 머리말을 굵게. -#}
+{%- macro lead(text) -%}
+  {%- set parts = text.partition(": ") -%}
+  {%- if parts[1] and parts[0] | length <= 18 -%}<b>{{ parts[0] }}</b> {{ parts[2] }}{%- else -%}{{ text }}{%- endif -%}
+{%- endmacro -%}
+{%- macro range52(pos) -%}
+  {%- if pos is not none -%}<span class="range"><i style="left: {{ pos }}%"></i></span>{%- else -%}<span class="flat">–</span>{%- endif -%}
+{%- endmacro -%}
+{%- macro assets(group, wide=false) -%}
+  <div class="tbl">{{ band(group.title, "(" ~ group.unit ~ ")") }}
+    <table><thead><tr><th class="l">구분</th><th>종가</th><th>1D</th><th>1W</th><th>1M</th>{% if wide %}<th>3M</th>{% endif %}<th>YTD</th>{% if wide %}<th>1Y</th>{% endif %}<th class="c">60D 추이</th>{% if wide %}<th class="c">52주 위치</th>{% endif %}</tr></thead><tbody>
+    {% for r in group.rows %}
+      <tr><td class="name">{{ r.label }}</td><td class="strong">{{ r.last | price }}</td>
+      <td>{{ mv(r, "d1", 2) }}</td><td>{{ mv(r, "d5", 5) }}</td><td>{{ mv(r, "m1", 10) }}</td>{% if wide %}<td>{{ mv(r, "m3", 15) }}</td>{% endif %}
+      <td>{{ mv(r, "ytd", 20) }}</td>{% if wide %}<td>{{ mv(r, "y1", 30) }}</td>{% endif %}
+      <td class="c">{{ r.spark | spark }}</td>{% if wide %}<td class="c">{{ range52(r.pos52) }}</td>{% endif %}</tr>
+    {% endfor %}
+    </tbody></table>
+  </div>
+{%- endmacro -%}
+{%- macro movers(rows, title) -%}
+  {%- if rows -%}
+  <div class="tbl">{{ band(title, "(달러, %)") }}
+    <table><thead><tr><th class="l">종목</th><th>종가</th><th>1D</th><th>1W</th><th>재무</th><th class="c">60D 추이</th></tr></thead><tbody>
+    {% for r in rows %}
+      <tr><td class="name">{{ r.ticker }}<small>{{ r.name | truncate(17, true, "…") }}</small></td><td class="strong">{{ r.last | price }}</td>
+      <td>{{ chg(r.d1, 1, 3) }}</td><td>{{ chg(r.d5, 1, 8) }}</td>
+      <td>{% if r.score is not none %}{{ r.score | num(0) }} <span class="flat">{{ r.grade }}</span>{% else %}<span class="flat">–</span>{% endif %}</td>
+      <td class="c">{{ r.spark | spark }}</td></tr>
+    {% endfor %}
+    </tbody></table>
+  </div>
+  {%- endif -%}
 {%- endmacro -%}
 {%- macro scan(rows, title) -%}
   {%- if rows -%}
-  <div class="tbl">{{ tcap(title) }}
+  <div class="tbl">{{ band(title) }}
     <table><thead><tr><th class="l">종목</th><th>점수</th><th class="c">등급</th><th class="c">신호</th><th class="l">판단</th></tr></thead><tbody>
     {%- for r in rows %}
       <tr><td class="name">{{ r.ticker }}<small>{{ r.name | truncate(20, true, "…") }}</small></td><td class="strong">{{ r.score | num(0) }}</td><td class="c">{{ r.grade }}</td>
@@ -40,52 +81,72 @@
   {%- endif -%}
 {%- endmacro %}
 
-{#- ───────────── 1. 표지·요약 ───────────── #}
+{#- ───────────── 1. 표지: 결론·스탠스·핵심 데이터 ───────────── #}
 <section class="page cover">
   <header class="masthead">
     <div class="brand"><small>PORTFOLIO STRATEGY</small>DAILY INVESTMENT BRIEF</div>
     <div class="mast-meta"><b>{{ m.date_label }}</b>통합 데일리 투자 리포트</div>
   </header>
   <div class="title-block">
-    <div class="kicker">오늘의 결론</div>
+    <div class="label"><span class="chip">DAILY</span>포트폴리오 전략<i></i>시장·보유 종목 점검</div>
     <h1>{{ m.headline }}</h1>
-    {% if m.conclusion %}<ul class="deck">{% for c in m.conclusion[:3] %}<li>{{ c }}</li>{% endfor %}</ul>{% endif %}
   </div>
   {% if m.kpis %}
   <div class="kpis">
     {% for k in m.kpis %}
     <div class="kpi"><div class="l">{{ k.label }}</div>
-      {% if k.unit == "%" %}<div class="v {{ k.value | tone }}">{{ k.value | pct(2) }}</div><div class="c flat">전일 대비</div>
-      {% else %}<div class="v">{{ k.value | money(k.unit) }}</div><div class="c">{{ chg(k.change) }}</div>{% endif %}
+      {% if k.kind == "yield" %}<div class="v">{{ k.value | num(2) }}%</div><div class="c">{{ delta(k.change, "bp") }}</div>
+      {% else %}<div class="v">{{ k.value | money(k.unit) }}</div><div class="c">{{ chg(k.change, 2) }}</div>{% endif %}
     </div>
     {% endfor %}
   </div>
   {% endif %}
   <div class="cols">
     <div class="main">
-      {% if m.glance %}<h3>핵심 요약</h3><ul class="pts">{% for g in m.glance[:4] %}<li>{{ g }}</li>{% endfor %}</ul>{% endif %}
+      {% if m.conclusion %}<ul class="lead-pts">{% for c in m.conclusion[:3] %}<li>{{ lead(c) }}</li>{% endfor %}</ul>{% endif %}
+      {% if m.glance %}<h3 class="sub">핵심 요약</h3><ul class="pts">{% for g in m.glance[:3] %}<li>{{ lead(g) }}</li>{% endfor %}</ul>{% endif %}
+      {% if m.risk_flags %}<h3 class="sub">주요 위험 신호</h3><ul class="pts">{% for r in m.risk_flags[:4] %}<li>{{ lead(r) }}</li>{% endfor %}</ul>{% endif %}
       {% if m.priorities | length > 1 %}
-      <h3>실행 우선순위</h3>
-      <div class="tbl">{{ tcap("오늘 확인할 종목과 액션") }}
+      <div class="tbl">{{ band("실행 우선순위", "오늘 확인할 종목과 액션") }}
         <table><thead><tr>{% for h in m.priorities[0] %}<th class="l">{{ h }}</th>{% endfor %}</tr></thead><tbody>
         {% for row in m.priorities[1:6] %}<tr>{% for cell in row %}<td class="{{ 'wrap' if loop.last else 'name' if loop.index == 2 else 'l nowrap' }}">{{ cell }}</td>{% endfor %}</tr>{% endfor %}
         </tbody></table>
         <div class="src">자료: 자체 규칙 기반 판단(Decision v2) · 비중·실적 일정 반영</div>
       </div>
       {% endif %}
+      {{ figure(f.relative, "보유 바스켓 vs 벤치마크", "최근 3개월, 시작=100", "Yahoo Finance, 자체 계산 · 현재 비중을 과거에 고정한 값으로 실제 계좌 수익률과 다름") }}
     </div>
     <aside class="side">
-      <h3>Key Data</h3>
+      {% if m.stance %}
+      <div class="stance {{ m.stance.tone }}"><small>오늘의 스탠스</small><b>{{ m.stance.label }}</b>{% if m.stance.note %}<span>{{ m.stance.note }}</span>{% endif %}</div>
+      {% if m.stance.phase or m.stance.todo %}
+      <dl class="facts">
+        {% if m.stance.phase %}<dt>국면</dt><dd>{{ m.stance.phase }}</dd>{% endif %}
+        {% if m.stance.todo %}<dt>오늘 할 일</dt><dd>{{ m.stance.todo }}</dd>{% endif %}
+      </dl>
+      {% endif %}
+      {% endif %}
+      <h3>Portfolio Data</h3>
       <table class="kv">
         {% if m.portfolio.value_usd %}<tr><td>평가액</td><td>${{ m.portfolio.value_usd | num(0) }}</td></tr>{% endif %}
         {% if m.portfolio.total_krw %}<tr><td>원화 환산</td><td>{{ m.portfolio.total_krw | num(0) }}원</td></tr>{% endif %}
-        {% if m.portfolio.pnl_pct is not none %}<tr><td>평가손익</td><td>{{ chg(m.portfolio.pnl_pct) }}</td></tr>{% endif %}
-        {% if m.portfolio.weighted_d1 is not none %}<tr><td>1일 (비중 가중)</td><td>{{ chg(m.portfolio.weighted_d1) }}</td></tr>{% endif %}
+        {% if m.portfolio.pnl_pct is not none %}<tr><td>평가손익</td><td>{{ chg(m.portfolio.pnl_pct, 2) }}</td></tr>{% endif %}
+        {% if m.portfolio.weighted_d1 is not none %}<tr><td>1일 (비중 가중)</td><td>{{ chg(m.portfolio.weighted_d1, 2) }}</td></tr>{% endif %}
         <tr><td>보유 종목</td><td>{{ m.portfolio.holdings | length }}개</td></tr>
         {% if m.portfolio.avg_score is not none %}<tr><td>평균 재무 점수</td><td>{{ m.portfolio.avg_score | num(1) }} / 100</td></tr>{% endif %}
         {% if m.portfolio.phase %}<tr><td>바벨 Phase</td><td>{{ m.portfolio.phase }}</td></tr>{% endif %}
         {% if m.portfolio.drawdown_pct is not none %}<tr><td>QQQ 고점 대비</td><td>{{ chg(m.portfolio.drawdown_pct, 1) }}</td></tr>{% endif %}
       </table>
+      {% set bk = m.portfolio.basket %}
+      {% if bk.rows %}
+      <h3>기간 수익률<small>현재 비중 고정</small></h3>
+      <table class="mini"><thead><tr><th class="l">(%, %p)</th>{% for r in bk.rows %}<th>{{ r.label }}</th>{% endfor %}</tr></thead><tbody>
+        <tr><td class="l">보유 바스켓</td>{% for r in bk.rows %}<td>{{ chg(r.basket, 1) }}</td>{% endfor %}</tr>
+        {% for b in bk.benchmarks %}{% set bi = loop.index0 %}
+        <tr><td class="l">{{ b }} 대비</td>{% for r in bk.rows %}<td>{{ delta(r.vs[bi], "") }}</td>{% endfor %}</tr>
+        {% endfor %}
+      </tbody></table>
+      {% endif %}
       {% set sc = m.portfolio.signal_counts %}{% set total = m.portfolio.holdings | length %}
       {% if total %}
       <h3>신호 분포</h3>
@@ -95,52 +156,70 @@
         <span><i class="dot warn"></i>경고 <b>{{ sc.warn }}</b></span><span><i class="dot neg"></i>심각 <b>{{ sc.neg }}</b></span>
       </div>
       {% endif %}
-      {% if m.risk_flags %}<h3>주요 위험 신호</h3><ul class="pts small">{% for r in m.risk_flags[:4] %}<li>{{ r }}</li>{% endfor %}</ul>{% endif %}
-      {% if m.fx %}<h3>환전 타이밍</h3><ul class="pts small">{% for r in m.fx[:3] %}<li>{{ r }}</li>{% endfor %}</ul>{% endif %}
+      {% if m.portfolio.actions %}
+      <h3>판단 분포</h3>
+      <table class="kv">{% for action, count in m.portfolio.actions[:7] %}<tr><td>{{ action }}</td><td>{{ count }}종목</td></tr>{% endfor %}</table>
+      {% endif %}
     </aside>
   </div>
-  {% if f.relative or f.equity %}
-  <div class="grid2 cover-figs">
-    <div>{{ figure(f.relative, "현재 보유 비중 바스켓 vs 벤치마크 (최근 3개월, 시작=100)", "Yahoo Finance, 자체 계산 · 현재 비중을 과거에 고정한 값으로 실제 계좌 수익률과 다름") }}</div>
-    <div>{{ figure(f.equity, "포트폴리오 평가액 추이 (USD, 입출금 포함)", "포트폴리오 히스토리(자체 기록)") }}</div>
+</section>
+
+{#- ───────────── 2. 시장: 코멘트·작은 그림·자산 수익률 표 ───────────── #}
+<section class="page market">
+  {% if m.market.summary or m.market.news or m.fx %}
+  {{ band("Market Comment") }}
+  <div class="comment2">
+    <div>{% if m.market.summary %}<ul class="pts">{% for s in m.market.summary[:3] %}<li>{{ lead(s) }}</li>{% endfor %}</ul>{% endif %}
+      {% if m.fx %}<h4>환전 타이밍 (원화→달러)</h4><ul class="pts">{% for r in m.fx[:3] %}<li>{{ r }}</li>{% endfor %}</ul>{% endif %}</div>
+    <div>{% if m.market.news %}<ul class="pts">{% for item in m.market.news[:4] %}<li>{{ item.title | truncate(92, false, "…") }}{% if item.source %} <span class="flat">— {{ item.source }}</span>{% endif %}</li>{% endfor %}</ul>{% endif %}</div>
   </div>
+  {% endif %}
+  {% if m.analyst %}
+  <div class="tbl">{{ band("Analyst Comment", "사실 검증 통과분만 수록") }}
+    <div class="comment2 four">
+    {% for s in m.analyst[:4] %}<div><h4>{{ s.title }}</h4>{% for p in s.points[:2] %}<p>{{ p }}</p>{% endfor %}</div>{% endfor %}
+    </div>
+  </div>
+  {% endif %}
+  {% if f.minis %}
+  <div class="grid4">
+    {% for c in f.minis %}<figure>{{ band(c.title, "3개월", true) }}<img src="{{ c.src }}" alt="{{ c.title }}"></figure>{% endfor %}
+  </div>
+  {% endif %}
+  {% if m.market.groups %}
+  {{ assets(m.market.groups[0], true) }}
+  {% if m.market.groups | length > 1 %}
+  <div class="grid2 tables">{% for g in m.market.groups[1:] %}{{ assets(g) }}{% endfor %}</div>
+  {% endif %}
+  <div class="src">자료: Yahoo Finance · 전 거래일 종가(수정주가) 기준 · 금리는 변동폭(bp), 그 외는 등락률(%) · 60D 추이는 최근 60거래일 · 52주 위치는 저가(좌)~고가(우)</div>
   {% endif %}
 </section>
 
-{#- ───────────── 2. 시장 ───────────── #}
-<section class="page">
-  {{ sec("시장 동향", "Market") }}
-  <div class="grid2 lead">
-    <div>{% if m.market.summary %}<ul class="pts">{% for s in m.market.summary[:3] %}<li>{{ s }}</li>{% endfor %}</ul>{% endif %}</div>
-    <div>
-      {% if m.market.fear_greed %}
-      <div class="gauge"><i style="left: {{ m.market.fear_greed.value }}%"></i><b style="left: {{ [[m.market.fear_greed.value, 14] | max, 86] | min }}%">공포·탐욕 {{ m.market.fear_greed.value }} · {{ m.market.fear_greed.label }}</b></div>
-      <div class="scale"><span>극단적 공포</span><span>중립</span><span>극단적 탐욕</span></div>
-      {% endif %}
-    </div>
-  </div>
-  {% if m.market.indices %}
-  <div class="tbl">{{ tcap("주요 지수·자산 수익률") }}
-    <table><thead><tr><th class="l">자산</th><th>종가</th><th>1D</th><th>5D</th><th>1M</th><th>3M</th><th>YTD</th><th class="c">52주 범위</th><th>RSI(14)</th></tr></thead><tbody>
-    {% for r in m.market.indices %}
-      <tr><td class="name">{{ r.label }}</td><td class="strong">{{ r.last | money(r.unit) }}</td>
-      {{ heat(r.d1, 3) }}{{ heat(r.d5, 6) }}{{ heat(r.m1, 12) }}{{ heat(r.m3, 20) }}{{ heat(r.ytd, 30) }}
-      <td class="c">{% if r.pos52 is not none %}<span class="range"><i style="left: {{ r.pos52 }}%"></i></span>{% else %}–{% endif %}</td>
-      <td>{{ r.rsi | num(1) }}</td></tr>
-    {% endfor %}
-    </tbody></table>
-    <div class="src">자료: Yahoo Finance · 수정주가 기준 · 52주 범위는 저가(좌)~고가(우) 안에서 현재가 위치</div>
+{#- ───────────── 3. 시장: 추세 그림·섹터·일정·등락 상위 ───────────── #}
+{% if f.spy or f.qqq or m.market.sectors or m.market.calendar or m.market.movers.up %}
+<section class="page market">
+  {% if f.spy or f.qqq %}
+  <div class="grid2">
+    <div>{{ figure(f.spy, "S&P 500 (SPY)", "6개월 · 종가·이동평균·거래량") }}</div>
+    <div>{{ figure(f.qqq, "NASDAQ 100 (QQQ)", "6개월 · 종가·이동평균·거래량") }}</div>
   </div>
   {% endif %}
   <div class="grid2">
-    <div>{{ figure(f.spy, "S&P 500 (SPY) 6개월 — 종가·이동평균·거래량") }}</div>
-    <div>{{ figure(f.qqq, "NASDAQ 100 (QQQ) 6개월 — 종가·이동평균·거래량") }}</div>
-  </div>
-  <div class="grid2">
     <div class="half">
-      {{ figure(f.sectors, "섹터 ETF 1일 등락률") }}
+      {% if m.market.sectors %}
+      <div class="tbl">{{ band("섹터 ETF 등락률", "(%)") }}
+        <table><thead><tr><th class="l">섹터</th><th class="c" colspan="2">1D</th><th>1W</th><th>1M</th><th class="c">60D 추이</th></tr></thead><tbody>
+        {% for s in m.market.sectors %}
+          <tr><td class="name">{{ s.label }}<small>{{ s.symbol }}</small></td>
+          <td class="c"><span class="dbar"><i class="{{ s.d1 | tone }}" style="width: {{ s.d1 | barw(m.market.sector_scale) }}%"></i></span></td>
+          <td>{{ chg(s.d1, 1, 2) }}</td><td>{{ chg(s.d5, 1, 5) }}</td><td>{{ chg(s.m1, 1, 10) }}</td><td class="c">{{ s.spark | spark }}</td></tr>
+        {% endfor %}
+        </tbody></table>
+        <div class="src">자료: Yahoo Finance · 미국 섹터 ETF(SPDR) 기준, 1일 등락률 순</div>
+      </div>
+      {% endif %}
       {% if m.market.technical %}
-      <div class="tbl">{{ tcap("추세 위치") }}
+      <div class="tbl">{{ band("추세 위치", "SPY · QQQ") }}
         <table><thead><tr><th class="l">지표</th><th>SPY</th><th>QQQ</th></tr></thead><tbody>
         {% for t in m.market.technical %}
           <tr><td class="l">{{ t.label }}</td>
@@ -152,46 +231,52 @@
       {% endif %}
     </div>
     <div class="half">
+      {% if m.market.fear_greed %}
+      <div class="tbl">{{ band("공포·탐욕 지수", "VIX 기반 추정 · 0~100" if m.market.fear_greed.estimated else "CNN · 0~100") }}
+        <div class="gauge"><i style="left: {{ m.market.fear_greed.value }}%"></i><b style="left: {{ [[m.market.fear_greed.value, 14] | max, 86] | min }}%">{{ m.market.fear_greed.value }} · {{ m.market.fear_greed.label }}</b></div>
+        <div class="scale"><span>극단적 공포</span><span>중립</span><span>극단적 탐욕</span></div>
+        <div class="src">자료: {% if m.market.fear_greed.estimated %}VIX 구간으로 추정한 3단계 값(20 미만 탐욕 · 20~30 중립 · 30 초과 공포) — CNN 지수가 아님{% else %}CNN Fear &amp; Greed Index(시장 리포트 수록분){% endif %}</div>
+      </div>
+      {% endif %}
       {% if m.market.calendar %}
-      <div class="tbl">{{ tcap("경제 일정 (오늘·향후 7일)") }}
+      <div class="tbl">{{ band("경제 일정", "오늘·향후 7일") }}
         <table><thead><tr><th class="l">일자</th><th class="l">시각</th><th class="l">이벤트</th><th class="c">중요도</th></tr></thead><tbody>
-        {% for e in m.market.calendar[:8] %}
+        {% for e in m.market.calendar[:10] %}
           <tr><td class="l nowrap">{% if e.group == "오늘" %}<b>{{ e.date }}</b>{% else %}{{ e.date }}{% endif %}</td>
           <td class="l">{{ e.time }}</td><td class="wrap">{{ e.event }}</td><td class="c imp">{{ "★" * e.importance }}</td></tr>
         {% endfor %}
         </tbody></table>
-        <div class="src">자료: 경제 캘린더(시장 리포트 수록분) · 굵은 일자는 오늘</div>
+        <div class="src">자료: 경제 캘린더(시장 리포트 수록분) · 굵은 일자는 오늘 · 시각은 KST</div>
       </div>
       {% endif %}
-      {% if m.market.news %}
-      <h3>주요 뉴스</h3>
-      <ul class="pts small">{% for item in m.market.news[:3] %}<li>{{ item.title | truncate(84, false, "…") }}{% if item.source %} <span class="flat">— {{ item.source }}</span>{% endif %}</li>{% endfor %}</ul>
-      {% endif %}
     </div>
   </div>
+  {% if m.market.movers.up %}
+  <div class="grid2 tables">
+    {{ movers(m.market.movers.up, "NASDAQ 100 일일 상승률 상위") }}
+    {{ movers(m.market.movers.down, "NASDAQ 100 일일 하락률 상위") }}
+  </div>
+  <div class="src">자료: Yahoo Finance · NASDAQ 100 스캔 대상 종목의 전 거래일 등락률 · 재무는 자체 재무 점수(0~100)와 등급</div>
+  {% endif %}
 </section>
+{% endif %}
 
-{#- ───────────── 3. 포트폴리오 ───────────── #}
-<section class="page">
-  {{ sec("포트폴리오 현황", "Portfolio") }}
-  {% if m.analyst %}
-  <div class="comment"><div class="tag">Analyst Comment · 사실 검증 통과분만 수록</div>
-    <div class="comment-body">
-    {% for s in m.analyst[:4] %}<div><h4>{{ s.title }}</h4>{% for p in s.points[:2] %}<p>{{ p }}</p>{% endfor %}</div>{% endfor %}
-    </div>
+{#- ───────────── 4. 포트폴리오 ───────────── #}
+<section class="page portfolio">
+  {% if f.allocation or f.equity %}
+  <div class="grid2">
+    <div>{{ figure(f.allocation, "보유 비중", "평가액 기준", "브로커 스냅샷") }}</div>
+    <div>{{ figure(f.equity, "포트폴리오 평가액 추이", "USD, 입출금 포함", "포트폴리오 히스토리(자체 기록)") }}</div>
   </div>
   {% endif %}
-  <div class="grid2">
-    <div>{{ figure(f.allocation, "보유 비중", "브로커 스냅샷(평가액 기준)") }}</div>
-    <div>{{ figure(f.returns, "종목별 평가손익률", "브로커 스냅샷") }}</div>
-  </div>
   {% if m.portfolio.holdings %}
-  <div class="tbl">{{ tcap("보유 종목 요약 (비중 순)") }}
-    <table><thead><tr><th class="l">종목</th><th>비중</th><th>현재가</th><th>1D</th><th>5D</th><th>1M</th><th>평가손익</th><th>재무</th><th class="c">신호</th><th class="l">판단</th><th class="l">오늘 액션</th></tr></thead><tbody>
+  <div class="tbl">{{ band("보유 종목 요약", "비중 순 · (달러, %)") }}
+    <table><thead><tr><th class="l">종목</th><th>비중</th><th>평가액</th><th>현재가</th><th>평균단가</th><th class="c" colspan="2">평가손익</th><th>재무</th><th class="c">신호</th><th class="l">판단</th><th class="l">오늘 액션</th></tr></thead><tbody>
     {% for h in m.portfolio.holdings %}
-      <tr><td class="name">{{ h.ticker }}<small>{{ h.name | truncate(15, true, "…") }}</small></td>
-      <td>{{ h.weight | num(1) }}%</td><td class="strong">${{ h.price | num(2) }}</td>
-      {{ heat(h.d1, 3) }}{{ heat(h.d5, 6) }}{{ heat(h.m1, 12) }}{{ heat(h.ret_pct, 25) }}
+      <tr><td class="name">{{ h.ticker }}<small>{{ h.name | truncate(13, true, "…") }}</small></td>
+      <td>{{ h.weight | num(1) }}</td><td>{{ h.value_usd | num(0) }}</td><td class="strong">{{ h.price | num(2) }}</td><td>{{ h.avg_price | num(2) }}</td>
+      <td class="c"><span class="dbar narrow"><i class="{{ h.ret_pct | tone }}" style="width: {{ h.ret_pct | barw(m.portfolio.return_scale) }}%"></i></span></td>
+      <td>{{ chg(h.ret_pct, 1, 20) }}</td>
       <td>{% if h.score is not none %}{{ h.score | num(0) }} <span class="flat">{{ h.grade }}</span>{% else %}<span class="flat">{{ h.grade }}</span>{% endif %}</td>
       <td class="c"><span class="badge line {{ h.tone }}">{{ h.signal_label }}</span></td>
       <td class="l strong nowrap">{{ h.action }}</td><td class="wrap">{{ h.today_action }}</td></tr>
@@ -199,45 +284,68 @@
     </tbody></table>
     <div class="src">자료: 브로커 스냅샷, Yahoo Finance, 자체 규칙 · 재무 점수는 개별주만(ETF 제외)</div>
   </div>
+  <div class="tbl">{{ band("보유 종목 기간 수익률", "(%)") }}
+    <table><thead><tr><th class="l">종목</th><th>1D</th><th>1W</th><th>1M</th><th>3M</th><th>6M</th><th>1Y</th><th>YTD</th><th class="c">60D 추이</th><th class="c">52주 위치</th><th>RSI(14)</th><th>목표가 괴리</th><th>다음 실적</th></tr></thead><tbody>
+    {% for h in m.portfolio.holdings %}
+      <tr><td class="name">{{ h.ticker }}</td>
+      <td>{{ chg(h.d1, 1, 3) }}</td><td>{{ chg(h.d5, 1, 8) }}</td><td>{{ chg(h.m1, 1, 15) }}</td><td>{{ chg(h.m3, 1, 25) }}</td><td>{{ chg(h.m6, 1, 35) }}</td><td>{{ chg(h.y1, 1, 50) }}</td><td>{{ chg(h.ytd, 1, 40) }}</td>
+      <td class="c">{{ h.spark | spark }}</td><td class="c">{{ range52(h.pos52) }}</td><td>{{ h.rsi | num(1) }}</td>
+      <td>{{ chg(h.target_upside, 0) }}</td><td>{% if h.next_earnings %}{{ h.next_earnings }}{% else %}<span class="flat">–</span>{% endif %}</td></tr>
+    {% endfor %}
+    </tbody></table>
+    <div class="src">자료: Yahoo Finance(수정주가), 자체 계산 · 목표가 괴리는 애널리스트 컨센서스 목표가 대비 · 굵은 숫자는 변동이 큰 구간</div>
+  </div>
   {% endif %}
 </section>
 
-{#- ───────────── 4. 종목별 ───────────── #}
+{#- ───────────── 5. 종목별 ───────────── #}
 {% if m.portfolio.holdings %}
-<section class="page">
-  {{ sec("종목별 점검", "Holdings") }}
+<section class="page holdings">
   {% for h in m.portfolio.holdings %}
   <article class="stock">
     <div class="stock-head">
       <span class="tk">{{ h.ticker }}</span><span class="nm">{{ h.name }}</span>
-      <span class="badge {{ h.tone }}">{{ h.action }}</span><span class="badge line {{ h.tone }}">{{ h.signal_label }}</span>
+      <span class="badge line {{ h.tone }}">신호 {{ h.signal_label }}</span>
       {% if h.earnings_days is not none and 0 <= h.earnings_days <= 14 %}<span class="badge line warn">실적 D-{{ h.earnings_days | num(0) }}</span>{% endif %}
-      <span class="meta">비중 <b>{{ h.weight | num(1) }}%</b> · 평가손익 <b>{{ chg(h.ret_pct, 1) }}</b></span>
+      <span class="meta">비중 <b>{{ h.weight | num(1) }}%</b>{% if h.value_usd %} · 평가액 <b>${{ h.value_usd | num(0) }}</b>{% endif %}{% if h.shares %} · {{ h.shares | num(2) }}주{% endif %}</span>
     </div>
     {% if h.today_action or h.one_line %}<p class="one">{% if h.today_action %}<b>{{ h.today_action }}</b>{% endif %}{% if h.today_action and h.one_line %} — {% endif %}{{ h.one_line }}</p>{% endif %}
     <div class="stock-body">
-      <div>{% if f.stocks[h.ticker] %}<img src="{{ f.stocks[h.ticker] }}" alt="{{ h.ticker }} 6개월 주가">{% else %}<div class="nochart">가격 이력 없음</div>{% endif %}</div>
-      <table class="kv">
-        <tr><td>현재가</td><td>${{ h.price | num(2) }}</td></tr>
-        <tr><td>1D / 5D / 1M</td><td class="nowrap">{{ chg(h.d1, 1) }} / {{ chg(h.d5, 1) }} / {{ chg(h.m1, 1) }}</td></tr>
-        {% if h.pos52 is not none %}<tr><td>52주 범위</td><td><span class="range"><i style="left: {{ h.pos52 }}%"></i></span></td></tr>{% endif %}
-        {% if h.avg_price %}<tr><td>평균단가</td><td>${{ h.avg_price | num(2) }}</td></tr>{% endif %}
-        {% if h.rsi is not none %}<tr><td>RSI(14)</td><td>{{ h.rsi | num(1) }}</td></tr>{% endif %}
-        {% if h.per or h.fwd_pe %}<tr><td>PER / 선행</td><td>{{ h.per | mult }} / {{ h.fwd_pe | mult }}</td></tr>{% endif %}
-        {% if h.is_fund and h.role %}<tr><td>포트 역할</td><td>{{ h.role }}</td></tr>{% endif %}
-        {% if h.roe_pct is not none %}<tr><td>ROE</td><td>{{ h.roe_pct | num(1) }}%</td></tr>{% endif %}
-        {% if h.target_upside is not none %}<tr><td>목표가 괴리</td><td>{{ chg(h.target_upside, 0) }}</td></tr>{% endif %}
-        {% if h.next_earnings %}<tr><td>다음 실적</td><td>{{ h.next_earnings }}</td></tr>{% endif %}
-        {% if h.confidence is not none %}<tr><td>판단 신뢰도</td><td><span class="meter"><i style="width: {{ h.confidence }}%"></i></span>{{ h.confidence | num(0) }}</td></tr>{% endif %}
-      </table>
+      <div>
+        {% if f.stocks[h.ticker] %}<img src="{{ f.stocks[h.ticker] }}" alt="{{ h.ticker }} 6개월 주가">{% else %}<div class="nochart">가격 이력 없음</div>{% endif %}
+        {% if h.returns %}
+        <table class="mini rets"><thead><tr><th class="l">수익률 (%, %p)</th>{% for r in h.returns %}<th>{{ r.label }}</th>{% endfor %}</tr></thead><tbody>
+          <tr><td class="l">절대</td>{% for r in h.returns %}<td>{{ chg(r.abs, 1) }}</td>{% endfor %}</tr>
+          <tr><td class="l">SPY 대비</td>{% for r in h.returns %}<td>{{ delta(r.rel, "") }}</td>{% endfor %}</tr>
+        </tbody></table>
+        {% endif %}
+      </div>
+      <div>
+        <div class="opinion {{ h.tone }}">
+          <div><span>판단</span><b>{{ h.action }}</b></div>
+          <div><span>현재가</span><b>${{ h.price | num(2) }}</b></div>
+          <div><span>평균단가</span><b>{% if h.avg_price %}${{ h.avg_price | num(2) }}{% else %}–{% endif %}</b></div>
+          <div><span>평가손익</span><b>{{ chg(h.ret_pct, 1) }}</b></div>
+        </div>
+        <table class="kv">
+          {% if h.high52 %}<tr><td>52주 최고 / 최저</td><td class="nowrap">{{ h.high52 | num(2) }} / {{ h.low52 | num(2) }}</td></tr>{% endif %}
+          {% if h.rsi is not none %}<tr><td>RSI(14)</td><td>{{ h.rsi | num(1) }}</td></tr>{% endif %}
+          {% if h.per or h.fwd_pe %}<tr><td>PER / 선행</td><td>{{ h.per | mult }} / {{ h.fwd_pe | mult }}</td></tr>{% endif %}
+          {% if h.is_fund and h.role %}<tr><td>포트 역할</td><td>{{ h.role }}</td></tr>{% endif %}
+          {% if h.roe_pct is not none %}<tr><td>ROE</td><td>{{ h.roe_pct | num(1) }}%</td></tr>{% endif %}
+          {% if h.target_upside is not none %}<tr><td>목표가 괴리</td><td>{{ chg(h.target_upside, 0) }}</td></tr>{% endif %}
+          {% if h.next_earnings %}<tr><td>다음 실적</td><td>{{ h.next_earnings }}</td></tr>{% endif %}
+          {% if h.confidence is not none %}<tr><td>판단 신뢰도</td><td><span class="meter"><i style="width: {{ h.confidence }}%"></i></span>{{ h.confidence | num(0) }}</td></tr>{% endif %}
+        </table>
+      </div>
       <div>
         {% if h.reasons %}<h4>투자 포인트</h4><ul class="pts">{% for r in h.reasons %}<li>{{ r }}</li>{% endfor %}</ul>{% endif %}
         {% if h.risks %}<h4>리스크</h4><ul class="pts risk">{% for r in h.risks %}<li>{{ r }}</li>{% endfor %}</ul>{% endif %}
         {% if h.triggers %}<h4>체크포인트</h4><ul class="pts check">{% for r in h.triggers %}<li>{{ r }}</li>{% endfor %}</ul>{% endif %}
         {% if h.fund_compare %}
-        <h4>기간 수익률과 비교 ETF 대비 (총수익, %p)</h4>
+        <h4>비교 ETF 대비 (총수익·달력일 기준, %p)</h4>
         <table class="mini"><thead><tr><th class="l">기간</th><th>{{ h.ticker }}</th>{% for p in h.fund_compare.peers %}<th>vs {{ p }}</th>{% endfor %}</tr></thead><tbody>
-        {% for r in h.fund_compare.rows %}<tr><td class="l">{{ r.label }}</td><td>{{ chg(r.ret, 1) }}</td>{% for d in r.diffs %}<td>{% if d is none %}–{% else %}<span class="{{ d | tone }}">{{ "%+.1f" | format(d) }}</span>{% endif %}</td>{% endfor %}</tr>{% endfor %}
+        {% for r in h.fund_compare.rows %}<tr><td class="l">{{ r.label }}</td><td>{{ chg(r.ret, 1) }}</td>{% for d in r.diffs %}<td>{{ delta(d, "") }}</td>{% endfor %}</tr>{% endfor %}
         </tbody></table>
         {% endif %}
         {% if h.pillars %}<div class="pillars">{% for p in h.pillars %}<span>{{ p.label }}<b>{{ p.status }}</b></span>{% endfor %}</div>{% endif %}
@@ -245,34 +353,31 @@
     </div>
   </article>
   {% endfor %}
-  <div class="src">자료: Yahoo Finance(주가·이동평균·거래량, 6개월), 브로커 스냅샷(비중·평균단가), 자체 규칙(판단·신뢰도). 점선은 평균단가.</div>
+  <div class="src">자료: Yahoo Finance(주가·이동평균·거래량 6개월, 수익률은 수정주가), 브로커 스냅샷(비중·평균단가), 자체 규칙(판단·신뢰도). 그림의 점선은 평균단가.</div>
 </section>
 {% endif %}
 
-{#- ───────────── 5. 스크리닝 ───────────── #}
+{#- ───────────── 6. 스크리닝 ───────────── #}
 {% if m.screens.nasdaq_buy or m.screens.kospi_buy or m.accumulation %}
-<section class="page">
-  {{ sec("유니버스 스크리닝", "Screening") }}
-  <div class="grid2">
-    <div>{{ scan(m.screens.nasdaq_buy, "NASDAQ 100 매수 후보 상위") }}</div>
-    <div>{{ scan(m.screens.nasdaq_warn, "NASDAQ 100 주의 종목") }}</div>
+<section class="page screening">
+  <div class="grid2 tables">
+    {{ scan(m.screens.nasdaq_buy, "NASDAQ 100 매수 후보 상위") }}
+    {{ scan(m.screens.nasdaq_warn, "NASDAQ 100 주의 종목") }}
+    {{ scan(m.screens.kospi_buy, "KOSPI 상위 30 매수 후보") }}
+    {{ scan(m.screens.kospi_warn, "KOSPI 상위 30 주의 종목") }}
   </div>
   <div class="grid2">
-    <div>{{ scan(m.screens.kospi_buy, "KOSPI 상위 30 매수 후보") }}</div>
-    <div>{{ scan(m.screens.kospi_warn, "KOSPI 상위 30 주의 종목") }}</div>
-  </div>
-  <div class="grid2">
-    <div>{{ figure(f.scores, "NASDAQ 100 재무 점수 분포 (종목 수)", "자체 재무 점수(0~100)") }}</div>
-    <div>{{ figure(f.accumulation, "기관 매집 강도 상위 (0~100)", "거래량 지표(OBV·CMF)·13F 기반 추정") }}</div>
+    <div>{{ figure(f.scores, "NASDAQ 100 재무 점수 분포", "종목 수", "자체 재무 점수(0~100)") }}</div>
+    <div>{{ figure(f.accumulation, "기관 매집 강도 상위", "0~100", "거래량 지표(OBV·CMF)·13F 기반 추정") }}</div>
   </div>
   {% if m.accumulation %}
-  <div class="tbl">{{ tcap("기관 매집 추정 종목") }}
+  <div class="tbl">{{ band("기관 매집 추정 종목") }}
     <table><thead><tr><th class="l">종목</th><th class="c">판정</th><th>강도</th><th>OBV</th><th>CMF</th><th>상승/하락 거래량</th><th>13F 분기 변동</th><th>매수/매도 기관</th></tr></thead><tbody>
     {% for a in m.accumulation %}
       <tr><td class="name">{{ a.ticker }}<small>{{ a.name | truncate(24, true, "…") }}</small></td>
       <td class="c"><span class="badge line {{ a.tone }}">{{ a.verdict }}</span></td><td class="strong">{{ a.score | num(0) }}</td>
       <td>{{ a.obv | num(2) }}</td><td>{{ a.cmf | num(2) }}</td><td>{{ a.updown | num(1) }}</td>
-      <td>{% if a.inst_change is not none %}{{ chg(a.inst_change, 1) }}{% else %}–{% endif %}</td>
+      <td>{{ chg(a.inst_change, 1) }}</td>
       <td>{% if a.buyers is not none %}{{ a.buyers }} / {{ a.sellers }}{% else %}–{% endif %}</td></tr>
     {% endfor %}
     </tbody></table>
@@ -286,8 +391,9 @@
   <h3>Compliance Notice · 작성 기준</h3>
   <ul>
     <li>본 자료는 공개 시세·공시 데이터와 자체 규칙으로 자동 생성한 개인 참고 자료이며, 금융투자업자의 조사분석자료나 투자 권유가 아닙니다. 투자 판단과 책임은 본인에게 있습니다.</li>
-    <li>수치는 모두 규칙 기반 계산값입니다. 언어모델(LLM) 코멘트는 계산값을 바꾸지 못하며, 사실 검증을 통과한 경우에만 표지의 Analyst Comment 에 수록됩니다.</li>
+    <li>수치는 모두 규칙 기반 계산값입니다. 언어모델(LLM) 코멘트는 계산값을 바꾸지 못하며, 사실 검증을 통과한 경우에만 Analyst Comment 에 수록됩니다.</li>
     <li>판단(보유·관심·비중점검 등)은 재무 점수·가격 신호·실적 일정·보유 비중을 조합한 규칙 결과이고, 자동 매매 신호가 아닙니다.</li>
+    <li>자료 출처: 시세·지수·금리·환율·원자재·재무 지표는 Yahoo Finance, 보유 수량·평균단가는 증권사 계좌 동기화 스냅샷, 기관 보유는 미국 SEC 13F, 공포·탐욕은 CNN(수집되지 않은 날은 VIX 기반 추정), 경제 일정은 SaveTicker 캘린더, 뉴스는 수집 캐시와 Google News RSS 입니다.</li>
     <li>시세는 Yahoo Finance 일봉(수정주가) 기준으로 지연·누락이 있을 수 있습니다. 기준일 {{ m.date }}{% if m.generated_at %} · 데이터 생성 {{ m.generated_at }} KST{% endif %}.</li>
   </ul>
 </section>
