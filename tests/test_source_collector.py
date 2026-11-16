@@ -1135,6 +1135,7 @@ def test_collect_once_isolates_source_crash(tmp_path, monkeypatch):
     monkeypatch.setattr(sc, "fetch_news_rss_events", lambda: [])
     monkeypatch.setattr(sc, "fetch_telegram_channel_events",
                         lambda: [{"source": "telegram:insidertracking", "title": "t", "url": "https://t.me/insidertracking/1"}])
+    monkeypatch.setattr(sc, "fetch_broker_report_events", lambda: [])
     monkeypatch.setattr(sc, "fetch_market_snapshot_events", lambda: [])
     monkeypatch.setattr(sc, "fetch_fred_macro_events", lambda: [])
     monkeypatch.setattr(sc, "fetch_world_gov_bond_events", lambda: [])
@@ -1152,6 +1153,7 @@ def test_collect_once_includes_polymarket(tmp_path, monkeypatch):
     monkeypatch.setattr(sc, "fetch_yahoo_headline_events", lambda: [])
     monkeypatch.setattr(sc, "fetch_news_rss_events", lambda: [])
     monkeypatch.setattr(sc, "fetch_telegram_channel_events", lambda: [])
+    monkeypatch.setattr(sc, "fetch_broker_report_events", lambda: [])
     monkeypatch.setattr(sc, "fetch_market_snapshot_events", lambda: [])
     monkeypatch.setattr(sc, "fetch_fred_macro_events", lambda: [])
     monkeypatch.setattr(sc, "fetch_world_gov_bond_events", lambda: [])
@@ -1171,6 +1173,7 @@ def test_collect_once_includes_kalshi(tmp_path, monkeypatch):
     monkeypatch.setattr(sc, "fetch_yahoo_headline_events", lambda: [])
     monkeypatch.setattr(sc, "fetch_news_rss_events", lambda: [])
     monkeypatch.setattr(sc, "fetch_telegram_channel_events", lambda: [])
+    monkeypatch.setattr(sc, "fetch_broker_report_events", lambda: [])
     monkeypatch.setattr(sc, "fetch_market_snapshot_events", lambda: [])
     monkeypatch.setattr(sc, "fetch_fred_macro_events", lambda: [])
     monkeypatch.setattr(sc, "fetch_world_gov_bond_events", lambda: [])
@@ -1193,6 +1196,7 @@ def test_collect_once_uses_provider_runner_and_writes_manifests(tmp_path, monkey
     monkeypatch.setattr(sc, "fetch_yahoo_headline_events", lambda: [])
     monkeypatch.setattr(sc, "fetch_news_rss_events", lambda: [])
     monkeypatch.setattr(sc, "fetch_telegram_channel_events", lambda: [])
+    monkeypatch.setattr(sc, "fetch_broker_report_events", lambda: [])
     monkeypatch.setattr(sc, "fetch_market_snapshot_events", lambda: [])
     monkeypatch.setattr(sc, "fetch_fred_macro_events", lambda: [])
     monkeypatch.setattr(sc, "fetch_world_gov_bond_events", lambda: [])
@@ -1354,3 +1358,59 @@ def test_retired_news_sources_are_not_scheduled():
     assert "arca" not in names and "saveticker" not in names
     assert "arca" not in sources and "saveticker" not in sources
     assert "arca" not in expected and "saveticker" not in expected
+
+
+def test_sell_side_channel_posts_are_research_not_community_chatter():
+    post = {"title": "엔비디아 목표주가 상향", "body": "엔비디아 목표주가 상향"}
+    broker = sc._classify_event({**post, "source": "telegram:kwusa"})
+    relay = sc._classify_event({**post, "source": "telegram:insidertracking"})
+
+    assert (broker["source_family"], broker["classification"]["kind"], broker["trust"], broker["horizon"]) == (
+        "research", "broker_comment", "B", "1w")
+    assert (broker["classification"]["publisher"], broker["classification"]["perspective"]) == ("키움증권", "sell_side")
+    assert (relay["source_family"], relay["classification"]["kind"], relay["trust"], relay["horizon"]) == (
+        "community", "community_signal", "C", "intraday")
+    assert relay["classification"]["perspective"] == "community"
+
+
+@pytest.mark.parametrize(("text", "tickers"), [
+    ("네비우스(NBIS US) 3분기 실적 리뷰: 매출 가이던스 상향", ["NBIS"]),
+    ("코어위브 (CRWV.US) 기업리포트: 대마는 쉽게 죽지 않는다", ["CRWV"]),
+    ("엑슨(AXON) 테이저 수주 확대", ["AXON"]),
+    ("삼성전자와 SK하이닉스가 HBM 공급을 늘린다", ["005930.KS", "000660.KS"]),
+    ("QQQ -0.32% SPY -0.35% 로 마감", ["QQQ", "SPY"]),
+    # 지수 이름, 직함 약어, 날짜·건수 숫자는 종목 언급이 아니다.
+    ("나스닥 지수는 1.2% 하락했고 S&P500 은 0.4% 내렸다. CEO 와 CFO 가 AI 투자 계획을 밝혔다.", []),
+    ("20261113 기준 123456 건", []),
+])
+def test_mention_tickers_reads_exchange_notes_and_names_but_not_index_words(text, tickers):
+    assert sc._mention_tickers(text) == tickers
+
+
+@pytest.mark.parametrize(("text", "topic"), [
+    ("트럼프가 이란과의 협상이 불필요하다고 말했다. 호르무즈 해협 긴장으로 유가가 급등했다.", "중동/전쟁"),
+    ("금리 인하가 어려울 것이란 전망이 늘었다.", "금리/채권"),       # 조사 '~이란'은 나라 이름이 아니다
+    ("핵심 요약: 엔비디아 실적이 AI 수요를 확인했다. 반도체 업황은 견조하다.", "기술/AI"),   # '핵심'은 핵이 아니다
+    ("실적이 정점이란 평가", ""),
+    ("He said the company will expand.", ""),
+    (("미국 시장 마감: 이란 협상 난항에 유가 상승, 국채 금리 5% 돌파, 엔비디아 급락으로 반도체 약세, "
+      "달러 강세에 원화 약세, 비트코인 하락, 연준 매파 발언."), sc.TOPIC_ROUNDUP),
+])
+def test_topic_is_the_dominant_theme_and_roundups_are_not_forced_into_one(text, topic):
+    assert sc._topic_from_text(text) == topic
+
+
+def test_telegram_card_keeps_post_time_report_links_and_attachment_names():
+    html = """<div class="tgme_widget_message" data-post="kwusa/10">
+      <div class="tgme_widget_message_text">[키움] 코어위브 리포트 <a href="https://bbn.kiwoom.com/rfSD1.pdf">원문</a>
+        <a href="https://t.me/kwusa/9">이전 글</a></div>
+      <a class="tgme_widget_message_photo_wrap" href="#"></a>
+      <div class="tgme_widget_message_document_title">CRWV_3Q.pdf</div>
+      <a class="tgme_widget_message_date" href="https://t.me/kwusa/10">
+        <time datetime="2026-11-13T07:01:22+00:00" class="time">07:01</time></a></div>"""
+
+    (message,) = sc._telegram_messages_from_html(html, "kwusa")
+
+    assert message["published_at"] == "2026-11-13T07:01:22+00:00"
+    assert message["links"] == ["https://bbn.kiwoom.com/rfSD1.pdf"]      # 채널 안쪽 링크는 뺀다
+    assert message["attachments"] == {"documents": ["CRWV_3Q.pdf"], "photos": 1}

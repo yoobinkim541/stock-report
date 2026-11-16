@@ -192,6 +192,39 @@ def test_html_renders_fixed_sections_and_escapes_report_text():
     assert "<script" not in html
 
 
+def _post(source: str, hour: int, title: str, **extra) -> dict:
+    return {"source": source, "title": title, "published_at": f"2026-11-13T{hour:02d}:00:00+09:00", **extra}
+
+
+def test_broker_block_takes_turns_between_houses_and_drops_bylines():
+    events = [
+        _post("telegram:kwusa", 9, "[키움증권/김진구] 코어위브 (CRWV.US) 기업리포트: 대마는 쉽게 죽지 않는다 ◆ 규제", tickers=["CRWV"]),
+        _post("telegram:kwusa", 8, "[키움 미국전략/주식 김승혁] 🌏US Daily (11/13) <b>강세</b>"),
+        _post("telegram:kwusa", 7, "제목 : 엔비디아, 정부의 감독 강화 리스크 주의"),
+        _post("telegram:shStrategy", 6, "국내 주식 마감 시황 - 11월 13일 『AI 지각 변동』 시황 강진혁 ☎️02-3772-2329 코스피 5,290"),
+        _post("telegram:daishinstrategy", 5, "[장 중 시황] KOSPI 약세 전환 [FICC리서치부 전략/시황: 이경민] - 국내 증시"),
+        _post("telegram:insidertracking", 10, "속보: 커뮤니티 채널 글은 이 칸에 싣지 않는다"),
+        _post("telegram:mirae_dm", 4, "https://www.youtube.com/live/AWfl6EyUCfw"),
+        {"source": "telegram:yuantais", "title": "게시 시각을 모르는 글은 수집 시각으로 적는다", "collected_at": "2026-11-13T03:10:00+09:00"},
+    ]
+
+    notes = report_pdf_data.broker_notes(events, limit=5)
+
+    assert [(n["broker"], n["when"]) for n in notes] == [
+        ("키움증권", "11/13 09:00"), ("신한투자증권", "11/13 06:00"), ("대신증권", "11/13 05:00"),
+        ("유안타증권", "11/13 03:10"), ("키움증권", "11/13 08:00")]
+    assert notes[0]["headline"] == "코어위브 (CRWV.US) 기업리포트: 대마는 쉽게 죽지 않는다 규제"
+    assert notes[0]["tickers"] == ["CRWV"]
+    assert notes[1]["headline"] == "국내 주식 마감 시황 - 11월 13일 『AI 지각 변동』 코스피 5,290"
+    assert notes[2]["headline"] == "[장 중 시황] KOSPI 약세 전환 - 국내 증시"     # 글 종류 괄호는 남긴다
+    assert notes[4]["headline"] == "US Daily (11/13) <b>강세</b>"
+
+    html = report_pdf.render_html(_model(source_events=events))
+    assert "<b>증권사 코멘트</b>" in html and "US Daily (11/13) &lt;b&gt;강세&lt;/b&gt;" in html
+    assert "커뮤니티 채널 글" not in html
+    assert "<b>증권사 코멘트</b>" not in report_pdf.render_html(_model())
+
+
 def test_html_renders_without_prices_markdown_or_history():
     # 시세 조회·시장 리포트·히스토리가 모두 빠진 날에도 표와 판단은 발행한다.
     model = _model(investment_md="", market_md="", prices={}, portfolio_history=[])
@@ -341,8 +374,8 @@ def test_build_pdf_prints_korean_text_on_a4(tmp_path):
     (tmp_path / f"investment-report-{REPORT_DATE}.md").write_text(INVESTMENT_MD, encoding="utf-8")
     prices = {s: _frame(REPORT_DATE) for s in ("SPY", "QQQ", "MSFT", "QLD")}
 
-    out = report_pdf.build_pdf(REPORT_DATE, tmp_path, tmp_path / "brief.pdf",
-                               fetch=lambda symbols: prices, history_loader=list)
+    out = report_pdf.build_pdf(REPORT_DATE, tmp_path, tmp_path / "brief.pdf", fetch=lambda symbols: prices,
+                               history_loader=list, events_loader=lambda day: [])
 
     reader = PdfReader(io.BytesIO(out.read_bytes()))
     text = "\n".join(page.extract_text() for page in reader.pages)
@@ -376,7 +409,8 @@ def test_cover_stays_on_one_page_when_every_block_is_long(tmp_path, monkeypatch)
 
     def pages(name: str) -> list[str]:
         out = report_pdf.build_pdf(REPORT_DATE, tmp_path, tmp_path / name, fetch=lambda symbols: prices,
-                                   history_loader=list, transactions_loader=lambda: ledger)
+                                   history_loader=list, transactions_loader=lambda: ledger,
+                                   events_loader=lambda day: [])
         return [page.extract_text() for page in PdfReader(io.BytesIO(out.read_bytes())).pages]
 
     normal = pages("normal.pdf")

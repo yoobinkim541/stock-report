@@ -104,7 +104,8 @@ def _source_type(source: object) -> str:
 def _event_type(event: dict[str, Any]) -> str:
     kind = _clean((event.get("classification") or {}).get("kind") or event.get("kind"), 80).lower()
     root = _source_type(event.get("source"))
-    if root in {"telegram", "arca"} or kind in {"community_signal", "rumor"}:
+    # 증권사가 운영하는 채널의 글(broker_comment)은 텔레그램으로 왔어도 소문이 아니라 그 증권사의 견해다.
+    if (root in {"telegram", "arca"} and kind != "broker_comment") or kind in {"community_signal", "rumor"}:
         return "rumor"
     if "supply" in kind or "flow" in kind or "수급" in _clean(event.get("topic")):
         return "supply_demand"
