@@ -442,6 +442,64 @@ def test_signs_and_short_names_do_not_admit_a_reversed_or_different_claim(quote,
         compile_claim(quote, claim)
 
 
+# 화살표는 방향이다. 같은 방향으로 풀어 쓴 claim 만 통과한다.
+@pytest.mark.parametrize("quote,claim", [
+    ("관세 불확실성↑, 달러 인덱스↓로 마감", "관세 불확실성이 확대됐고 달러 인덱스는 하락 마감했다."),
+    ("Yields ↑ while the dollar ↓ on Friday.", "Yields rose while the dollar fell on Friday."),
+])
+def test_arrows_support_the_direction_they_point_to(quote, claim):
+    assert compile_claim(quote, claim)["claims"][0]["text"] == claim
+
+
+@pytest.mark.parametrize("quote,claim", [
+    ("관세 불확실성↑, 달러 인덱스↓로 마감", "관세 불확실성이 축소됐고 달러 인덱스는 상승 마감했다."),
+    ("Yields ↑ while the dollar ↓ on Friday.", "Yields fell while the dollar rose on Friday."),
+])
+def test_arrows_do_not_admit_the_opposite_direction(quote, claim):
+    with pytest.raises(ValueError, match="claim_direction_unsupported"):
+        compile_claim(quote, claim)
+
+
+# 수집된 글은 한 줄로 이어져 있어 소제목이 인용문 바로 앞에 온다. 인용문이 앞머리에 맡긴 이름과 기간은 인정한다.
+LEAD_IN = [
+    ("[키움 미국주식] 네비우스 그룹 (NBIS.US): 시험대에 오른 실행력 ▶3Q26 실적: 가이던스는 하단으로 하향 - ",
+     "매출 $981M(+571% YoY), 조정 EBITDA $466M(마진 47.5%)으로 매출 컨센서스 7% 상회"),
+    ("[장 중 시황] AI 투자심리 위축 - 국내 증시 수익률(14시 00분): KOSPI -3.53% 하락 / 5,103.67pt (",
+     "KOSDAQ: -4.24% 하락 / 669.97pt"),
+    (":NVDA(-2.0%) 리스크 지속 가운데 반도체(SOX -3.4%)·네오클라우드(CRWV -6.1%) 등 부진 →",
+     "실적 발표(18일 07:00)를 통해 리스크 타개 여부 주목."),
+]
+
+
+@pytest.mark.parametrize("lead,quote,claim", [
+    (*LEAD_IN[0], "NBIS의 3Q26 매출은 $981M으로 전년 동기 대비 571% 증가했고 조정 EBITDA는 $466M, 마진은 47.5%였다."),
+    (*LEAD_IN[1], "14시 기준 KOSDAQ은 4.24% 하락한 669.97pt를 기록했다."),
+    (*LEAD_IN[2], "자료는 Nvidia 실적 발표를 통해 리스크가 타개될지 주목한다."),
+])
+def test_a_claim_may_take_a_name_or_period_from_the_lead_in_of_its_quote(lead, quote, claim):
+    compiled = compile_claim(quote, claim, source_body=lead + quote)
+    assert compiled["claims"][0]["anchor"]["start"] == len(lead)
+
+
+@pytest.mark.parametrize("lead,quote,claim,code", [
+    # 앞머리의 다른 항목 수치를 가져온 claim
+    (*LEAD_IN[1], "KOSDAQ은 3.53% 하락한 669.97pt를 기록했다.", "claim_number_unsupported"),
+    # 앞머리의 시각을 등락률로 쓴 claim
+    (*LEAD_IN[1], "KOSDAQ은 14% 하락한 669.97pt를 기록했다.", "claim_number_unsupported"),
+    # 앞머리에 없는 기간
+    (*LEAD_IN[0], "2Q26 매출은 $981M으로 전년 동기 대비 571% 증가했다.", "claim_number_unsupported"),
+    # 인용문의 종목을 앞머리의 종목으로 바꾼 claim
+    ("반도체(AMD -8.8%, AVGO -4.8%)·", "네오클라우드(NBIS -9.9%, CRWV -6.1%) 포함 AI 밸류체인 부진했습니다.",
+     "AMD는 9.9% 하락했다.", "claim_name_unsupported"),
+    # 앞머리보다 멀리 있는 이름
+    ("NVDA 실적 발표 예정. " + "가" * 200 + " ", "실적 발표(18일 07:00)를 통해 리스크 타개 여부 주목.",
+     "자료는 Nvidia 실적 발표를 통해 리스크가 타개될지 주목한다.", "claim_name_unsupported"),
+])
+def test_the_lead_in_does_not_lend_another_items_figure_or_subject(lead, quote, claim, code):
+    with pytest.raises(ValueError, match=code):
+        compile_claim(quote, claim, source_body=lead + quote)
+
+
 @pytest.mark.parametrize("body", [
     "The regulator approved the acquisition and all factories closed [S1].",
     "Capacity rose [S1]. The regulator approved the acquisition and all factories closed.",

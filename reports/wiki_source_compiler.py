@@ -119,8 +119,16 @@ _DIRECTION_KO = {
 # A minus right after a letter, digit or "%" is a hyphen or a range ("COVID-19", "5-10%", "3.5%-4.0%").
 _SIGNED_MOVE = re.compile(r"(?:(?<![0-9.,])(\+)|(?<![\w.,%])[-\u2212])\s?([0-9]+(?:[.,][0-9]+)*)\s?(?:%|bp|pt)", re.IGNORECASE)
 _NUMBER = re.compile(r"[0-9]+(?:[.,][0-9]+)*")
+# Period and clock marks a heading sets for the lines under it: 3Q26, 1H27, FY26, 2026년, 11월, 16일, 14시, 3분기.
+_PERIOD = re.compile(r"(?<![\w.,])(?:[1-4]Q[0-9]{2}|[12]H[0-9]{2}|FY[0-9]{2,4}|[0-9]{4}년|[0-9]{1,2}(?:분기|월|일|시))",
+                     re.IGNORECASE)
+_FRAME_CHARS = 160   # about two sentences of lead-in
+_ACRONYM = re.compile(r"(?<![A-Za-z0-9])[A-Z][A-Z0-9&]+(?![A-Za-z0-9])")   # NBIS, AVGO, FT; not YoY
 _HANGUL = re.compile(r"[\u1100-\u11ff\u3130-\u318f\uac00-\ud7a3]")
-_WORD = re.compile(r"[^\W\d_][^\W_]*")
+# Broker shorthand also states a move with an arrow after its subject ("불확실성↑", "금리↓"). Triangles are left
+# out: ▲ is a list bullet as often as a rise, and △ is the accounting minus.
+_ARROW = {"up": "\u2191\u2197\u2b06", "down": "\u2193\u2198\u2b07"}
+_WORD = re.compile(r"[^\W\d_][^\W_]*|[" + _ARROW["up"] + _ARROW["down"] + "]")
 _SENTENCE_BREAK = re.compile(r"(?<=[.!?。])\s+|\n+")
 # Function words plus attribution/provenance vocabulary. The prompts ask synthesis to keep
 # attribution, dates, scope and limitations, so prose about a report's status ("dated
@@ -245,7 +253,7 @@ def _script(token: str) -> str:
 
 def _content_tokens(text: str) -> list[str]:
     return [token for token in _WORD.findall(_plain(text).casefold())
-            if token not in _STOPWORDS and len(token) >= (3 if token.isascii() else 2)]
+            if token not in _STOPWORDS and (len(token) >= (3 if token.isascii() else 2) or _direction(token))]
 
 
 def _same_language(tokens: list[str], evidence_tokens: list[str]) -> str | None:
@@ -276,7 +284,8 @@ def _overlap_too_small(tokens: list[str], language: str, evidence: str, divisor:
 
 def _direction(token: str) -> str | None:
     for key in ("up", "down"):
-        if (_DIRECTION_EN[key].fullmatch(token) if token.isascii() else _DIRECTION_KO[key].search(token)):
+        if (_DIRECTION_EN[key].fullmatch(token) if token.isascii()
+                else token in _ARROW[key] or _DIRECTION_KO[key].search(token)):
             return key
     return None
 
@@ -453,27 +462,62 @@ def _shared_aliases(text: str, quote: str) -> frozenset[str]:
     return frozenset(alias for key, found in _alias_hits(text).items() if key in quote_groups for alias in found)
 
 
-def _names_supported(text: str, quote: str, shared: frozenset[str]) -> bool:
-    """Every name in text occurs in quote, directly or as a known alias of the same entity."""
+def _alias_words(aliases: frozenset[str]) -> set[str]:
+    return aliases | {word for alias in aliases for word in re.findall(r"\w+", alias)}
+
+
+def _names_supported(text: str, quote: str, shared: frozenset[str], frame: str = "") -> bool:
+    """Every name in text occurs in quote, directly or as a known alias of the same entity.
+
+    A name the quote lacks may come from ``frame`` (the lead-in that sets the quote's subject), but only
+    into a claim that keeps every ticker or acronym the quote itself has: one that drops them has swapped
+    the quote's subject for a neighbour's.
+    """
     quoted = _plain(quote).casefold()
-    missing = [name for name in _names(text) if not _mentions(_stem(name), quoted)]
-    covered = shared | {word for alias in shared for word in re.findall(r"\w+", alias)}
-    return all(name in covered for name in missing)
+    covered = _alias_words(shared)
+    missing = [name for name in _names(text)
+               if not _mentions(_stem(name), quoted) and name not in covered]
+    if not missing or not frame:
+        return not missing
+    claimed, kept = _plain(text).casefold(), _alias_words(_shared_aliases(quote, text))
+    if any(not _mentions(name, claimed) and name not in kept
+           for name in map(str.casefold, _ACRONYM.findall(_plain(quote)))):
+        return False
+    framed, borrowed = _plain(frame).casefold(), _alias_words(_shared_aliases(text, frame))
+    return all(_mentions(_stem(name), framed) or name in borrowed for name in missing)
 
 
-def claim_grounding_violation(text: str, quote: str, source_body: str) -> str | None:
+def quote_frame(source: dict, start: int) -> str:
+    """The lead-in that sets the subject and period of the quote starting at ``start``: the source's
+    title and the text just before the quote. Collected posts are one flattened line, so a heading
+    ("▶3Q26 실적:", "국내 증시 수익률(14시 00분):") sits there rather than on a line of its own."""
+    return f"{source.get('title') or ''}\n{source['body'][max(0, start - _FRAME_CHARS):start]}"
+
+
+def _without_frame_periods(text: str, frame: str) -> str:
+    """text without the period and clock marks its frame also carries ("3Q26", "14시").
+
+    The frame lends a claim *when*, never *how much*: any other number still has to be in the quote.
+    """
+    marks = {match.group().casefold() for match in _PERIOD.finditer(_plain(frame))}
+    return _PERIOD.sub(lambda match: match.group() if match.group().casefold() not in marks else " ", text)
+
+
+def claim_grounding_violation(text: str, quote: str, source_body: str, frame: str = "") -> str | None:
     """Deterministic correspondence between one claim and its exact source quote.
 
     Numbers, names, certainty, negation, direction and forecast wording are
     compared in any language; key-word reuse only when claim and quote share one.
+    ``frame`` (``quote_frame``) may lend the claim a name or a period mark the quote leaves to its lead-in.
     """
     if len(quote.strip()) < min(MIN_ANCHOR_QUOTE_CHARS, len(source_body.strip())):
         return "anchor_quote_too_short"
-    violation = grounding_violation(text, quote)
+    stated = _without_frame_periods(text, frame) if frame else text
+    violation = grounding_violation(stated, quote)
     if violation:
         return f"claim_{violation}_unsupported"
     shared = _shared_aliases(text, quote)
-    if not _names_supported(text, quote, shared):
+    if not _names_supported(text, quote, shared, frame):
         return "claim_name_unsupported"
     tokens, quote_tokens = _content_tokens(text), _content_tokens(quote)
     language = _same_language(tokens, quote_tokens)
@@ -489,7 +533,7 @@ def claim_grounding_violation(text: str, quote: str, source_body: str) -> str | 
     if (not directions <= quote_directions.union(*moves.values()) or _sign_contradicted(text, moves)
             or (language and _direction_contradicted(pairs, quote_pairs))):
         return "claim_direction_unsupported"
-    if _realized_beyond(text, quote):
+    if _realized_beyond(stated, quote):
         return "claim_modality_unsupported"
     return None
 
@@ -535,7 +579,8 @@ def _require_grounding(payload: dict, compiled: dict, source: dict) -> None:
     for claim in compiled["claims"]:
         if claim["anchor"] is None:
             raise ValueError("anchor_missing")
-        violation = claim_grounding_violation(claim["text"], claim["anchor"]["quote"], source["body"])
+        violation = claim_grounding_violation(claim["text"], claim["anchor"]["quote"], source["body"],
+                                              quote_frame(source, claim["anchor"]["start"]))
         if violation:
             raise ValueError(violation)
     evidence = "\n".join(str(source.get(key) or "") for key in ("body", "title", "published_at"))
@@ -630,7 +675,7 @@ def _claim_failure(claim: object, source: dict) -> str | None:
         return compilation_failure_code(error)
     if anchor is None:
         return "anchor_missing"
-    return claim_grounding_violation(text, anchor["quote"], source["body"])
+    return claim_grounding_violation(text, anchor["quote"], source["body"], quote_frame(source, anchor["start"]))
 
 
 def usable_parts(payload: dict, source: dict) -> tuple[dict, list[str]]:
