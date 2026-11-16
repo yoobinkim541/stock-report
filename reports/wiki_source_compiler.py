@@ -102,6 +102,10 @@ _DIRECTION_KO = {
     "up": re.compile(r"증가|상승|늘어|늘었|늘린|늘려|늘고|늘며|급등|급증|확대|성장|오르|올랐|오른|올라|상향|증대|인상"),
     "down": re.compile(r"감소|하락|줄어|줄었|줄인|줄여|줄고|줄며|급락|급감|축소|떨어|하향|위축|감축|인하"),
 }
+# Broker shorthand states a move by sign instead of a rise/fall word: "+6.5% YoY", "(-3.59%)", "AMD -8.8%".
+# A minus right after a letter, digit or "%" is a hyphen or a range ("COVID-19", "5-10%", "3.5%-4.0%").
+_SIGNED_MOVE = re.compile(r"(?:(?<![0-9.,])(\+)|(?<![\w.,%])[-\u2212])\s?([0-9]+(?:[.,][0-9]+)*)\s?(?:%|bp|pt)", re.IGNORECASE)
+_NUMBER = re.compile(r"[0-9]+(?:[.,][0-9]+)*")
 _HANGUL = re.compile(r"[\u1100-\u11ff\u3130-\u318f\uac00-\ud7a3]")
 _WORD = re.compile(r"[^\W\d_][^\W_]*")
 _SENTENCE_BREAK = re.compile(r"(?<=[.!?。])\s+|\n+")
@@ -239,12 +243,20 @@ def _same_language(tokens: list[str], evidence_tokens: list[str]) -> str | None:
     return language if shared and shared >= min(3, len(evidence_tokens)) else None
 
 
-def _overlap_too_small(tokens: list[str], language: str, evidence: str, divisor: int, minimum: int) -> bool:
-    """Fewer than 1/divisor of the distinct content stems occur in same-language evidence."""
-    stems = {_stem(token) for token in tokens if _script(token) == language}
+def _overlap_too_small(tokens: list[str], language: str, evidence: str, divisor: int, minimum: int,
+                       same_entity: frozenset[str] = frozenset()) -> bool:
+    """Fewer than 1/divisor of the distinct content stems occur in same-language evidence.
+
+    ``same_entity`` holds names the evidence writes differently (``_shared_aliases``); a word that starts
+    with one counts as occurring.
+    """
+    words = [token for token in tokens if _script(token) == language]
+    stems = {_stem(token) for token in words}
     if len(stems) < minimum:
         return False
-    return sum(_mentions(stem, evidence) for stem in stems) * divisor < len(stems)
+    found = {stem for stem in stems if _mentions(stem, evidence)}
+    found.update(_stem(token) for token in words if token.startswith(tuple(same_entity)))
+    return len(found) * divisor < len(stems)
 
 
 def _direction(token: str) -> str | None:
@@ -266,6 +278,49 @@ def _directions(tokens: list[str]) -> tuple[set[str], set[tuple[str, str]]]:
         if subject:
             pairs.add((subject, direction))
     return found, pairs
+
+
+def _signed_moves(text: str) -> dict[str, set[str]]:
+    """Number → directions its sign states (``+6.5%`` up, ``(-3.59%)`` down). Zero moves nowhere."""
+    moves: dict[str, set[str]] = {}
+    for match in _SIGNED_MOVE.finditer(_plain(text)):
+        for number in _canonical_numbers(match.group(2)):
+            if number != "0":
+                moves.setdefault(number, set()).add("up" if match.group(1) else "down")
+    return moves
+
+
+def _sign_contradicted(text: str, moves: dict[str, set[str]]) -> bool:
+    """The text moves a figure opposite to the sign the evidence gives that figure.
+
+    The figure is tied to the rise/fall word that governs it: in Korean the next one in the sentence
+    ("AMD는 8.8% 하락"), in English the previous one ("fell 8.8%"), else the next ("an 8.8% decline").
+    A figure the text itself signs must carry the evidence's sign.
+    """
+    if not moves:
+        return False
+    if any(number in moves and not directions & moves[number]
+           for number, directions in _signed_moves(text).items()):
+        return True
+    for sentence in _SENTENCE_BREAK.split(_plain(text).casefold()):
+        words = [(match.start(), match.end(), match.group(), direction) for match in _WORD.finditer(sentence)
+                 if (direction := _direction(match.group()))]
+        own = [match.span() for match in _SIGNED_MOVE.finditer(sentence)]  # compared sign to sign above
+        for match in _NUMBER.finditer(sentence) if words else ():
+            signed = set().union(*(moves.get(number, set()) for number in _canonical_numbers(match.group())))
+            if len(signed) != 1 or any(start <= match.start() < end for start, end in own):
+                continue
+            after = next((word for word in words if word[0] >= match.end()), None)
+            before = next((word for word in reversed(words) if word[1] <= match.start()), None)
+            if after and not after[2].isascii():
+                governing = after
+            elif before and before[2].isascii():
+                governing = before
+            else:
+                governing = after
+            if governing and governing[3] not in signed:
+                return True
+    return False
 
 
 def _direction_contradicted(pairs: set[tuple[str, str]], evidence_pairs: set[tuple[str, str]]) -> bool:
@@ -308,6 +363,15 @@ def financial_alias_groups() -> tuple[tuple[str, tuple[str, ...]], ...]:
         "semiconductor": ("semiconductor", "semiconductors", "반도체"),
         "interest-rate": ("interest rate", "interest rates", "기준금리", "금리"),
         "hormuz": ("hormuz", "호르무즈"),
+        # Indices a Korean note names in Hangul and a claim may name in Latin, or the reverse.
+        "kospi": ("kospi", "코스피"),
+        "kospi200": ("kospi200", "kospi 200", "코스피200", "코스피 200"),
+        "kosdaq": ("kosdaq", "코스닥"),
+        "nasdaq": ("nasdaq", "나스닥"),
+        "dow": ("dow", "dow jones", "다우", "다우존스"),
+        "sp500": ("s&p 500", "s&p500", "s&p", "에스앤피"),
+        "nikkei": ("nikkei", "닛케이", "니케이"),
+        "russell": ("russell", "러셀"),
     }
     for ticker, name in ticker_names.EN.items():
         aliases = (ticker, name, *ticker_names.KO.get(ticker, ()))
@@ -353,15 +417,17 @@ def _names(text: str) -> set[str]:
     return names
 
 
-def _names_supported(text: str, quote: str) -> bool:
+def _shared_aliases(text: str, quote: str) -> frozenset[str]:
+    """Names in text for an entity the quote also names, possibly under another alias (KOSPI/코스피, 삼성전자/삼전)."""
+    quote_groups = set(_alias_hits(quote))
+    return frozenset(alias for key, found in _alias_hits(text).items() if key in quote_groups for alias in found)
+
+
+def _names_supported(text: str, quote: str, shared: frozenset[str]) -> bool:
     """Every name in text occurs in quote, directly or as a known alias of the same entity."""
     quoted = _plain(quote).casefold()
     missing = [name for name in _names(text) if not _mentions(_stem(name), quoted)]
-    if not missing:
-        return True
-    quote_groups = set(_alias_hits(quote))
-    covered = {word for key, found in _alias_hits(text).items() if key in quote_groups
-               for alias in found for word in re.findall(r"\w+", alias)}
+    covered = shared | {word for alias in shared for word in re.findall(r"\w+", alias)}
     return all(name in covered for name in missing)
 
 
@@ -376,18 +442,22 @@ def claim_grounding_violation(text: str, quote: str, source_body: str) -> str | 
     violation = grounding_violation(text, quote)
     if violation:
         return f"claim_{violation}_unsupported"
-    if not _names_supported(text, quote):
+    shared = _shared_aliases(text, quote)
+    if not _names_supported(text, quote, shared):
         return "claim_name_unsupported"
     tokens, quote_tokens = _content_tokens(text), _content_tokens(quote)
     language = _same_language(tokens, quote_tokens)
     quoted = _plain(quote).casefold()
-    if not tokens or (language and _overlap_too_small(tokens, language, quoted, divisor=3, minimum=1)):
+    if not tokens or (language and _overlap_too_small(tokens, language, quoted, divisor=3, minimum=1,
+                                                      same_entity=shared)):
         return "claim_quote_unrelated"
     if _negated(text) != _negated(quote):
         return "claim_negation_unsupported"
     directions, pairs = _directions(tokens)
     quote_directions, quote_pairs = _directions(quote_tokens)
-    if not directions <= quote_directions or (language and _direction_contradicted(pairs, quote_pairs)):
+    moves = _signed_moves(quote)
+    if (not directions <= quote_directions.union(*moves.values()) or _sign_contradicted(text, moves)
+            or (language and _direction_contradicted(pairs, quote_pairs))):
         return "claim_direction_unsupported"
     if _hedged(quote) and not _hedged(text):
         return "claim_modality_unsupported"

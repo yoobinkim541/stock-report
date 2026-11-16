@@ -379,6 +379,37 @@ def test_reversed_or_invented_claims_are_rejected_in_any_language(quote, claim, 
     assert module().compilation_failure_code(ValueError(code)) == code
 
 
+# 증권사 글은 등락을 부호로, 종목을 줄임말로 적는다. 같은 내용을 풀어 쓴 claim 은 통과한다.
+@pytest.mark.parametrize("quote,claim", [
+    ("코스피 5,100.50 (-3.59%), 코스닥 665.65 (-4.86%)",
+     "KOSPI는 5,100.50으로 3.59% 하락했고 KOSDAQ은 665.65로 4.86% 하락했다."),
+    ("삼전 -4.5%, 하닉 -7.9%", "삼성전자는 4.5%, 하이닉스는 7.9% 하락했다."),
+    ("美 10월 PPI(+6.5% YoY)는 예상치 하회에도 4년 만에 최고였고",
+     "미국 10월 PPI는 전년 대비 6.5% 상승했고 예상치를 하회했지만 4년 만에 최고였다."),
+    ("한화에어로(+1.3%, 항공엔진 개발 수주)·삼성重(+0.5%, LNG 운반선 수주) 호재 영향 있었습니다.",
+     "한화에어로는 항공엔진 개발 수주 호재로 1.3% 상승했고 LNG 운반선 수주 호재가 있던 종목은 0.5% 상승했다."),
+    ("AMD -8.8%, NVDA +2.0% on Friday.", "AMD fell 8.8% and NVDA rose 2.0% on Friday."),
+])
+def test_signed_moves_and_known_short_names_support_a_spelled_out_claim(quote, claim):
+    assert compile_claim(quote, claim)["claims"][0]["text"] == claim
+
+
+@pytest.mark.parametrize("quote,claim,code", [
+    # 부호가 가리키는 방향과 반대로 쓴 claim
+    ("삼전 -4.5%, 하닉 +7.9%", "삼성전자는 4.5% 상승했고 하이닉스는 7.9% 하락했다.", "claim_direction_unsupported"),
+    ("AMD -8.8%, NVDA +2.0% on Friday.", "AMD rose 8.8% on Friday.", "claim_direction_unsupported"),
+    ("AMD -8.8%, AVGO -4.8% on Friday.", "AMD +8.8%, AVGO -4.8% on Friday.", "claim_direction_unsupported"),
+    # 범위·하이픈은 부호가 아니다
+    ("The band was 5-10% last year.", "The band fell 10% last year.", "claim_direction_unsupported"),
+    # 줄임말이 가리키는 종목이 아닌 다른 종목
+    ("삼전 -4.5%, 하닉 -7.9%", "현대차는 4.5% 하락했다.", "claim_quote_unrelated"),
+    ("코스피 5,100.50 (-3.59%), 코스닥 665.65 (-4.86%)", "NASDAQ은 3.59% 하락했다.", "claim_name_unsupported"),
+])
+def test_signs_and_short_names_do_not_admit_a_reversed_or_different_claim(quote, claim, code):
+    with pytest.raises(ValueError, match=code):
+        compile_claim(quote, claim)
+
+
 @pytest.mark.parametrize("body", [
     "The regulator approved the acquisition and all factories closed [S1].",
     "Capacity rose [S1]. The regulator approved the acquisition and all factories closed.",
