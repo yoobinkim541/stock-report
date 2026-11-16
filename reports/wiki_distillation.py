@@ -40,6 +40,7 @@ load_dotenv()
 from agent_console import shared_memory, wiki
 from lib.structured_output import parse_object as _parse_structured_object
 import notify
+from reports.source_publishers import publisher
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -432,7 +433,7 @@ def _attach_article_context(candidates: list[dict], *, cache_dir=None, now=None)
                 incomplete_articles[id(page)].append((article, article["url"]))
             else:
                 _append_source_article(page, article)
-                if _full_body_source_class(article) == "community" and _article_is_eligible(article):
+                if _full_body_source_class(article) in PUBLIC_MESSAGE_CLASSES and _article_is_eligible(article):
                     verified_archives.append(article)
         # Repaired public-message archives replace only the identical text/URL,
         # not the legacy DOM hash or its inferred evidence identity.
@@ -484,8 +485,12 @@ def _build_distillation_prompt(page: dict) -> str:
         prompt += json.dumps({f"S{i}": article for i, article in enumerate(articles, 1)}, ensure_ascii=False)
         prompt += "\n</source_articles>"
         prompt += "\nUse bare [Sn] for current sources. Preserve known historical [Sn](URL) links exactly; historical links alone do not cite the current input."
-        if any(_full_body_source_class(article) == "community" for article in articles):
+        classes = {_full_body_source_class(article) for article in articles}
+        if "community" in classes:
             prompt += "\nTelegram/Arca 커뮤니티 신호는 공식 보도나 검증된 사실로 표현하지 말고, 미확인 주장으로 귀속해 신중하게 서술한다."
+        if "sell_side" in classes:
+            prompt += ("\n증권사 리서치 글은 보도된 사실(수치·일정·공시)과 그 증권사의 견해(전망·투자의견·목표가·추천)를 "
+                       "나눠 쓴다. 견해는 '○○증권은 … 것으로 전망한다'처럼 증권사에 귀속하고 확정된 사실처럼 쓰지 않는다.")
     else:
         prompt += "\n원문 기사 본문이 현재 아카이브에 없을 수 있다. 이 경우 source_digest의 본문·요약·source_refs·evidence_ids만 근거로 사용하고, 확인할 수 없는 세부 사실이나 인과관계는 만들지 않는다. 근거가 충분하지 않으면 skip 한다."
     if previous:
@@ -521,6 +526,9 @@ def _parse_distillation_plan(text: str | None) -> dict | None:
     return plan
 
 
+PUBLIC_MESSAGE_CLASSES = frozenset({"community", "sell_side"})
+
+
 def _full_body_source_class(article: dict) -> str:
     """Return a narrowly recognized non-editorial full-body source class."""
     if article.get("text_complete") is not True:
@@ -535,13 +543,15 @@ def _full_body_source_class(article: dict) -> str:
     if parsed.scheme != "https" or parsed.query or parsed.fragment or parsed.username or parsed.password:
         return ""
 
-    if content_kind in {"community_signal", "analysis", "news", "earnings", "info", "breaking", "premarket"}:
+    if content_kind in {"community_signal", "analysis", "news", "earnings", "info", "breaking", "premarket",
+                        "broker_comment"}:
         telegram = re.fullmatch(r"telegram:([a-z0-9_]+)", provenance)
         message = re.fullmatch(r"/(?:s/)?([a-z0-9_]+)/\d+/?", parsed.path, re.I)
         if (telegram and parsed.netloc.lower() == "t.me" and message
                 and telegram.group(1).lower() == message.group(1).lower()
                 and scope in {"article_fulltext", "public_message", "extracted_text"}):
-            return "community"
+            # 증권사가 운영하는 채널의 글은 커뮤니티 전달 글과 다른 등급으로 다룬다 (source_publishers).
+            return "sell_side" if publisher(provenance)["role"] == "sell_side" else "community"
         if (provenance in {"arca", "arca:stock"} and parsed.netloc.lower() == "arca.live"
                 and re.fullmatch(r"/b/stock/\d+/?", parsed.path)
                 and scope in {"article_fulltext", "authorized_article", "rendered_article", "extracted_text"}):
@@ -707,9 +717,11 @@ def _distill_one_with_status(page: dict, llm_fn) -> tuple[dict | None, str, str]
     )
     if not payload:
         return None, "failed", "empty distillation payload"
-    if any(i in citations and _full_body_source_class(article) == "community"
-           for i, article in enumerate(articles, 1)):
-        payload["confidence"] = min(float(payload.get("confidence") or 0.0), 0.5)
+    cited_classes = {_full_body_source_class(article) for i, article in enumerate(articles, 1) if i in citations}
+    if cited_classes & PUBLIC_MESSAGE_CLASSES:
+        # 공개 채널 글을 인용한 페이지는 초안으로 남긴다. 커뮤니티 전달 글이 섞이면 신뢰도 상한이 더 낮다.
+        cap = 0.5 if "community" in cited_classes else 0.6
+        payload["confidence"] = min(float(payload.get("confidence") or 0.0), cap)
         payload["status"] = "draft"
     # Generated evidence is not a user/assistant conversation.
     payload["messages"] = []

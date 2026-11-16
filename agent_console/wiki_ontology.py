@@ -6,7 +6,11 @@
 - 개체(entity): ``config/wiki-ontology.json`` 시드 + 종목 사전(``ticker_names``) + LLM 이 제안해
   claim 원문에 실제로 나오는 것이 확인된 이름. 타입은 ``ENTITY_TYPES`` 로 닫혀 있다.
 - 관계(relation): ``RELATION_TYPES`` 어휘만. 두 개체가 인용한 claim 원문에 함께 나와야 받아들인다
-  (모델이 지어낸 연결 차단). 출처(source revision) 수로 asserted/corroborated, 부호가 엇갈리면 contested.
+  (모델이 지어낸 연결 차단).
+- 중립성: 추출한 모델과 다른 검토자가 반대편에서 각 관계를 따진다 (``build_review_request``). 판정은 닫힌
+  어휘로만 받고 반영 규칙은 코드에 있다 — 기각은 claim 이 그 관계를 말하지 않을 때만, 전망·평가는 지우지 않고
+  ``modality=view`` 로 낮추며, 반대 근거 claim 이 붙으면 contested. 같은 발행자의 글 여러 건은 한 목소리로 세고
+  (``reports.source_publishers``), 서로 다른 발행자 2곳 이상이 말해야 corroborated 다.
 - 산출물: ``<artifacts>/ontology/{extractions.json,ontology.json,ontology.md}``.
 
 이 모듈은 LLM 을 부르지 않는다. 호출·예산·스케줄은 ``reports.wiki_ontology_insights`` 가 맡는다.
@@ -24,7 +28,10 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterable
 
-SCHEMA_VERSION = 1
+from reports.source_publishers import ROLES as PERSPECTIVES
+from reports.source_publishers import publisher as _publisher
+
+SCHEMA_VERSION = 2
 INSIGHT_KIND = "insight"
 ENTITY_TAG_PREFIX = "entity:"
 
@@ -54,12 +61,35 @@ RELATION_TYPES: dict[str, tuple[str, bool]] = {
     "exposed_to": ("노출", False),          # 기업·산업·자산 → 테마·이벤트·지표
     "conflicts_with": ("갈등·대립", True),
 }
-RELATION_STATES = {"asserted": "단일 출처", "corroborated": "복수 출처", "contested": "엇갈림"}
+RELATION_STATES = {"asserted": "단일 발행자", "corroborated": "복수 발행자 일치", "contested": "엇갈림"}
+RELATION_MODALITIES = {"reported": "보도·서술", "view": "견해·전망"}
 _OPPOSITE = {"positive_for": "negative_for", "negative_for": "positive_for"}
+# 검토자가 고를 수 있는 판정과 사유. reject 는 _REJECT_REASONS 중 하나가 있어야 반영된다.
+REVIEW_VERDICTS = ("keep", "view", "reject")
+REVIEW_REASONS: dict[str, str] = {
+    "not_stated": "claim 이 그 관계를 말하지 않음",
+    "reversed": "방향이 반대",
+    "listed_only": "함께 나열됐을 뿐",
+    "trivial": "시장·정책·산업 의미 없음",
+    "forecast": "전망·목표·예상",
+    "opinion": "평가·추천·홍보성 서술",
+    "conditional": "조건부",
+    "contradicted": "반대 근거 claim 있음",
+}
+_REJECT_REASONS = frozenset({"not_stated", "reversed", "listed_only", "trivial"})
+_VIEW_REASONS = frozenset({"forecast", "opinion", "conditional"})
+UNKNOWN_PUBLISHER = "unknown"
+UNKNOWN_MODEL = "unknown"
+# 인용 claim 이 모두 이런 어투면 검토자 판정과 무관하게 견해로 적는다. '예상치·전망치' 같은 컨센서스 명사는 뺀다.
+_VIEW_WORDING = re.compile(
+    r"전망(?!치)|예상(?!치)|예측|추정(?!치)|목표|가능성|우려|것으로\s?보|수\s?있|관측|권고|추천|유망|선호"
+    r"|\b(?:forecast\w*|expect(?:s|ed|ing)?|estimat(?:e|es|ed)|targets?|could|might|likely|outlook|guidance"
+    r"|recommend\w*|prefer\w*)\b", re.IGNORECASE)
 
 MAX_ALIASES = 12
 MAX_EVIDENCE_PER_RELATION = 24
 MAX_CO_MENTIONS = 600
+MAX_REJECTED_LISTED = 300
 _CONFIG_PATH = Path(__file__).resolve().parents[1] / "config" / "wiki-ontology.json"
 _HANGUL = re.compile(r"[가-힣]")
 # 두 글자 한글 별칭(이란·인도·금리…) 뒤에 붙어도 같은 개체로 보는 조사·접미.
@@ -231,8 +261,8 @@ def _iso_day(*values: object) -> str:
 
 # ── LLM 추출 검증 ───────────────────────────────────────────────────────
 
-def build_extraction_request(pages: list[dict], lexicon: Lexicon) -> tuple[str, dict[str, dict]]:
-    """한 번의 LLM 호출에 넣을 프롬프트와 ``c1..cN`` → claim 매핑."""
+def _claim_blocks(pages: list[dict], lexicon: Lexicon) -> tuple[str, dict[str, dict], dict[str, dict]]:
+    """프롬프트의 claim 블록, ``c1..cN`` → claim 매핑, claim 에 나온 기존 개체."""
     keymap: dict[str, dict] = {}
     known: dict[str, dict] = {}
     blocks = []
@@ -245,9 +275,23 @@ def build_extraction_request(pages: list[dict], lexicon: Lexicon) -> tuple[str, 
                 known[entity_id] = lexicon.entities[entity_id]
             lines.append(f"- [{key}] {' '.join(str(claim['text']).split())[:600]}")
         blocks.append("\n".join(lines))
-    known_rows = "\n".join(f"- {e['id']} | {ENTITY_TYPES[e['type']]} | {e['name']}" for e in known.values()) or "- (없음)"
-    relation_rows = "\n".join(f"- {name}: {label}{' (대칭)' if symmetric else ' (from → to)'}"
-                              for name, (label, symmetric) in RELATION_TYPES.items())
+    return "\n".join(blocks), keymap, known
+
+
+def _entity_rows(entities: Iterable[dict]) -> str:
+    return "\n".join(f"- {e['id']} | {ENTITY_TYPES[e['type']]} | {e['name']}" for e in entities) or "- (없음)"
+
+
+def _relation_type_rows() -> str:
+    return "\n".join(f"- {name}: {label}{' (대칭)' if symmetric else ' (from → to)'}"
+                     for name, (label, symmetric) in RELATION_TYPES.items())
+
+
+def build_extraction_request(pages: list[dict], lexicon: Lexicon) -> tuple[str, dict[str, dict]]:
+    """한 번의 LLM 호출에 넣을 프롬프트와 ``c1..cN`` → claim 매핑."""
+    claims, keymap, known = _claim_blocks(pages, lexicon)
+    known_rows = _entity_rows(known.values())
+    relation_rows = _relation_type_rows()
     prompt = f"""You extract a typed knowledge graph from investment-wiki claims. Return ONE JSON object only.
 
 <entity_types>
@@ -260,7 +304,7 @@ def build_extraction_request(pages: list[dict], lexicon: Lexicon) -> tuple[str, 
 {known_rows}
 </known_entities>
 <claims>
-{chr(10).join(blocks)}
+{claims}
 </claims>
 
 Rules:
@@ -275,12 +319,132 @@ Rules:
   being in its country, who attended an event). Being listed together is not a relation: an earnings
   calendar, a top-N ranking or a watchlist relates nothing. An empty "relations" list is valid.
 - "note" is one short Korean phrase (max 60 chars) quoting how the claims state the relation.
+- "modality": "view" when the claims present the relation as someone's forecast, target, expectation, evaluation
+  or recommendation; "reported" when they report it as something that happened or exists.
 
 JSON schema:
 {{"entities": [{{"name": "...", "type": "<entity type>", "aliases": ["..."]}}],
   "relations": [{{"type": "<relation type>", "from": "<known id or new entity name>", "to": "<...>",
-                 "claims": ["c1"], "note": "..."}}]}}"""
+                 "claims": ["c1"], "note": "...", "modality": "reported|view"}}]}}"""
     return prompt, keymap
+
+
+def build_review_request(pages: list[dict], relations: list[dict], lexicon: Lexicon, *, additions: bool = True
+                         ) -> tuple[str, dict[str, dict], dict[str, dict]]:
+    """반대편 검토자에게 보낼 프롬프트, claim 매핑, ``r1..rN`` → 검토 대상 관계.
+
+    검토자는 추출 모델의 설명(note)을 보지 않는다 — 제안된 관계와 claim 원문만으로 판단한다.
+    ``additions=False`` 는 검토자가 더한 관계를 되검토하는 단계로, 판정만 받고 새 관계는 받지 않는다.
+    """
+    claims, keymap, known = _claim_blocks(pages, lexicon)
+    key_of = {(row["page_id"], row["claim_id"]): key for key, row in keymap.items()}
+    relmap: dict[str, dict] = {}
+    rows = []
+    for relation in relations:
+        keys = [key_of[pair] for item in relation.get("evidence") or []
+                if (pair := (item.get("page_id"), item.get("claim_id"))) in key_of]
+        if not keys or relation.get("from") not in lexicon.entities or relation.get("to") not in lexicon.entities:
+            continue
+        relation_key = f"r{len(relmap) + 1}"
+        relmap[relation_key] = relation
+        for side in ("from", "to"):
+            known[relation[side]] = lexicon.entities[relation[side]]
+        rows.append(f"- {relation_key}: {relation['type']} | {relation['from']} → {relation['to']} | cites {', '.join(keys)}")
+    reason_rows = "\n".join(f"- {name}: {label}" for name, label in REVIEW_REASONS.items())
+    missed_rule = """- "missed": relations the claims state that the proposer omitted — first of all the ones that run against the
+  proposed relations (the losing side of a positive_for, a stated risk, a competing party). Same grounding as the
+  proposer: both entities named in the cited claims, 1-4 claim keys, entity ids from <entities> or exact names
+  from the claims. An empty list is valid.""" if additions else """- Additions are closed at this stage: return "entities": [] and "missed": []."""
+    prompt = f"""You are the opposing reviewer of a knowledge graph built from investment-wiki claims. Another model
+proposed the relations below. Argue the other side: look for every ground on which a proposed relation should NOT
+enter the graph as fact, and for what the proposer left out. Return ONE JSON object only.
+
+<relation_types>
+{_relation_type_rows()}
+</relation_types>
+<entities>
+{_entity_rows(known.values())}
+</entities>
+<claims>
+{claims}
+</claims>
+<proposed_relations>
+{chr(10).join(rows)}
+</proposed_relations>
+<reason_codes>
+{reason_rows}
+</reason_codes>
+
+Rules:
+- Judge from the claim text only. No background knowledge, and no benefit of the doubt for the proposer.
+- "reject": the cited claims do not state the relation (not_stated), state the opposite direction (reversed), only
+  list the two entities together (listed_only), or the relation has no market, policy or industry meaning (trivial).
+- "view": the claims do state it, but as a forecast, target or expectation (forecast), as an evaluation,
+  recommendation or one-sided promotional framing (opinion), or only under a condition (conditional). A broker's or
+  commentator's outlook is a view even when it is worded confidently.
+- "keep": the claims report it as something that happened or exists and you found no ground above.
+- When ANOTHER claim in <claims> points the opposite way or disputes the relation, add reason "contradicted" and put
+  those claim keys in "counter". Never list the relation's own cited claims there.
+{missed_rule}
+- Give exactly one review per proposed relation.
+
+JSON schema:
+{{"reviews": [{{"id": "r1", "verdict": "keep|view|reject", "reasons": ["<reason code>"], "counter": ["c2"]}}],
+  "entities": [{{"name": "...", "type": "<entity type>", "aliases": ["..."]}}],
+  "missed": [{{"type": "<relation type>", "from": "<id or name>", "to": "<...>", "claims": ["c1"], "note": "...",
+              "modality": "reported|view"}}]}}"""
+    return prompt, keymap, relmap
+
+
+def validate_review(payload: object, relmap: dict[str, dict], keymap: dict[str, dict], lexicon: Lexicon) -> dict:
+    """검토 응답을 닫힌 규칙으로 걸러 ``{"reviews": {r키: 판정}, "missed": 추출 결과, "rejected": 사유별 수}``.
+
+    - reject 는 claim 이 관계를 말하지 않는다는 사유가 있을 때만 받는다. 전망·평가라는 이유만이면 view 로 낮춘다.
+    - contradicted 는 그 관계가 인용하지 않은 다른 claim 을 반대 근거로 댈 때만 받는다.
+    - 검토자가 빠졌다고 제안한 관계는 추출과 같은 근거 검증(``validate_extraction``)을 통과해야 한다.
+    """
+    rejected: Counter[str] = Counter()
+    if not isinstance(payload, dict) or not isinstance(payload.get("reviews"), list):
+        return {"reviews": {}, "missed": {"entities": [], "relations": [], "rejected": {}},
+                "rejected": {"payload_invalid": 1}}
+    key_of = {(row["page_id"], row["claim_id"]): key for key, row in keymap.items()}
+    reviews: dict[str, dict] = {}
+    for item in payload["reviews"]:
+        relation = relmap.get(item.get("id")) if isinstance(item, dict) else None
+        if relation is None or item.get("verdict") not in REVIEW_VERDICTS or item["id"] in reviews:
+            rejected["review_invalid"] += 1
+            continue
+        verdict = item["verdict"]
+        reasons = list(dict.fromkeys(reason for reason in item.get("reasons") or []
+                                     if isinstance(reason, str) and reason in REVIEW_REASONS))
+        own = {key_of.get((row.get("page_id"), row.get("claim_id"))) for row in relation.get("evidence") or []}
+        counter = list(dict.fromkeys(key for key in item.get("counter") or []
+                                     if isinstance(key, str) and key in keymap and key not in own))[:4]
+        if "contradicted" in reasons and not counter:
+            reasons.remove("contradicted")
+            rejected["counter_unsupported"] += 1
+        if "contradicted" not in reasons:
+            counter = []
+        if verdict == "reject" and not _REJECT_REASONS.intersection(reasons):
+            if not _VIEW_REASONS.intersection(reasons):
+                rejected["reject_unfounded"] += 1
+                continue
+            verdict = "view"
+            rejected["reject_downgraded"] += 1
+        if verdict == "keep" and _VIEW_REASONS.intersection(reasons):
+            verdict = "view"
+        reviews[item["id"]] = {
+            "verdict": verdict, "reasons": reasons[:4],
+            "counter": [{"page_id": keymap[key]["page_id"], "claim_id": keymap[key]["claim_id"]} for key in counter],
+        }
+    missed = validate_extraction({"entities": payload.get("entities"), "relations": payload.get("missed") or []},
+                                 keymap, lexicon)
+    proposed = {(relation["type"], relation["from"], relation["to"]) for relation in relmap.values()}
+    missed["relations"] = [relation for relation in missed["relations"]
+                           if (relation["type"], relation["from"], relation["to"]) not in proposed]
+    used = {relation[side] for relation in missed["relations"] for side in ("from", "to")}
+    missed["entities"] = [entity for entity in missed["entities"] if entity["id"] in used]
+    return {"reviews": reviews, "missed": missed, "rejected": dict(rejected)}
 
 
 def validate_extraction(payload: object, keymap: dict[str, dict], lexicon: Lexicon) -> dict:
@@ -338,6 +502,7 @@ def validate_extraction(payload: object, keymap: dict[str, dict], lexicon: Lexic
             "type": item["type"], "from": source, "to": target,
             "evidence": [{"page_id": keymap[key]["page_id"], "claim_id": keymap[key]["claim_id"]} for key in keys],
             "note": " ".join(str(item.get("note") or "").split())[:80],
+            **({"modality": item["modality"]} if item.get("modality") in RELATION_MODALITIES else {}),
         })
     used = {relation[side] for relation in relations for side in ("from", "to")}
     return {"entities": [entity for entity_id, entity in new_entities.items() if entity_id in used],
@@ -359,33 +524,74 @@ def learned_entities(extractions: dict) -> list[dict]:
     return list(rows.values())
 
 
+def needs_review(record: dict, page: dict) -> bool:
+    """추출은 끝났는데 반대 검토가 아직 없는 페이지 (검토할 추출 모델 제안이 있는 경우만)."""
+    return (record.get("input_hash") == page_input_hash(page)
+            and any(relation.get("origin") != "reviewer" for relation in record.get("relations") or [])
+            and (record.get("review") or {}).get("input_hash") != record.get("input_hash"))
+
+
+def needs_cross_review(record: dict, page: dict) -> bool:
+    """반대 검토는 끝났는데, 검토자가 더한 관계를 다른 쪽이 아직 되검토하지 않은 페이지."""
+    review = record.get("review") or {}
+    return (record.get("input_hash") == page_input_hash(page) and review.get("input_hash") == record.get("input_hash")
+            and "cross" not in review
+            and any(relation.get("origin") == "reviewer" for relation in record.get("relations") or []))
+
+
 def compile_ontology(pages: Iterable[dict], extractions: dict | None = None, *, generated_at: str,
-                     lexicon: Lexicon | None = None) -> dict:
-    """활성 페이지의 claim 과 추출 캐시로 전체 그래프를 만든다. 순수 함수."""
+                     lexicon: Lexicon | None = None, source_providers: dict[str, str] | None = None) -> dict:
+    """활성 페이지의 claim 과 추출 캐시로 전체 그래프를 만든다. 순수 함수.
+
+    ``source_providers`` 는 source revision id → 수집 출처 이름(``telegram:kwusa``). 발행자를 모르는 revision 은
+    모두 ``unknown`` 한 곳으로 묶는다 — 누가 말했는지 모르는 글끼리는 서로 독립이라고 세지 않는다.
+    """
     extractions = extractions or {"pages": {}}
     lexicon = lexicon or seed_lexicon(learned_entities(extractions))
+    source_providers = source_providers or {}
     sources = knowledge_pages(pages)
     claim_index: dict[tuple[str, str], dict] = {}
-    stats: dict[str, dict[str, Any]] = defaultdict(lambda: {"claims": [], "pages": set(), "revisions": set(), "days": []})
+    stats: dict[str, dict[str, Any]] = defaultdict(
+        lambda: {"claims": [], "pages": set(), "revisions": set(), "publishers": set(), "days": []})
     co_mentions: Counter[tuple[str, str]] = Counter()
+    publishers: dict[str, dict] = {}
+    review_stats: Counter[str] = Counter()
+    # 검토까지 끝난 페이지를 어느 제공자가 추출·검토·되검토했는지. 한 모델이 혼자 다 했으면 여기서 드러난다.
+    models: dict[str, Counter[str]] = {"extractor": Counter(), "reviewer": Counter(), "cross": Counter()}
     extracted_pages = 0
     for page in sources:
         page_id = str(page.get("id"))
         seen_day = _iso_day(page.get("updated_at"), page.get("created_at"))
         record = (extractions.get("pages") or {}).get(page_id) or {}
         extracted_pages += record.get("input_hash") == page_input_hash(page)
+        if record.get("input_hash") == page_input_hash(page) and (record.get("review") or {}).get("input_hash") == record["input_hash"]:
+            review_stats["pages_reviewed"] += 1
+            models["extractor"][record.get("extractor") or UNKNOWN_MODEL] += 1
+            models["reviewer"][record["review"].get("reviewer") or UNKNOWN_MODEL] += 1
+            if "cross" in record["review"]:
+                models["cross"][record["review"]["cross"].get("reviewer") or UNKNOWN_MODEL] += 1
+        elif needs_review(record, page):
+            review_stats["pages_pending"] += 1
+        if needs_cross_review(record, page):
+            review_stats["pages_cross_pending"] += 1
         for claim in page_claims(page):
             claim_id = str(claim["claim_id"])
             revision = str(claim.get("source_revision_id") or page_id)
             day = _iso_day(claim.get("as_of")) or seen_day
             mentions = lexicon.match(claim["text"])
+            provider = source_providers.get(revision)
+            who = _publisher(provider) if provider else {"id": UNKNOWN_PUBLISHER, "name": "발행자 미상", "role": "other"}
+            publishers.setdefault(who["id"], {**who, "claims": 0})["claims"] += 1
             claim_index[(page_id, claim_id)] = {"revision": revision, "day": day, "mentions": mentions,
-                                                "competing": bool(claim.get("competing_claim_ids"))}
+                                                "competing": bool(claim.get("competing_claim_ids")),
+                                                "publisher": who["id"], "role": who["role"],
+                                                "view": _VIEW_WORDING.search(str(claim["text"])) is not None}
             for entity_id in mentions:
                 row = stats[entity_id]
                 row["claims"].append([page_id, claim_id])
                 row["pages"].add(page_id)
                 row["revisions"].add(revision)
+                row["publishers"].add(who["id"])
                 if day:
                     row["days"].append(day)
             for index, left in enumerate(mentions):
@@ -393,6 +599,7 @@ def compile_ontology(pages: Iterable[dict], extractions: dict | None = None, *, 
                     co_mentions[tuple(sorted((left, right)))] += 1
 
     merged: dict[tuple[str, str, str], dict] = {}
+    dropped: list[dict] = []
     for page_id, record in (extractions.get("pages") or {}).items():
         for relation in record.get("relations") or []:
             relation_type, source, target = relation.get("type"), relation.get("from"), relation.get("to")
@@ -402,24 +609,60 @@ def compile_ontology(pages: Iterable[dict], extractions: dict | None = None, *, 
                         if (item.get("page_id"), item.get("claim_id")) in claim_index]
             if not evidence:
                 continue  # 근거 claim 이 사라진 관계는 버린다
-            row = merged.setdefault((relation_type, source, target), {"evidence": [], "notes": []})
+            review = relation.get("review") if isinstance(relation.get("review"), dict) else {}
+            # 검토자가 더한 관계도 다른 쪽의 되검토를 받는다. 그 전까지는 "added"(되검토 대기)로 센다.
+            added = relation.get("origin") == "reviewer"
+            verdict = review.get("verdict") or ("added" if added else "unreviewed")
+            if added:
+                review_stats["added"] += 1
+                review_stats["added_rejected"] += verdict == "reject"
+                review_stats["added_unchecked"] += verdict == "added"
+            else:
+                review_stats[verdict] += 1
+            if verdict == "reject":
+                # 반대편이 claim 에 없는 관계라고 판정 — 그래프에는 넣지 않고, 사람이 되짚어 볼 수 있게 목록으로 남긴다.
+                dropped.append({"type": relation_type, "from": source, "to": target,
+                                "reasons": list(review.get("reasons") or []), "note": str(relation.get("note") or ""),
+                                "evidence": [[item["page_id"], item["claim_id"]] for item in evidence],
+                                **({"origin": "reviewer"} if added else {})})
+                continue
+            row = merged.setdefault((relation_type, source, target),
+                                    {"evidence": [], "notes": [], "counter": [], "reported": 0, "verdicts": Counter(),
+                                     "reasons": []})
             for item in evidence:
                 pair = [item["page_id"], item["claim_id"]]
                 if pair not in row["evidence"]:
                     row["evidence"].append(pair)
             if relation.get("note") and relation["note"] not in row["notes"]:
                 row["notes"].append(relation["note"])
+            # 한 번의 진술이 견해인지: 추출 모델·검토자 중 한쪽이라도 견해라 했거나, 인용 claim 이 모두 전망·평가 어투.
+            is_view = (relation.get("modality") == "view" or verdict == "view"
+                       or all(claim_index[(item["page_id"], item["claim_id"])]["view"] for item in evidence))
+            row["reported"] += not is_view
+            row["verdicts"][verdict] += 1
+            row["reasons"] += [reason for reason in review.get("reasons") or [] if reason not in row["reasons"]]
+            for item in review.get("counter") or []:
+                pair = [item.get("page_id"), item.get("claim_id")]
+                if tuple(pair) in claim_index and pair not in row["counter"] and pair not in row["evidence"]:
+                    row["counter"].append(pair)
 
     relations = []
     for (relation_type, source, target), row in merged.items():
         facts = [claim_index[(page_id, claim_id)] for page_id, claim_id in row["evidence"]]
         revisions = {fact["revision"] for fact in facts}
+        voices = sorted({fact["publisher"] for fact in facts})
         opposite = _OPPOSITE.get(relation_type)
-        contested = any(fact["competing"] for fact in facts) or bool(opposite and (opposite, source, target) in merged)
+        contested = (any(fact["competing"] for fact in facts) or bool(row["counter"])
+                     or bool(opposite and (opposite, source, target) in merged))
         relations.append({
             "id": relation_id(relation_type, source, target), "type": relation_type, "from": source, "to": target,
             "evidence": row["evidence"][:MAX_EVIDENCE_PER_RELATION], "source_count": len(revisions),
-            "state": "contested" if contested else "corroborated" if len(revisions) >= 2 else "asserted",
+            "publisher_count": len(voices), "publishers": voices,
+            "perspectives": sorted({fact["role"] for fact in facts}),
+            "state": "contested" if contested else "corroborated" if len(voices) >= 2 else "asserted",
+            "modality": "reported" if row["reported"] else "view",
+            "review": {**dict(row["verdicts"]), **({"reasons": row["reasons"][:4]} if row["reasons"] else {})},
+            **({"counter": row["counter"][:8]} if row["counter"] else {}),
             "last_seen": max((fact["day"] for fact in facts), default=""), "notes": row["notes"][:3],
         })
     relations.sort(key=lambda item: (-item["source_count"], item["type"], item["from"], item["to"]))
@@ -436,7 +679,7 @@ def compile_ontology(pages: Iterable[dict], extractions: dict | None = None, *, 
             "aliases": [alias for alias in entity.get("aliases") or [] if alias != normalize(entity["name"])],
             **({"ticker": entity["ticker"]} if entity.get("ticker") else {}),
             "claim_count": len(row["claims"]), "page_count": len(row["pages"]), "source_count": len(row["revisions"]),
-            "relation_count": degree[entity_id],
+            "publisher_count": len(row["publishers"]), "relation_count": degree[entity_id],
             "first_seen": min(row["days"], default=""), "last_seen": max(row["days"], default=""),
             "claims": row["claims"],
         }
@@ -449,7 +692,13 @@ def compile_ontology(pages: Iterable[dict], extractions: dict | None = None, *, 
             "entity_types": dict(Counter(entity["type"] for entity in entities.values())),
             "relation_types": dict(Counter(relation["type"] for relation in relations)),
             "relation_states": dict(Counter(relation["state"] for relation in relations)),
+            "relation_modalities": dict(Counter(relation["modality"] for relation in relations)),
+            "review": {key: count for key, count in review_stats.items() if count},
+            "models": {role: dict(counts) for role, counts in models.items() if counts},
+            "perspectives": dict(Counter(fact["role"] for fact in claim_index.values())),
         },
+        "publishers": dict(sorted(publishers.items(), key=lambda item: -item[1]["claims"])),
+        "rejected": dropped[:MAX_REJECTED_LISTED],
         "entities": entities, "relations": relations, "co_mentions": pairs,
     }
 
@@ -538,6 +787,17 @@ def relation_phrase(ontology: dict, relation: dict) -> str:
     return f"{left} {'↔' if symmetric else '→'} {right} [{label}]"
 
 
+def relation_label(relation: dict) -> str:
+    """관계 한 줄 요약: 상태 · (견해) · 발행자 수 · 출처 수. 발행자 정보가 없는 옛 산출물도 읽는다."""
+    parts = [RELATION_STATES.get(relation.get("state"), str(relation.get("state")))]
+    if relation.get("modality") == "view":
+        parts.append(RELATION_MODALITIES["view"])
+    if relation.get("publisher_count"):
+        parts.append(f"발행자 {relation['publisher_count']}곳")
+    parts.append(f"출처 {relation.get('source_count', 0)}개")
+    return " · ".join(parts)
+
+
 def find_entities(text: object, *, limit: int = 3, root: Path | None = None) -> list[dict]:
     """질문·문장에 나온 개체를 온톨로지에서 찾는다 (근거가 많은 순)."""
     loaded = _load(root)
@@ -573,13 +833,44 @@ def context_section(query: object, *, insights: Iterable[dict] = (), limit: int 
         lines.append(f"- {entity['name']} ({ENTITY_TYPES.get(entity['type'], entity['type'])} · {entity['id']}): "
                      f"claim {entity.get('claim_count', 0)}건 · 출처 {entity.get('source_count', 0)}개")
         for relation in entity_relations(ontology, entity["id"])[:4]:
-            lines.append(f"  · {relation_phrase(ontology, relation)} — {RELATION_STATES.get(relation['state'], relation['state'])}"
-                         f", 출처 {relation['source_count']}개")
+            lines.append(f"  · {relation_phrase(ontology, relation)} — {relation_label(relation)}")
         insight = by_entity.get(entity["id"].casefold())
         if insight:
             thesis = " ".join(str(insight.get("summary") or "").split())[:300]
             lines.append(f"  · 인사이트(모델 추론, 미검증): {thesis} [[{insight.get('id')}]]")
     return "\n".join(lines) if len(lines) > 1 else ""
+
+
+def models_label(stats: dict) -> str:
+    """검토가 끝난 페이지를 맡은 제공자: ``추출 codex 61 → 검토 hermes 61 → 되검토 codex 40``."""
+    models = stats.get("models") or {}
+    parts = [f"{label} " + "·".join(f"{'기록 없음' if name == UNKNOWN_MODEL else name} {count}"
+                                    for name, count in sorted(models[role].items(), key=lambda item: -item[1]))
+             for role, label in (("extractor", "추출"), ("reviewer", "검토"), ("cross", "되검토")) if models.get(role)]
+    return " → ".join(parts)
+
+
+def _neutrality_lines(ontology: dict) -> list[str]:
+    """누가 말한 것인지와 반대 검토 결과. 한 발행자에 쏠린 그래프를 쏠린 그대로 보여 준다."""
+    stats = ontology.get("stats") or {}
+    publishers = ontology.get("publishers") or {}
+    if not publishers:
+        return []
+    total = sum(row.get("claims", 0) for row in publishers.values()) or 1
+    review = stats.get("review") or {}
+    lines = ["## 출처 구성과 검토", "",
+             "- 발행자: " + ", ".join(
+                 f"{row.get('name', key)}({PERSPECTIVES.get(row.get('role'), row.get('role'))}) "
+                 f"{row.get('claims', 0)}건 {row.get('claims', 0) / total:.0%}"
+                 for key, row in list(publishers.items())[:12]),
+             (f"- 반대 검토: 완료 {review.get('pages_reviewed', 0)}개 페이지 · 대기 {review.get('pages_pending', 0)}개 — "
+              f"유지 {review.get('keep', 0)} · 견해로 낮춤 {review.get('view', 0)} · 기각 {review.get('reject', 0)} · "
+              f"검토자가 추가 {review.get('added', 0)}"
+              f"(되검토에서 기각 {review.get('added_rejected', 0)} · 되검토 대기 {review.get('added_unchecked', 0)})"
+              f" · 미검토 {review.get('unreviewed', 0)}")]
+    if stats.get("models"):
+        lines.append(f"- 맡은 모델 (검토가 끝난 페이지 수): {models_label(stats)}. 제안한 모델은 자기 제안을 판정하지 않는다.")
+    return [*lines, ""]
 
 
 def render_markdown(ontology: dict) -> str:
@@ -590,18 +881,30 @@ def render_markdown(ontology: dict) -> str:
         f"- 원본: 활성 페이지 {stats.get('pages', 0)}개 · claim {stats.get('claims', 0)}건 "
         f"(관계 추출 완료 {stats.get('extracted_pages', 0)}개 페이지)",
         f"- 개체 {stats.get('entities', 0)}개 · 관계 {stats.get('relations', 0)}개", "",
+        *_neutrality_lines(ontology),
         "## 스키마", "",
         "개체 타입: " + ", ".join(f"`{name}` {label}" for name, label in ENTITY_TYPES.items()), "",
         "관계 타입: " + ", ".join(f"`{name}` {label}" for name, (label, _) in RELATION_TYPES.items()), "",
         "관계 상태: " + ", ".join(f"`{name}` {label}" for name, label in RELATION_STATES.items()), "",
+        "서술 방식: " + ", ".join(f"`{name}` {label}" for name, label in RELATION_MODALITIES.items()), "",
     ]
     relations = ontology.get("relations") or []
     if relations:
         lines += ["## 관계", ""]
         for relation in relations[:400]:
             note = f" — {relation['notes'][0]}" if relation.get("notes") else ""
-            lines.append(f"- {relation_phrase(ontology, relation)} · {relation['state']} · 출처 {relation['source_count']}개"
+            lines.append(f"- {relation_phrase(ontology, relation)} · {relation_label(relation)}"
                          f" · 근거 claim {len(relation['evidence'])}건{note}")
+        lines.append("")
+    rejected = ontology.get("rejected") or []
+    if rejected:
+        lines += ["## 검토에서 기각된 관계", "",
+                  "한쪽 모델이 제안했지만 반대편 모델이 claim 에 없다고 본 관계다. 그래프와 인사이트에는 쓰지 않는다.", ""]
+        for relation in rejected[:120]:
+            reasons = ", ".join(REVIEW_REASONS.get(reason, reason) for reason in relation.get("reasons") or [])
+            who = "검토자" if relation.get("origin") == "reviewer" else "추출 모델"
+            note = f" — {who} 설명: {relation['note']}" if relation.get("note") else f" — {who} 제안"
+            lines.append(f"- {relation_phrase(ontology, relation)} · {reasons}{note}")
         lines.append("")
     for entity_type, label in ENTITY_TYPES.items():
         rows = [entity for entity in entities.values() if entity["type"] == entity_type]

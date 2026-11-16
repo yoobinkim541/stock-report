@@ -154,3 +154,21 @@ def test_empty_provider_list_calls_nothing(monkeypatch, providers, configured):
     monkeypatch.setenv("WIKI_STRUCTURED_PROVIDERS", configured)
     assert llm_cli.structured_chat("source") is None
     assert calls == []
+
+
+def test_one_call_can_ask_another_provider_first_and_reports_who_answered(monkeypatch, providers):
+    calls, results = providers
+    results.update({"codex": '{"from":"codex"}', "openrouter": '{"from":"openrouter"}', "hermes": '{"from":"hermes"}'})
+    monkeypatch.setenv("WIKI_STRUCTURED_PROVIDERS", "codex,openrouter,hermes")
+
+    assert llm_cli.structured_chat_with_provider("검토") == ('{"from":"codex"}', "codex")
+    assert llm_cli.structured_chat_with_provider("검토", providers="openrouter,hermes,codex") == (
+        '{"from":"openrouter"}', "openrouter")
+    results["openrouter"] = RuntimeError("down")
+    assert llm_cli.structured_chat_with_provider("검토", providers="openrouter,hermes,codex") == (
+        '{"from":"hermes"}', "hermes")
+    assert [call[0] for call in calls] == ["codex", "openrouter", "openrouter", "hermes"]
+    calls.clear()
+    assert llm_cli.structured_chat_with_provider("검토", providers="openrouter,nope") == (None, "")
+    assert calls == []
+

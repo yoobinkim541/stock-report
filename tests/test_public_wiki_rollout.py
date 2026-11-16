@@ -337,6 +337,51 @@ def test_selection_caps_five_and_prefers_oldest_pending_public_revisions():
     assert all(is_public(source) for source in selected)
 
 
+def test_selection_takes_turns_between_publishers_and_starts_with_the_longest_waiting():
+    def post(channel, day):
+        return {'revision_id': f'{channel}-{day:02d}', 'provider': f'telegram:{channel}', 'scope': 'public_message',
+                'canonical_url': f'https://t.me/{channel}/{day}', 'published_at': f'2026-10-{day:02d}', 'collected_at': ''}
+    busy = [post('insidertracking', day) for day in range(1, 9)]
+    sources = [*busy, post('kwusa', 20), post('kwusa', 21), post('mirae_dm', 22)]
+    runner = module()
+
+    # 글이 많은 채널이 가장 오래된 글을 갖고 있어도 한도 5건을 혼자 쓰지 못한다.
+    assert [s['revision_id'] for s in runner.select_pending(sources, lambda source: True)] == [
+        'insidertracking-01', 'kwusa-20', 'mirae_dm-22', 'insidertracking-02', 'kwusa-21']
+    # 방금 다룬 발행자는 뒤로 가고, 한 번도 다루지 못한 발행자가 먼저 온다.
+    served = {'미국 주식 인사이더': '2026-10-16T03:00:00', '키움증권': '2026-10-16T02:00:00'}
+    assert [s['revision_id'] for s in runner.select_pending(sources, lambda source: True, limit=3, served=served)] == [
+        'mirae_dm-22', 'kwusa-20', 'insidertracking-01']
+
+
+def test_discovery_puts_the_publisher_compiled_last_run_at_the_back(tmp_path, monkeypatch):
+    """편입이 끝난 글은 다음 스캔에 나오지 않는다 — 누가 방금 뽑혔는지는 저널 원장으로 안다."""
+    from reports.wiki_source_journal import Journal
+    runner = module()
+    monkeypatch.setattr(runner.source_collector, 'DEFAULT_CACHE_DIR', tmp_path / 'cache')
+    monkeypatch.setenv('WIKI_SOURCE_PIPELINE_ENABLED', '1')
+    monkeypatch.delenv('WIKI_SOURCE_ALLOW_PRIVATE', raising=False)
+    providers = {'i1': 'telegram:insidertracking', 'i2': 'telegram:insidertracking', 'k1': 'telegram:kwusa'}
+    write_cache(runner, tmp_path / 'cache', [cached_event(identity) for identity in providers])
+    monkeypatch.setattr(runner.wiki_source_revision, 'discover_revisions', lambda events, **kwargs: {
+        'eligible': [{'revision_id': events[0]['id'], 'role': 'support', 'provider': providers[events[0]['id']],
+                      'scope': 'public_message_text', 'body': 'full body', 'canonical_url': events[0]['url'],
+                      'published_at': events[0]['id']}],
+        'unavailable': [], 'pending_chunking': []})
+    monkeypatch.setattr(runner, 'pending_public_source', lambda source, _: True)
+    monkeypatch.setattr(runner, 'is_public', lambda source: True)
+    journal = Journal(tmp_path / 'journal')
+    for folder, name, payload in (
+            ('automatic-attempts', 'a.json', {'reservation': {'id': 'a', 'revision_id': 'done', 'at': '2026-10-16T03:00:00'}}),
+            ('sources', 'done.json', {'revision_id': 'done', 'source': {'provider': 'telegram:insidertracking'}})):
+        (journal.root / folder).mkdir(parents=True, exist_ok=True)
+        (journal.root / folder / name).write_text(json.dumps(payload))
+
+    with runner.discover_source_batch(journal, NOW, limit=2) as (sources, _, _, stats):
+        assert [source['revision_id'] for source in sources] == ['k1', 'i1']
+        assert stats['publisher_last_attempt'] == {'미국 주식 인사이더': '2026-10-16T03:00:00'}
+
+
 def test_dry_plan_never_reserves_daily_quota(tmp_path):
     result = module().plan_status(tmp_path / 'budget.json', candidates=7)
     assert result['apply'] is False and result['planned_attempts'] == 5

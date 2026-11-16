@@ -137,3 +137,24 @@ def test_macro_snapshot_is_not_eligible_as_fred_series_notes():
     assert payload is None
     assert outcome == "failed"
     assert "article" in reason
+
+
+def test_sell_side_channel_post_is_its_own_class_and_prompt_attributes_house_views():
+    from reports import wiki_distillation as wd
+
+    def article(channel: str) -> dict:
+        return {"evidence_id": f"{channel}-evidence", "url": f"https://t.me/{channel}/42",
+                "text": "키움증권은 엔비디아 목표주가를 올렸다. 3분기 매출은 570억 달러였다.", "text_complete": True,
+                "content_kind": "broker_comment", "source_text_scope": "public_message",
+                "provenance": f"telegram:{channel}"}
+
+    assert wd._full_body_source_class(article("kwusa")) == "sell_side"
+    assert wd._full_body_source_class(article("insidertracking")) == "community"
+    assert wd._full_body_source_class({**article("kwusa"), "url": "https://t.me/other/42"}) == ""
+
+    prompts: list[str] = []
+    wd._distill_one_with_status(
+        {"id": "broker-source", "_require_articles": True, "_source_articles": [article("kwusa")]},
+        lambda prompt: prompts.append(prompt) or "{}")
+    assert "증권사에 귀속" in prompts[0] and "커뮤니티 신호" not in prompts[0]
+

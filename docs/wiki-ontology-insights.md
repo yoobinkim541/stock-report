@@ -10,7 +10,8 @@
 |---|---|
 | `config/wiki-ontology.json` | 시드 개체 사전 (기관·인물·지역·지표·자산·산업·테마·이벤트). 종목은 `ticker_names` 에서 가져온다. |
 | `agent_console/wiki_ontology.py` | 스키마, 개체 매칭, LLM 응답 검증, 그래프 컴파일, 조회. LLM 을 부르지 않는다. |
-| `reports/wiki_ontology_insights.py` | 배치. 관계 추출 → 컴파일 → 인사이트 작성. |
+| `reports/wiki_ontology_insights.py` | 배치. 관계 추출 → 반대 검토 → 컴파일 → 인사이트 작성. |
+| `reports/source_publishers.py` | 출처 이름 → 발행자·관점 표. 수집 분류와 온톨로지의 독립 출처 계산이 같이 쓴다. |
 | `dashboard/wiki_ontology_view.py` | AI 위키 화면의 "온톨로지·인사이트" 구역. |
 | `<llm-wiki>/ontology/extractions.json` | 페이지별 관계 추출 캐시 (claim 해시가 같으면 다시 부르지 않는다). |
 | `<llm-wiki>/ontology/ontology.json`, `ontology.md` | 컴파일된 그래프와 사람이 읽는 요약. 매 실행마다 전체 재계산. |
@@ -23,8 +24,40 @@
 - 개체 타입: `company` `asset` `indicator` `institution` `person` `region` `sector` `theme` `event`
 - 관계 타입: `belongs_to` `supplies` `competes_with` `partners_with` `owns` `leads` `regulates`
   `positive_for` `negative_for` `exposed_to` `conflicts_with`
-- 관계 상태: `asserted` 출처 1개 · `corroborated` 출처 2개 이상 · `contested` 경쟁 claim 이 있거나 같은 쌍에
-  `positive_for` 와 `negative_for` 가 함께 있음
+- 관계 상태: `asserted` 발행자 1곳 · `corroborated` 서로 다른 발행자 2곳 이상 · `contested` 경쟁 claim 이 있거나,
+  같은 쌍에 `positive_for` 와 `negative_for` 가 함께 있거나, 검토자가 반대 근거 claim 을 댐
+- 서술 방식: `reported` 일어난 일·있는 사실로 전해짐 · `view` 누군가의 전망·평가·추천
+
+## 한쪽으로 쏠리지 않게 하는 규칙
+
+2026-11-16 추가. 그 전까지 claim 2,241건이 모두 한 텔레그램 채널에서 왔고, "복수 출처"는 같은 채널의 글 여러
+건이었다. 증권사 채널을 더하면서 누가 말했는지와 사실인지 견해인지를 그래프에 남기도록 바꿨다.
+
+- 발행자 단위로 센다. 같은 채널의 글 여러 건, 같은 증권사의 채널 글과 리포트 PDF 는 한 목소리다. 발행자를 모르는
+  revision 은 모두 `unknown` 한 곳으로 묶는다. 관계마다 `publishers`, `perspectives`(증권사 리서치·커뮤니티·언론…)를 남긴다.
+- 반대 검토 (`build_review_request` → `validate_review`). 추출한 모델과 다른 제공자를 먼저 부르는 검토자가 같은
+  claim 을 보고 제안된 관계를 반박한다. 추출 모델의 설명(`note`)은 보여 주지 않는다. 검토자는 판정
+  (`keep`·`view`·`reject`)과 닫힌 사유 코드, 반대 근거 claim, 추출 모델이 빠뜨린 관계를 낸다.
+- 판정을 어떻게 반영할지는 코드가 정한다.
+  - `reject` 는 claim 이 그 관계를 말하지 않는다는 사유(`not_stated` `reversed` `listed_only` `trivial`)가 있을 때만
+    받는다. 전망·평가라는 이유만이면 지우지 않고 `view` 로 낮춘다. 사유가 없으면 판정을 버린다.
+  - `contradicted` 는 그 관계가 인용하지 않은 다른 claim 을 반대 근거로 댈 때만 받고, 그러면 `contested` 가 된다.
+  - 검토자가 빠졌다고 낸 관계는 추출과 같은 근거 검증을 통과해야 들어온다 (`origin: reviewer`). 부호가 반대면
+    원래 관계와 함께 `contested` 가 된다.
+  - 검토자가 더한 관계도 그대로 믿지 않는다. 추출 쪽 모델이 같은 규칙으로 되검토한다 (`_cross_review`,
+    `review.cross`). 되검토는 판정만 내고 관계를 더하지 못하므로 주고받기는 여기서 끝난다. 되검토 전의 추가분은
+    `added_unchecked` 로 센다.
+  - 추출 모델·검토자 중 한쪽이라도 견해라 했거나, 인용 claim 이 모두 전망·평가 어투면 `view` 다.
+  - 기각된 관계는 그래프에서 빠지지만 추출 캐시에는 사유와 함께 남고, `ontology.json` 의 `rejected` 와
+    `ontology.md` 의 "검토에서 기각된 관계" 목록으로 사람이 되짚어 볼 수 있다. 기각 사유는 검토 모델의 판단이며
+    코드로 다시 검증하지 않는다.
+- 검토는 추출 한 번에 한 번이다. claim 이 바뀌어 다시 추출하면 다시 검토한다. 검토 호출이 실패하면 그 페이지는
+  대기로 남고 관계는 `unreviewed` 로 그래프에 들어간다.
+- `ontology.md` 와 화면은 발행자별 claim 비중과 검토 결과(유지·견해로 낮춤·기각·검토자 추가와 그 되검토·미검토)를
+  맨 위에 보여 준다. 검토가 끝난 페이지를 어느 제공자가 추출·검토·되검토했는지도 같이 적는다 (`stats.models`).
+- 인사이트 프롬프트는 claim 마다 발행자를 붙이고, 한 발행자의 claim 만 인용한 판단은 그렇게 밝히게 한다.
+- 위키 컴파일 대상 선정(`scripts/run_public_wiki_rollout.py`)은 발행자별로 번갈아 고른다. 글이 많은 채널 하나가
+  하루 한도를 다 쓰지 못한다.
 
 ## 지어내지 못하게 막는 규칙
 
@@ -57,13 +90,15 @@ JSON 으로 코드가 조립한다 (핵심 판단 / 근거를 이은 판단 / �
 
 ```
 uv run python -m reports.wiki_ontology_insights            # 점검만 (대기 페이지, 인사이트 후보)
-uv run python -m reports.wiki_ontology_insights --apply    # 추출·컴파일·인사이트 작성
+uv run python -m reports.wiki_ontology_insights --apply    # 추출·반대 검토·컴파일·인사이트 작성
 ```
 
-호출 상한은 `--extract-calls` / `WIKI_ONTOLOGY_EXTRACT_CALLS` (기본 6), `--insights` / `WIKI_INSIGHT_MAX_PER_RUN`
-(기본 3). 크론은 6시간마다 (`deploy/crontab.stock-report`, 잠금 `/tmp/wiki_ontology.lock`, 로그 `/tmp/wiki_ontology.log`).
+호출 상한은 `--extract-calls` / `WIKI_ONTOLOGY_EXTRACT_CALLS` (기본 6), `--review-calls` / `WIKI_ONTOLOGY_REVIEW_CALLS`
+(기본 6, 반대 검토와 되검토에 각각 적용), `--insights` / `WIKI_INSIGHT_MAX_PER_RUN` (기본 3). 검토자 제공자 순서는 `WIKI_ONTOLOGY_REVIEW_PROVIDERS`
+(기본: `WIKI_STRUCTURED_PROVIDERS` 를 한 칸 돌린 순서 — Codex 가 추출하면 OpenRouter 가 먼저 검토하고, 응답이 없으면 Hermes 로 넘어간다). 되검토는 추출과 같은 순서로 부른다. 이 잡은 `.env` 를 직접 읽는다 — 읽지 않으면 Codex 가 계정에서 못 쓰는 기본 모델로 떠서 Hermes 혼자 세 역할을 다 한다 (2026-11-16 운영에서 확인). 크론은 6시간마다 (`deploy/crontab.stock-report`, 잠금 `/tmp/wiki_ontology.lock`, 로그 `/tmp/wiki_ontology.log`).
 LLM 은 `lib.llm_cli.structured_chat` (Codex → OpenRouter → Hermes) 를 쓴다. 관계 추출 프롬프트는 claim 30건 묶음이라
-Codex 응답이 60초를 넘기도 해서 (운영 실측: 13건 51초, 44건 78초) 공급자별 한도를 120초로 올려 부른다.
+Codex 응답이 60초를 넘기도 해서 (운영 실측: 13건 51초, 44건 78초) 공급자별 한도를 120초로 올려 부른다. Codex 호출의 자체 상한(90초)도 이 잡에서는 120초로 맞춘다
+(`AGENT_CONSOLE_CODEX_TIMEOUT` 을 따로 정했으면 그 값). 검토 프롬프트 한 건이 77초 걸린 실측이 있다.
 전체 180초 상한은 그대로다.
 
 ## 한계
@@ -71,3 +106,10 @@ Codex 응답이 60초를 넘기도 해서 (운영 실측: 13건 51초, 44건 78�
 - 개체 매칭은 사전 기반이다. 사전에 없는 개체는 LLM 추출이 그 페이지를 지나가야 생긴다.
 - 관계와 인사이트의 근거는 공개 텔레그램 채널을 모델이 정리한 claim 이다. 원문 검증을 거치지 않았으므로 가설로만 쓴다.
 - 인사이트는 `draft` 로만 만든다. 검토 승격은 사람이 한다.
+- 반대 검토도 모델이다. claim 문장만 보고 판단하므로 claim 자체가 원문을 잘못 옮겼으면 잡지 못한다.
+- 제안한 제공자는 자기 제안을 판정하지 못한다. 검토는 추출한 제공자를, 되검토는 그 관계를 더한 검토자를 빼고 부른다.
+  그래서 검토 묶음은 제안한 제공자가 같은 페이지끼리만 만든다.
+  그 제공자가 답했으면 판정을 버리고 (`refused_same_model`) 페이지를 대기로 둔다. 다른 제공자가 모두 죽어 있으면
+  검토가 멈추고 관계는 `unreviewed`·`added_unchecked` 로 남는다. 추출 제공자를 기록하기 전의 페이지
+  (`extractor` 없음)는 누가 추출했는지 몰라 이 규칙으로 가려내지 못한다.
+- 증권사 리포트 PDF 본문은 수집 캐시에는 들어가지만 위키 컴파일 대상은 아니다 (공개 텔레그램 메시지만 받는다).

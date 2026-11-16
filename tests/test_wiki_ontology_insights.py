@@ -11,6 +11,7 @@ def _isolate(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("AGENT_CONSOLE_SHARED_MEMORY_DIR", str(tmp_path / "memory"))
     monkeypatch.setenv("AGENT_CONSOLE_WIKI_ARTIFACTS_DIR", str(tmp_path / "wiki"))
     monkeypatch.setenv("AGENT_CONSOLE_QMD_ENABLED", "0")
+    monkeypatch.setenv("STOCK_REPORT_REPORTS_DIR", str(tmp_path / "reports"))
     from agent_console import wiki
 
     wiki._CACHE.clear()
@@ -40,6 +41,19 @@ def _extraction_reply(prompt: str) -> str:
     key = next(line[3:line.index("]")] for line in prompt.splitlines() if line.startswith("- [c") and "3% 올랐다" in line)
     return json.dumps({"entities": [], "relations": [
         {"type": "positive_for", "from": "region:iran", "to": "asset:crude-oil", "claims": [key], "note": "긴장 고조"}]})
+
+
+def _review_reply(prompt: str, verdicts: dict[str, dict] | None = None, missed: list[dict] | None = None) -> str:
+    """제안된 관계마다 판정 하나. ``verdicts`` 는 관계 타입 → 판정(없으면 keep)."""
+    rows = [line[2:].split(" | ") for line in prompt.split("<proposed_relations>")[1].split("</proposed_relations>")[0]
+            .splitlines() if line.startswith("- r")]
+    reviews = [{"id": head.split(":")[0], "verdict": "keep",
+                **(verdicts or {}).get(head.split(": ")[1], {})} for head, *_ in rows]
+    return json.dumps({"reviews": reviews, "missed": missed or []})
+
+
+def _claim_key(prompt: str, fragment: str) -> str:
+    return next(line[3:line.index("]")] for line in prompt.splitlines() if line.startswith("- [c") and fragment in line)
 
 
 def _insight_reply(points: list[dict], **extra) -> str:
@@ -75,6 +89,8 @@ def test_job_extracts_compiles_and_writes_a_cross_source_insight(monkeypatch, tm
         prompts.append(prompt)
         if "typed knowledge graph" in prompt:
             return _extraction_reply(prompt)
+        if "opposing reviewer" in prompt:
+            return _review_reply(prompt)
         if "원유" not in prompt.split("<entity>")[1].split("</entity>")[0]:
             return json.dumps({"action": "skip", "skip_reason": "test"})
         return _insight_reply([
@@ -92,6 +108,7 @@ def test_job_extracts_compiles_and_writes_a_cross_source_insight(monkeypatch, tm
     report = job.run(apply=True, extract_calls=3, insight_limit=5, llm_fn=llm)
 
     assert report["extraction"]["pages"] == 4 and report["extraction"]["relations"] == 1
+    assert (report["review"]["pages"], report["review"]["keep"]) == (1, 1)
     assert report["ontology"]["relations"] == 1
     written = [row for row in report["insights"]["written"] if row["entity"] == "asset:crude-oil"]
     assert len(written) == 1
@@ -216,6 +233,192 @@ def test_failed_llm_calls_leave_pages_pending_and_stop_early():
     assert len(job.batches(monkey_pages)) == 5
     assert (summary["calls"], summary["failed_calls"], summary["pages"]) == (2, 2, 0)
     assert extractions == {"pages": {}} and len(job.pending_pages(monkey_pages, extractions)) == 5
+
+
+def _extracted(pages: list[dict]) -> dict:
+    extractions = {"pages": {}}
+    job.extract_relations(pages, extractions, llm_fn=lambda prompt: (_extraction_reply(prompt), "codex"), max_calls=3)
+    return extractions
+
+
+def test_review_records_verdicts_adds_the_omitted_opposite_and_runs_once_per_extraction():
+    extractions = _extracted(SOURCES)
+    assert len(job.review_batches(SOURCES, extractions)) == 1  # 관계가 나온 페이지만 검토한다
+    prompts: list[str] = []
+    barred_seen: list[frozenset] = []
+
+    def reviewer(prompt: str, barred: frozenset = frozenset()) -> tuple[str, str]:
+        prompts.append(prompt)
+        barred_seen.append(barred)
+        return _review_reply(prompt, {"positive_for": {"verdict": "view", "reasons": ["forecast"]}}), "openrouter"
+
+    summary = job.review_relations(SOURCES, extractions, llm_fn=reviewer, max_calls=4)
+
+    record = extractions["pages"]["src-1"]
+    assert (summary["calls"], summary["pages"], summary["view"], summary["reviewers"]) == (1, 1, 1, {"openrouter": 1})
+    assert summary["refused_same_model"] == 0 and record["extractor"] == "codex" and barred_seen == [{"codex"}]
+    assert record["relations"][0]["review"] == {"verdict": "view", "reasons": ["forecast"], "counter": []}
+    assert record["review"]["input_hash"] == record["input_hash"] and record["review"]["reviewer"] == "openrouter"
+    assert "긴장 고조" not in prompts[0]
+    assert job.review_batches(SOURCES, extractions) == []
+    assert job.review_relations(SOURCES, extractions, llm_fn=reviewer, max_calls=4)["calls"] == 0
+
+    # claim 이 바뀌어 다시 추출하면 예전 판정은 버리고 새로 검토한다.
+    changed = [_source_page(1, ["이란 긴장으로 유가가 3% 올랐다.", "새 문장이 추가됐다."]), *SOURCES[1:]]
+    job.extract_relations(changed, extractions, llm_fn=lambda prompt: (_extraction_reply(prompt), "openrouter"), max_calls=3)
+    assert "review" not in extractions["pages"]["src-1"]
+    # 추출한 모델이 검토까지 답하면 그 판정은 받지 않고 페이지를 대기로 남긴다.
+    again = job.review_relations(changed, extractions, llm_fn=reviewer, max_calls=4)
+    assert (again["pages"], again["refused_same_model"]) == (0, 1)
+    assert "review" not in extractions["pages"]["src-1"] and len(job.review_batches(changed, extractions)) == 1
+    other = job.review_relations(changed, extractions, max_calls=4,
+                                 llm_fn=lambda prompt, barred: (_review_reply(prompt), "hermes"))
+    assert (other["pages"], other["refused_same_model"]) == (1, 0)
+
+
+def test_reviewer_proposed_opposite_relation_makes_the_pair_contested():
+    extractions = _extracted(SOURCES)
+
+    def reviewer(prompt: str, barred: frozenset = frozenset()) -> str:
+        return _review_reply(prompt, missed=[
+            {"type": "negative_for", "from": "region:iran", "to": "asset:crude-oil",
+             "claims": [_claim_key(prompt, "3% 올랐다")], "note": "반대 방향"}])
+
+    summary = job.review_relations(SOURCES, extractions, llm_fn=reviewer, max_calls=4)
+    ontology = wo.compile_ontology(SOURCES, extractions, generated_at="2026-11-15T00:00:00+00:00")
+
+    assert summary["added"] == 1
+    assert {(r["type"], r["state"]) for r in ontology["relations"]} == {
+        ("positive_for", "contested"), ("negative_for", "contested")}
+    assert ontology["stats"]["review"] == {"pages_reviewed": 1, "pages_cross_pending": 1, "keep": 1, "added": 1,
+                                           "added_unchecked": 1}
+    # 같은 페이지를 다시 검토해도 검토자가 넣은 관계가 쌓이지 않는다.
+    extractions["pages"]["src-1"].pop("review")
+    job.review_relations(SOURCES, extractions, llm_fn=reviewer, max_calls=4)
+    assert [r.get("origin") for r in extractions["pages"]["src-1"]["relations"]] == [None, "reviewer"]
+
+
+def test_reviewer_additions_go_back_to_the_other_model_and_the_exchange_ends_there():
+    extractions = _extracted(SOURCES)
+
+    def reviewer(prompt: str, barred: frozenset = frozenset()) -> tuple[str, str]:
+        return _review_reply(prompt, missed=[
+            {"type": "negative_for", "from": "region:iran", "to": "asset:crude-oil",
+             "claims": [_claim_key(prompt, "3% 올랐다")], "note": "반대 방향"}]), "hermes"
+
+    cross_prompts: list[str] = []
+
+    def cross(prompt: str, barred: frozenset = frozenset()) -> tuple[str, str]:
+        cross_prompts.append(prompt)
+        assert barred == {"hermes"}  # 관계를 더한 검토자는 되검토에서 빠진다
+        # 되검토자가 또 관계를 더하려 해도 받지 않는다.
+        return _review_reply(prompt, {"negative_for": {"verdict": "reject", "reasons": ["not_stated"]}}, missed=[
+            {"type": "supplies", "from": "region:iran", "to": "asset:crude-oil",
+             "claims": [_claim_key(prompt, "3% 올랐다")], "note": "덧붙임"}]), "codex"
+
+    summary = job.review_relations(SOURCES, extractions, llm_fn=reviewer, cross_llm_fn=cross, max_calls=4)
+
+    record = extractions["pages"]["src-1"]
+    assert summary["added"] == 1
+    assert {k: summary["cross"][k] for k in ("calls", "pages", "relations", "reject", "refused_same_model")} == {
+        "calls": 1, "pages": 1, "relations": 1, "reject": 1, "refused_same_model": 0}
+    # 되검토에는 검토자가 더한 관계만 올라가고, 추가 제안은 닫혀 있다.
+    proposed = cross_prompts[0].split("<proposed_relations>")[1].split("</proposed_relations>")[0]
+    assert "negative_for" in proposed and "positive_for" not in proposed
+    assert "Additions are closed" in cross_prompts[0]
+    assert [(r["type"], r.get("origin"), r["review"]["verdict"]) for r in record["relations"]] == [
+        ("positive_for", None, "keep"), ("negative_for", "reviewer", "reject")]
+    assert record["review"]["cross"]["reviewer"] == "codex"
+    ontology = wo.compile_ontology(SOURCES, extractions, generated_at="2026-11-15T00:00:00+00:00")
+    assert [(r["type"], r["state"]) for r in ontology["relations"]] == [("positive_for", "asserted")]
+    assert ontology["stats"]["review"] == {"pages_reviewed": 1, "keep": 1, "added": 1, "added_rejected": 1}
+    # 한 번 되검토한 페이지는 다시 부르지 않는다.
+    again = job.review_relations(SOURCES, extractions, llm_fn=reviewer, cross_llm_fn=cross, max_calls=4)
+    assert (again["calls"], again["cross"]["calls"]) == (0, 0)
+
+
+def test_reviewer_cannot_cross_check_its_own_additions():
+    extractions = _extracted(SOURCES)
+
+    def reviewer(prompt: str, barred: frozenset = frozenset()) -> tuple[str, str]:
+        return _review_reply(prompt, missed=[
+            {"type": "negative_for", "from": "region:iran", "to": "asset:crude-oil",
+             "claims": [_claim_key(prompt, "3% 올랐다")], "note": "반대 방향"}]), "hermes"
+
+    summary = job.review_relations(SOURCES, extractions, llm_fn=reviewer, max_calls=4,
+                                   cross_llm_fn=lambda prompt, barred: (_review_reply(prompt), "hermes"))
+
+    assert (summary["cross"]["pages"], summary["cross"]["refused_same_model"]) == (0, 1)
+    assert "cross" not in extractions["pages"]["src-1"]["review"]
+    ontology = wo.compile_ontology(SOURCES, extractions, generated_at="2026-11-15T00:00:00+00:00")
+    assert ontology["stats"]["review"]["added_unchecked"] == 1
+
+
+def test_pages_proposed_by_different_models_are_reviewed_in_separate_calls():
+    extractions = _extracted(SOURCES)
+    record = extractions["pages"]["src-1"]
+    other = _source_page(5, ["이란 긴장으로 유가가 3% 올랐다."])
+    extractions["pages"]["src-5"] = {
+        **record, "input_hash": wo.page_input_hash(other), "extractor": "hermes",
+        "relations": [{**record["relations"][0], "evidence": [{"page_id": "src-5", "claim_id": "c5-0"}]}]}
+    pages = [*SOURCES, other]
+    barred_seen: list[frozenset] = []
+
+    def reviewer(prompt: str, barred: frozenset) -> tuple[str, str]:
+        barred_seen.append(barred)
+        return _review_reply(prompt), "openrouter"
+
+    summary = job.review_relations(pages, extractions, llm_fn=reviewer, max_calls=4)
+
+    assert (summary["calls"], summary["pages"]) == (2, 2)
+    assert sorted(map(sorted, barred_seen)) == [["codex"], ["hermes"]]
+
+
+def test_default_reviewers_skip_the_provider_that_proposed(monkeypatch):
+    from lib import llm_cli
+
+    asked: list[str | None] = []
+    monkeypatch.setenv("WIKI_STRUCTURED_PROVIDERS", "codex,openrouter,hermes")
+    monkeypatch.delenv("WIKI_ONTOLOGY_REVIEW_PROVIDERS", raising=False)
+    monkeypatch.setattr(llm_cli, "structured_chat_with_provider",
+                        lambda prompt, **kwargs: (asked.append(kwargs.get("providers")) or "{}", "x"))
+
+    job._default_review_llm("p", frozenset({"hermes"}))
+    job._default_cross_llm("p", frozenset({"hermes"}))
+    assert asked == ["openrouter,codex", "codex,openrouter"]
+    # 남는 제공자가 없으면 아무도 부르지 않는다.
+    assert job._default_cross_llm("p", frozenset({"codex", "openrouter", "hermes"})) == (None, "")
+    assert len(asked) == 2
+
+
+def test_failed_review_leaves_pages_pending_and_relations_unreviewed():
+    extractions = _extracted(SOURCES)
+
+    summary = job.review_relations(SOURCES, extractions, max_calls=4,
+                                   llm_fn=lambda prompt, barred: _extraction_reply(prompt))
+
+    assert (summary["calls"], summary["failed_calls"], summary["pages"]) == (1, 1, 0)
+    assert "review" not in extractions["pages"]["src-1"] and len(job.review_batches(SOURCES, extractions)) == 1
+    ontology = wo.compile_ontology(SOURCES, extractions, generated_at="2026-11-15T00:00:00+00:00")
+    assert ontology["stats"]["review"] == {"pages_pending": 1, "unreviewed": 1}
+
+
+def test_review_asks_a_different_provider_first(monkeypatch):
+    monkeypatch.setenv("WIKI_STRUCTURED_PROVIDERS", "codex,openrouter,hermes")
+    monkeypatch.delenv("WIKI_ONTOLOGY_REVIEW_PROVIDERS", raising=False)
+    assert job.review_provider_order() == "openrouter,hermes,codex"
+    monkeypatch.setenv("WIKI_ONTOLOGY_REVIEW_PROVIDERS", "hermes")
+    assert job.review_provider_order() == "hermes"
+
+
+def test_source_providers_reads_the_journal_ledger(monkeypatch, tmp_path):
+    monkeypatch.setenv("STOCK_REPORT_REPORTS_DIR", str(tmp_path))
+    ledger = tmp_path / "public-wiki-pilot-20261013" / "sources"
+    ledger.mkdir(parents=True)
+    (ledger / "aa.json").write_text(json.dumps({"revision_id": "aa", "source": {"provider": "telegram:kwusa"}}))
+    (ledger / "broken.json").write_text("{")
+
+    assert job.source_providers() == {"aa": "telegram:kwusa"}
 
 
 def test_prune_drops_cache_for_archived_pages():

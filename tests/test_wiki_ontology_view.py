@@ -25,7 +25,9 @@ def _ontology() -> tuple[dict, list[dict]]:
         "p2": {"input_hash": wo.page_input_hash(pages[1]), "relations": [relation("positive_for", "region:iran", "p2")]},
         "p3": {"input_hash": "stale", "relations": [relation("negative_for", "institution:opec", "p3")]},
     }}
-    return wo.compile_ontology(pages, extractions, generated_at="2026-11-15T00:00:00+00:00", lexicon=lexicon), pages
+    providers = {"r1": "telegram:insidertracking", "r2": "telegram:kwusa", "r3": "telegram:insidertracking"}
+    return wo.compile_ontology(pages, extractions, generated_at="2026-11-15T00:00:00+00:00", lexicon=lexicon,
+                               source_providers=providers), pages
 
 
 def test_view_model_reports_coverage_and_links_insights_to_entities():

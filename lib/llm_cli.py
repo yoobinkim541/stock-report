@@ -217,13 +217,14 @@ def agy_structured_call(prompt: str, *, timeout: float, runner=None) -> str | No
     return None
 
 
-def structured_providers() -> list[str] | None:
-    """WIKI_STRUCTURED_PROVIDERS → 검증된 순서 목록. 알 수 없는 이름이 하나라도 있으면 None.
+def structured_providers(raw: str | None = None) -> list[str] | None:
+    """WIKI_STRUCTURED_PROVIDERS(또는 ``raw``) → 검증된 순서 목록. 알 수 없는 이름이 하나라도 있으면 None.
 
     대소문자·공백은 정규화하고 중복은 첫 위치만 남긴다. 오타를 Hermes 로 조용히 보내지 않도록
     구성 오류는 fail-closed(어떤 제공자도 호출하지 않음)다.
     """
-    raw = os.getenv("WIKI_STRUCTURED_PROVIDERS", ",".join(DEFAULT_STRUCTURED_PROVIDERS))
+    if raw is None:
+        raw = os.getenv("WIKI_STRUCTURED_PROVIDERS", ",".join(DEFAULT_STRUCTURED_PROVIDERS))
     names: list[str] = []
     for item in raw.split(","):
         name = item.strip().lower()
@@ -239,7 +240,16 @@ def structured_providers() -> list[str] | None:
 
 
 def structured_chat(prompt: str, *, max_timeout: int = 180, provider_timeout: int | None = None) -> str | None:
-    """Bounded Codex → direct OpenRouter → Hermes JSON-object fallback.
+    """``structured_chat_with_provider`` 의 본문만."""
+    return structured_chat_with_provider(prompt, max_timeout=max_timeout, provider_timeout=provider_timeout)[0]
+
+
+def structured_chat_with_provider(prompt: str, *, max_timeout: int = 180, provider_timeout: int | None = None,
+                                  providers: str | None = None) -> tuple[str | None, str]:
+    """Bounded Codex → direct OpenRouter → Hermes JSON-object fallback. Returns (text, provider that answered).
+
+    ``providers`` overrides the configured order for one call (same names, same fail-closed validation) — a
+    reviewer pass uses it to ask a different model first than the one that produced the draft.
 
     No parallel calls or web search; agy is an opt-in stage via WIKI_STRUCTURED_PROVIDERS. Each provider gets at most 60
     seconds within a shared, hard-capped 180-second budget; ``provider_timeout``
@@ -255,15 +265,15 @@ def structured_chat(prompt: str, *, max_timeout: int = 180, provider_timeout: in
     from lib.structured_output import parse_object
 
     if os.getenv("AGENT_CONSOLE_LLM_ENABLED", "1").lower() in {"0", "false", "no", "off"}:
-        return None
-    providers = structured_providers()
-    if not providers:
-        return None
+        return None, ""
+    order = structured_providers(providers)
+    if not order:
+        return None, ""
     deadline = time.monotonic() + max(0, min(max_timeout, int(os.getenv("WIKI_STRUCTURED_DEADLINE", "180"))))
-    for provider in providers:
+    for provider in order:
         remaining = min(provider_timeout or int(os.getenv("WIKI_PROVIDER_TIMEOUT", "60")), deadline - time.monotonic())
         if remaining < 1:
-            return None
+            return None, ""
         stage_deadline = time.monotonic() + remaining
         try:
             if provider == "agy":
@@ -281,11 +291,11 @@ def structured_chat(prompt: str, *, max_timeout: int = 180, provider_timeout: in
                 text = call(prompt, max_timeout=remaining, deadline=stage_deadline,
                             search=False, reasoning_effort="medium", structured_output=True)
             if time.monotonic() <= deadline and isinstance(text, str) and parse_object(text) is not None:
-                return text
+                return text, provider
         except Exception:
             # Continue once to the next provider; never print private payloads.
             continue
-    return None
+    return None, ""
 
 
 @contextlib.contextmanager

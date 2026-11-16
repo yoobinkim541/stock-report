@@ -9,7 +9,7 @@ import json
 from html import escape
 
 from agent_console import wiki_ontology
-from agent_console.wiki_ontology import ENTITY_TYPES, INSIGHT_KIND, RELATION_STATES, RELATION_TYPES
+from agent_console.wiki_ontology import ENTITY_TYPES, INSIGHT_KIND, PERSPECTIVES, RELATION_TYPES
 
 TYPE_COLORS = {
     "company": "#38bdf8", "asset": "#f59e0b", "indicator": "#a78bfa", "institution": "#34d399",
@@ -29,13 +29,30 @@ def build_view_model(ontology: dict | None, pages: list[dict]) -> dict:
     for entity in (ontology.get("entities") or {}).values():
         insight = insight_by_entity.get(entity["id"].casefold())
         entities.append({**{key: entity.get(key) for key in (
-            "id", "type", "name", "ticker", "claim_count", "page_count", "source_count", "relation_count", "last_seen")},
+            "id", "type", "name", "ticker", "claim_count", "page_count", "source_count", "publisher_count",
+            "relation_count", "last_seen")},
             "insight_id": insight.get("id") if insight else ""})
     stats = dict(ontology.get("stats") or {})
     pages_total = stats.get("pages") or 0
     stats["coverage"] = (stats.get("extracted_pages", 0) / pages_total) if pages_total else 0.0
     return {"ready": True, "generated_at": ontology.get("generated_at", ""), "stats": stats, "insights": insights,
             "entities": entities, "relations": list(ontology.get("relations") or [])}
+
+
+def neutrality_caption(ontology: dict) -> str:
+    """claim 이 어느 발행자·관점에서 왔는지와 반대 검토 결과 한 줄."""
+    stats = ontology.get("stats") or {}
+    publishers = ontology.get("publishers") or {}
+    total = sum(row.get("claims", 0) for row in publishers.values()) or 1
+    voices = ", ".join(f"{row.get('name', key)}({PERSPECTIVES.get(row.get('role'), row.get('role'))}) "
+                       f"{row.get('claims', 0) / total:.0%}" for key, row in list(publishers.items())[:6])
+    review = stats.get("review") or {}
+    views = (stats.get("relation_modalities") or {}).get("view", 0)
+    return (f"발행자 {len(publishers)}곳: {voices or '정보 없음'} · 견해·전망으로 적힌 관계 {views}개 · "
+            f"반대 검토 완료 {review.get('pages_reviewed', 0)}쪽 / 대기 {review.get('pages_pending', 0)}쪽 "
+            f"(기각 {review.get('reject', 0)} · 견해로 낮춤 {review.get('view', 0)} · 검토자 추가 {review.get('added', 0)}"
+            f", 그중 되검토 기각 {review.get('added_rejected', 0)} · 되검토 대기 {review.get('added_unchecked', 0)})"
+            + (f" · 맡은 모델: {wiki_ontology.models_label(stats)}" if stats.get("models") else ""))
 
 
 def entity_detail(ontology: dict, entity_id: str, pages_by_id: dict[str, dict], *, claim_limit: int = 12) -> dict:
@@ -82,11 +99,11 @@ def build_relation_network_html(ontology: dict, *, focus: str = "", max_edges: i
         label, symmetric = RELATION_TYPES.get(relation["type"], (relation["type"], False))
         edges.append({
             "from": relation["from"], "to": relation["to"], "label": label,
-            "title": f"{RELATION_STATES.get(relation['state'], relation['state'])} · 출처 {relation['source_count']}개"
-                     + (f" · {relation['notes'][0]}" if relation.get("notes") else ""),
+            "title": wiki_ontology.relation_label(relation) + (f" · {relation['notes'][0]}" if relation.get("notes") else ""),
             "arrows": "" if symmetric else "to", "width": 1 + min(4, relation["source_count"]),
             "color": {"color": STATE_COLORS.get(relation["state"], "#64748b")},
-            "font": {"color": "#cbd5e1", "size": 10, "strokeWidth": 0}, "dashes": relation["state"] == "contested",
+            "font": {"color": "#cbd5e1", "size": 10, "strokeWidth": 0},
+            "dashes": relation["state"] == "contested" or ([2, 6] if relation.get("modality") == "view" else False),
         })
     legend = " ".join(
         f"<span style='display:inline-flex;align-items:center;gap:4px;margin-right:10px;'>"
@@ -132,12 +149,14 @@ def render_section(pages_all: list[dict]) -> None:
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("개체", f"{stats.get('entities', 0):,}")
     c2.metric("관계", f"{stats.get('relations', 0):,}", help="claim 이 직접 진술한 타입 관계만 셉니다.")
-    c3.metric("교차 확인된 관계", f"{states.get('corroborated', 0):,}", help="서로 다른 출처 2개 이상이 같은 관계를 진술")
+    c3.metric("교차 확인된 관계", f"{states.get('corroborated', 0):,}",
+              help="서로 다른 발행자 2곳 이상이 같은 관계를 진술. 한 채널의 글 여러 건은 한 목소리로 셉니다.")
     c4.metric("인사이트", f"{len(model['insights']):,}")
     c5.metric("관계 추출 진행", f"{stats['coverage']:.0%}",
               help=f"claim 이 있는 활성 페이지 {stats.get('pages', 0)}개 중 {stats.get('extracted_pages', 0)}개 추출 완료")
     st.caption(f"마지막 컴파일 {str(model['generated_at'])[:16].replace('T', ' ')} UTC · claim {stats.get('claims', 0):,}건 기준 · "
                "관계와 인사이트는 공개 출처를 모델이 정리한 것이며 원문 검증 전입니다.")
+    st.caption(neutrality_caption(ontology))
 
     tab_insight, tab_entity, tab_graph = st.tabs(["인사이트", "개체·관계", "관계 그래프"])
     with tab_insight:
@@ -162,7 +181,8 @@ def render_section(pages_all: list[dict]) -> None:
         if rows:
             st.dataframe(pd.DataFrame([{
                 "개체": row["name"], "타입": ENTITY_TYPES.get(row["type"], row["type"]), "claim": row["claim_count"],
-                "출처": row["source_count"], "관계": row["relation_count"], "최근": row["last_seen"],
+                "출처": row["source_count"], "발행자": row["publisher_count"] or 0, "관계": row["relation_count"],
+                "최근": row["last_seen"],
                 "인사이트": "있음" if row["insight_id"] else "",
             } for row in rows[:300]]), hide_index=True, width="stretch", height=260)
             picked = f2.selectbox("개체 상세", [row["id"] for row in rows[:300]], key="onto_entity_pick",
@@ -175,8 +195,7 @@ def render_section(pages_all: list[dict]) -> None:
                     st.caption("아직 추출된 관계가 없습니다.")
                 for relation in detail["relations"][:20]:
                     note = f" — {relation['notes'][0]}" if relation.get("notes") else ""
-                    st.markdown(f"- {escape(relation['phrase'])} · {RELATION_STATES.get(relation['state'], relation['state'])}"
-                                f" · 출처 {relation['source_count']}개{escape(note)}")
+                    st.markdown(f"- {escape(relation['phrase'])} · {wiki_ontology.relation_label(relation)}{escape(note)}")
                 if detail["co_mentions"]:
                     st.caption("함께 언급: " + ", ".join(f"{name} {count}회" for name, count in detail["co_mentions"]))
             with right:
@@ -195,4 +214,4 @@ def render_section(pages_all: list[dict]) -> None:
                                  format_func=lambda value: "전체 (출처 많은 관계부터)" if not value
                                  else f"{ontology['entities'][value]['name']} · 관계 {ontology['entities'][value]['relation_count']}개")
             components.html(build_relation_network_html(ontology, focus=focus), height=570, scrolling=False)
-            st.caption("선 색: 회색 단일 출처 · 초록 교차 확인 · 빨강 점선 상충")
+            st.caption("선 색: 회색 단일 발행자 · 초록 복수 발행자 일치 · 빨강 점선 엇갈림 · 성긴 점선은 견해·전망")
