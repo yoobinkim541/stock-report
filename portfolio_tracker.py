@@ -129,56 +129,51 @@ def record_daily(dry_run: bool = False) -> dict:
 #  성과 계산
 # ══════════════════════════════════════════════════════════════════════
 
-def _find_ago(records: list, days: int) -> dict | None:
-    """records에서 오늘로부터 약 days일 전 기록을 찾는다."""
-    target = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
-    # 정확히 없으면 가장 가까운 과거 기록
-    past = [r for r in records if r["date"] <= target]
-    return past[-1] if past else None
+def load_account() -> dict | None:
+    """거래내역으로 다시 만든 계좌 궤적(reports.account_performance). 거래내역이나 시세가 없으면 None."""
+    try:
+        from reports import account_performance, report_pdf_data
+
+        transactions = account_performance.load_transactions()
+        if not transactions:
+            return None
+        symbols = {str(r.get("ticker") or "") for r in transactions} | {report_pdf_data.BENCHMARK}
+        return account_performance.daily_account(transactions, report_pdf_data.fetch_price_history(sorted(symbols)))
+    except Exception as exc:
+        logger.warning(f"계좌 수익률 계산 실패: {type(exc).__name__}: {exc}")
+        return None
 
 
-def calc_performance(records: list) -> dict:
-    """1d / 7d / 30d / 90d / 전체 수익률 계산."""
+def calc_performance(records: list, account: dict | None = None) -> dict:
+    """현재 가치와 1d / 7d / 30d / 90d / 전체 수익률.
+
+    수익률은 account(load_account) 의 시간가중 수익률이다. 히스토리의 총액 비율은 쓰지 않는다 —
+    매수한 만큼 총액이 커져서 수익률이 아니다. account 가 없으면 수익률 칸은 비운다.
+    """
     if not records:
         return {}
+    from reports import account_performance
 
     latest = records[-1]
     now_val = latest["total_usd"]
+    summary = account_performance.trailing_summary(account) if account else {}
 
-    def ret(old: dict | None) -> float | None:
-        if old is None or old["total_usd"] <= 0:
-            return None
-        return (now_val / old["total_usd"] - 1) * 100
-
-    first = records[0]
-    d1  = _find_ago(records, 1)
-    d7  = _find_ago(records, 7)
-    d30 = _find_ago(records, 30)
-    d90 = _find_ago(records, 90)
-
-    # 역대 최고/최저
-    all_vals = [r["total_usd"] for r in records]
-    peak    = max(all_vals)
-    trough  = min(all_vals)
-    peak_date   = records[all_vals.index(peak)]["date"]
-    trough_date = records[all_vals.index(trough)]["date"]
-    drawdown_from_peak = (now_val / peak - 1) * 100
+    def rounded(key: str) -> float | None:
+        return round(summary[key], 2) if summary.get(key) is not None else None
 
     return {
         "current":           round(now_val, 2),
         "current_krw":       latest.get("total_krw", int(now_val * 1380)),
-        "ret_1d":            round(ret(d1),  2) if ret(d1)  is not None else None,
-        "ret_7d":            round(ret(d7),  2) if ret(d7)  is not None else None,
-        "ret_30d":           round(ret(d30), 2) if ret(d30) is not None else None,
-        "ret_90d":           round(ret(d90), 2) if ret(d90) is not None else None,
-        "ret_all":           round(ret(first), 2) if ret(first) is not None else None,
-        "first_date":        first["date"],
-        "first_val":         first["total_usd"],
-        "peak":              round(peak, 2),
-        "peak_date":         peak_date,
-        "trough":            round(trough, 2),
-        "trough_date":       trough_date,
-        "drawdown_from_peak": round(drawdown_from_peak, 2),
+        "ret_1d":            rounded("ret_1d"),
+        "ret_7d":            rounded("ret_7d"),
+        "ret_30d":           rounded("ret_30d"),
+        "ret_90d":           rounded("ret_90d"),
+        "ret_all":           rounded("ret_all"),
+        "first_date":        summary.get("first_date"),
+        "drawdown_from_peak": rounded("drawdown_from_peak"),
+        "peak_date":         summary.get("peak_date"),
+        "net_invested":      rounded("net_invested"),
+        "income":            rounded("income"),
         "n_days":            len(records),
     }
 
@@ -263,7 +258,7 @@ def build_performance_report(perf: dict, latest: dict,
     lines = [
         # 헤드라인 — 전체 수익률 + 고점대비(MDD) 먼저 (모바일 첫 화면)
         fmt.headline(f"📈 성과 {_B(fmt.spct(perf.get('ret_all')))}(전체)",
-                     f"고점 {fmt.pct(perf.get('drawdown_from_peak', 0))}",
+                     f"고점 {fmt.pct(perf['drawdown_from_peak'])}" if perf["drawdown_from_peak"] is not None else "",
                      f"{phase_emoji} {phase_label}"),
     ]
     sl = fmt.spark(value_series) if value_series else ""
@@ -272,18 +267,23 @@ def build_performance_report(perf: dict, latest: dict,
     lines += [
         fmt.sep(),
         f"현재가치 {_B(fmt.money(perf['current'], digits=2))} ({fmt.money(perf['current_krw'], '₩', abbrev=True)})",
-        fmt.sep("수익률"),
+        fmt.sep("수익률 (입출금 제외)"),
         f"1일   {_ret_str(perf['ret_1d'])}",
         f"7일   {_ret_str(perf['ret_7d'])}",
         f"30일  {_ret_str(perf['ret_30d'])}",
         f"90일  {_ret_str(perf['ret_90d'])}",
-        f"전체  {_ret_str(perf['ret_all'])}  ({perf['first_date']} 이후)",
+        f"전체  {_ret_str(perf['ret_all'])}" + (f"  ({perf['first_date']} 이후)" if perf["first_date"] else ""),
         fmt.sep("기록"),
-        f"역대 최고 {fmt.money(perf['peak'], digits=2)} ({perf['peak_date']})",
-        f"역대 최저 {fmt.money(perf['trough'], digits=2)} ({perf['trough_date']})",
-        f"고점 대비 {fmt.pct(perf['drawdown_from_peak'], 2)}",
-        f"추적 일수 {perf['n_days']}일",
     ]
+    if perf["ret_all"] is None:
+        lines.append("거래내역이나 시세가 없어 수익률을 계산하지 못했습니다")
+    else:
+        lines += [
+            f"누적 순투입 {fmt.money(perf['net_invested'], digits=2)} (매수 − 매도)",
+            f"누적 배당 {fmt.money(perf['income'], digits=2)} (원천징수 후 추정)",
+            f"고점 대비 {fmt.pct(perf['drawdown_from_peak'], 2)} (수익률 기준, 고점 {perf['peak_date']})",
+        ]
+    lines.append(f"추적 일수 {perf['n_days']}일")
 
     # 배당 요약
     div_sum = get_dividend_summary()
@@ -400,7 +400,7 @@ def main():
 
     # 성과 계산
     records = load_history()
-    perf    = calc_performance(records)
+    perf    = calc_performance(records, load_account())
 
     report = build_performance_report(perf, latest)
     print(report)

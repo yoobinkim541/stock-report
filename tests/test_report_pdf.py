@@ -77,7 +77,8 @@ MARKET_MD = """# 시장 리포트
 def _frame(end: str, sessions: int = 160, start_price: float = 100.0) -> pd.DataFrame:
     index = pd.bdate_range(end=end, periods=sessions)
     closes = [start_price + i * 0.5 for i in range(sessions)]
-    return pd.DataFrame({"Close": closes, "Volume": [1_000_000 + i for i in range(sessions)]}, index=index)
+    return pd.DataFrame({"Close": closes, "Volume": [1_000_000 + i for i in range(sessions)], "Raw": closes,
+                         "Dividends": 0.0, "Splits": 0.0}, index=index)
 
 
 def _data() -> dict:
@@ -173,8 +174,6 @@ def test_model_orders_holdings_by_weight_and_separates_funds():
     assert stock["triggers"] == ["실적 가이던스"]          # 리스크와 같은 문장은 되풀이하지 않는다
     assert fund["score"] is None and fund["grade"] == "ETF"
     assert fund["reasons"] == [] and fund["risks"] == []   # 'ETF/ETN — …' 자리 채움 문구 제거
-    assert fund["fund_compare"] == {"peers": ["SPY", "QQQ"], "rows": [{"label": "1M", "ret": -12.2,
-                                                                      "diffs": [-10.3, -6.7]}]}
     assert model["portfolio"]["value_usd"] == 1000.0
     assert model["portfolio"]["pnl_pct"] == pytest.approx((1000 / 920 - 1) * 100)
     assert model["portfolio"]["weighted_d1"] == pytest.approx(0.6 * 0.4 + 0.4 * -0.7)
@@ -203,7 +202,12 @@ def test_html_renders_without_prices_markdown_or_history():
     assert [(g["title"], [r["label"] for r in g["rows"]]) for g in model["market"]["groups"]] == [
         ("대표 ETF", ["S&P 500 (SPY)", "나스닥 100 (QQQ)"])]
     assert model["market"]["movers"] == {"up": [], "down": []}
-    assert model["portfolio"]["basket"]["rows"] == []
+    assert model["portfolio"]["performance"]["rows"] == []
+    assert model["portfolio"]["account"] is None
+    # 가격 이력이 없으면 ETF 비교는 리포트 JSON 의 달력일 값을 쓰고, 표 머리에 그 기준을 적는다.
+    assert model["portfolio"]["holdings"][1]["fund_compare"] == {
+        "peers": ["SPY", "QQQ"], "rows": [{"label": "1M", "ret": -12.2, "diffs": [-10.3, -6.7]}], "basis": "calendar"}
+    assert "달력일 기준" in html
     assert "가격 이력 없음" in html
     assert html.count('<article class="stock">') == 2
     assert "소량 진입 후 관찰" in html
@@ -213,23 +217,48 @@ def test_charts_return_none_without_data():
     assert report_pdf_charts.bar_chart([]) is None
     assert report_pdf_charts.bar_chart([("MSFT", None)]) is None
     assert report_pdf_charts.donut_chart([("MSFT", 0.0)]) is None
-    assert report_pdf_charts.equity_chart([{"date": "2026-11-12", "total_usd": 1000.0}]) is None
+    assert report_pdf_charts.equity_chart(pd.bdate_range(end=REPORT_DATE, periods=2), [1.0, 2.0], [1.0, 1.0]) is None
     assert report_pdf_charts.histogram_chart([]) is None
     assert report_pdf_charts.price_chart(_frame(REPORT_DATE, sessions=1)) is None
     assert report_pdf_charts.line_chart(_frame(REPORT_DATE, sessions=1)) is None
 
 
-def test_basket_series_starts_at_100_and_follows_weights():
-    prices = {"A": _frame(REPORT_DATE, start_price=100.0), "B": _frame(REPORT_DATE, start_price=50.0)}
-    index, basket = report_pdf_data.basket_series(prices, {"A": 75.0, "B": 25.0, "MISSING": 10.0},
-                                                  sessions=10, calendar="A")
+def test_fund_comparison_uses_the_same_windows_as_the_return_table():
+    # 카드의 수익률 표와 비교 ETF 표가 같은 기간에 다른 숫자를 내지 않는다.
+    prices = {s: _frame(REPORT_DATE) for s in ("SPY", "MSFT")}
+    prices["QLD"] = _frame(REPORT_DATE, start_price=50.0)
+    prices["QQQ"] = _frame(REPORT_DATE, start_price=200.0)
+    fund = _model(prices=prices)["portfolio"]["holdings"][1]
+    compare = fund["fund_compare"]
+    absolute = {r["label"]: r["abs"] for r in fund["returns"]}
 
-    a = prices["A"]["Close"].iloc[-11:]
-    b = prices["B"]["Close"].iloc[-11:]
-    expected = 100 * (0.75 * a.iloc[-1] / a.iloc[0] + 0.25 * b.iloc[-1] / b.iloc[0])
-    assert len(index) == len(basket) == 11
-    assert basket[0] == pytest.approx(100.0)
-    assert basket[-1] == pytest.approx(expected)
+    assert compare["basis"] == "sessions" and compare["peers"] == ["SPY", "QQQ"]
+    assert [r["label"] for r in compare["rows"]] == ["1M", "3M", "6M"]       # 12M 은 이력이 모자라 뺀다
+    assert [r["ret"] for r in compare["rows"]] == [absolute["1M"], absolute["3M"], absolute["6M"]]
+    spy = prices["SPY"]["Close"].iloc[:-1]
+    assert compare["rows"][0]["diffs"][0] == pytest.approx(absolute["1M"] - (spy.iloc[-1] / spy.iloc[-21] - 1) * 100)
+    assert compare["rows"][0]["diffs"][1] > compare["rows"][0]["diffs"][0] > 0   # 출발가가 높을수록 같은 폭이 덜 가파르다
+
+
+def test_account_rows_compare_time_weighted_return_with_benchmarks():
+    prices = {s: _frame(REPORT_DATE) for s in ("SPY", "QQQ", "QLD")}
+    prices["MSFT"] = _frame(REPORT_DATE, start_price=50.0)
+    sessions = [ts.strftime("%Y%m%d") for ts in prices["SPY"].index]
+    ledger = [{"ticker": "MSFT", "side": "buy", "qty": 2.0, "price": 50.0, "amount": 100.0, "date": sessions[2]},
+              {"ticker": "MSFT", "side": "buy", "qty": 4.0, "price": 90.0, "amount": 360.0, "date": sessions[82]}]
+    model = _model(prices=prices, transactions=ledger)
+    performance = model["portfolio"]["performance"]
+
+    msft = prices["MSFT"]["Close"].iloc[:-1]
+    assert performance["benchmarks"] == ["SPY", "QQQ"]
+    assert [r["label"] for r in performance["rows"]] == ["1M", "3M", "6M"]
+    assert performance["rows"][0]["account"] == pytest.approx((msft.iloc[-1] / msft.iloc[-21] - 1) * 100)
+    assert performance["rows"][0]["vs"][0] > 0                  # MSFT 만 든 계좌라 SPY 를 앞선다
+    assert performance["net_invested"] == pytest.approx(460.0)
+    # 총액은 100 → 774 로 불었지만 수익률은 주가만 따른다(매수일 하루는 넣은 돈만큼 분모가 커져 조금 낮다).
+    assert performance["total"] == pytest.approx((msft.iloc[-1] / 50.0 - 1) * 100, rel=0.01)
+    assert model["portfolio"]["account"]["value"][-1] == pytest.approx(6 * msft.iloc[-1])
+    assert "계좌 수익률" in report_pdf.render_html(model)
 
 
 def test_yield_rows_move_in_basis_points_and_prices_in_percent():
@@ -258,11 +287,6 @@ def test_holding_returns_are_absolute_and_relative_to_spy():
     assert by_label["1M"]["abs"] == pytest.approx(absolute)
     assert by_label["1M"]["rel"] == pytest.approx(absolute - (spy.iloc[-1] / spy.iloc[-21] - 1) * 100)
     assert by_label["12M"] == {"label": "12M", "abs": None, "rel": None}
-
-    basket = model["portfolio"]["basket"]
-    assert basket["benchmarks"] == ["SPY", "QQQ"]
-    assert [r["label"] for r in basket["rows"]] == ["1M", "3M", "6M"]
-    assert basket["rows"][0]["vs"][0] > 0                       # MSFT 비중만큼 SPY 를 앞선다
 
 
 def test_movers_rank_scan_universe_by_one_day_change():
@@ -327,3 +351,39 @@ def test_build_pdf_prints_korean_text_on_a4(tmp_path):
     assert "하락 심화: 계획된 분할만" in text
     assert "MSFT" in text and "종목별 점검" in text
     assert "$179.00" in text      # 숫자도 복사·검색된다(글리프 대체 기능을 켜면 사설 영역 문자로 뽑힌다)
+
+
+@pytest.mark.skipif(report_pdf.find_browser() is None, reason="Chromium 계열 브라우저 없음")
+def test_cover_stays_on_one_page_when_every_block_is_long(tmp_path, monkeypatch):
+    import json
+
+    from pypdf import PdfReader
+
+    (tmp_path / f"investment-data-{REPORT_DATE}.json").write_text(json.dumps(_data()), encoding="utf-8")
+    (tmp_path / f"investment-report-{REPORT_DATE}.md").write_text(INVESTMENT_MD, encoding="utf-8")
+    prices = {s: _frame(REPORT_DATE) for s in ("SPY", "QQQ", "MSFT", "QLD")}
+    sessions = [ts.strftime("%Y%m%d") for ts in prices["SPY"].index]
+    ledger = [{"ticker": "MSFT", "side": "buy", "qty": 2.0, "price": 100.0, "amount": 200.0, "date": sessions[2]}]
+    build_model = report_pdf_data.build_model
+    long = "표지에 들어오는 문장이 아주 길어진 경우 " * 30
+
+    def stretched(**kwargs):
+        model = build_model(**kwargs)
+        model.update(headline=long, conclusion=[long] * 5, glance=[long] * 5, risk_flags=[long] * 6,
+                     priorities=[model["priorities"][0]] + [["비중점검", "Long Company Name (TICK)", "분할매수", long]] * 9)
+        model["stance"].update(note=long, phase=long, todo=long)
+        return model
+
+    def pages(name: str) -> list[str]:
+        out = report_pdf.build_pdf(REPORT_DATE, tmp_path, tmp_path / name, fetch=lambda symbols: prices,
+                                   history_loader=list, transactions_loader=lambda: ledger)
+        return [page.extract_text() for page in PdfReader(io.BytesIO(out.read_bytes())).pages]
+
+    normal = pages("normal.pdf")
+    monkeypatch.setattr(report_pdf_data, "build_model", stretched)
+    crowded = pages("crowded.pdf")
+
+    assert len(crowded) == len(normal)
+    assert "Portfolio Data" in crowded[0] and "Portfolio Data" not in crowded[1]
+    assert crowded[1].split("\n")[0] == normal[1].split("\n")[0]
+
