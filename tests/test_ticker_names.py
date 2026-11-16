@@ -345,3 +345,10 @@ def test_mentions_in_alphanumeric_kr_and_limits():
     assert ticker_names.mentions_in("삼성전자 수주, NVDA 동반") == ["005930.KS", "NVDA"]
     assert ticker_names.mentions_in("") == []
     assert ticker_names.mentions_in("아무 관련 없는 문장입니다") == []
+
+
+def test_mentions_in_reads_broker_short_names_of_korean_stocks():
+    assert ticker_names.mentions_in("삼전 -4.5%, 하닉 -7.9%") == ["005930.KS", "000660.KS"]
+    assert ticker_names.mentions_in("LGES -1.9%, 네이버는 보합") == ["373220.KS", "035420.KS"]
+    assert ticker_names.mentions_in("SK하이닉스와 하이닉스") == ["000660.KS"]
+    assert ticker_names.search_label("005930.KS") == "삼성전자 (005930.KS)"  # 줄임말이 표시명을 밀어내지 않는다
