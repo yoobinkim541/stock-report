@@ -8,9 +8,13 @@ must correspond to the cited source text. Lexical overlap is required only when
 the claim and its quote are in the same language; a translation is checked by
 the language-independent signals alone. Anything that passes is still unverified
 model synthesis and is labelled as such in LLM context (``wiki.build_context_section``).
+
+The rules apply per claim: a claim that fails is dropped and the claims that pass
+are kept (``usable_parts``). A source is rejected only when no claim survives.
 """
 from __future__ import annotations
 
+from collections import Counter
 from decimal import Decimal
 from functools import lru_cache
 import hashlib
@@ -490,12 +494,90 @@ def _text(value: object) -> str:
     return value
 
 
+_PAYLOAD_FIELDS = frozenset({"action", "kind", "title", "body", "claims", "terms", "limitations", "skip_reason"})
+
+
+def _parsed_claim(claim: object, source: dict) -> tuple[str, str, str, dict | None]:
+    """One raw claim → (text, as_of, scope, anchor with server-checked offsets)."""
+    if not isinstance(claim, dict) or set(claim) - {"text", "as_of", "scope", "anchor", "competing_claim_ids"}:
+        raise ValueError("claim_fields_invalid")
+    text, as_of, scope = (_text(claim.get(key)) for key in ("text", "as_of", "scope"))
+    anchor = claim.get("anchor")
+    if anchor is not None:
+        if not isinstance(anchor, dict) or set(anchor) not in ({"start", "end", "quote"}, {"quote"}):
+            raise ValueError("anchor_invalid")
+        quote = anchor["quote"]
+        if not isinstance(quote, str) or not quote:
+            raise ValueError("anchor_invalid")
+        if set(anchor) == {"quote"}:
+            # Server-resolved offsets: first exact occurrence, never a fuzzy match.
+            found = source["body"].find(quote)
+            anchor = {"start": found, "end": found + len(quote), "quote": quote}
+        start, end = anchor["start"], anchor["end"]
+        if (type(start) is not int or type(end) is not int or not 0 <= start < end <= len(source["body"])
+                or source["body"][start:end] != quote):
+            raise ValueError("anchor_invalid")
+        anchor = {"start": start, "end": end, "quote": quote}
+    return text, as_of, scope, anchor
+
+
+def _claim_failure(claim: object, source: dict) -> str | None:
+    """Why one fresh claim cannot be used, or None. Same checks ``_require_grounding`` applies."""
+    try:
+        text, _, _, anchor = _parsed_claim(claim, source)
+    except ValueError as error:
+        return compilation_failure_code(error)
+    if anchor is None:
+        return "anchor_missing"
+    return claim_grounding_violation(text, anchor["quote"], source["body"])
+
+
+def usable_parts(payload: dict, source: dict) -> tuple[dict, list[str]]:
+    """Keep the parts of a fresh compilation the source supports → (payload to validate, dropped claim codes).
+
+    One bad claim used to reject the whole source, which shut out long, figure-dense sources (broker notes
+    passed 3 of 14 against 412 of 673 for short community posts). Each claim stands on its own exact quote,
+    so the ones that fail are dropped and the rest are kept. Nothing is repaired or reworded:
+    - no claim survives → the source is rejected with the first claim's failure code, as before;
+    - a claim was dropped, or the model's prose fails the prose check → the body is rebuilt from the kept
+      claims, because the prose may still narrate what was dropped;
+    - an unsupported title falls back to the source's own title;
+    - dropped claims are counted in ``limitations`` so the page says it is partial.
+    """
+    # Whole-payload faults (unknown fields, wrong action) stay whole-payload rejections in validate_compilation.
+    if not isinstance(payload, dict) or set(payload) - _PAYLOAD_FIELDS or payload.get("action") != "create":
+        return payload, []
+    claims = payload.get("claims")
+    if not isinstance(claims, list) or not claims:
+        return payload, []
+    failures = [_claim_failure(claim, source) for claim in claims]
+    kept = [claim for claim, failure in zip(claims, failures) if failure is None]
+    dropped = [failure for failure in failures if failure]
+    if not kept:
+        raise ValueError(dropped[0])
+    if dropped:  # claim ids are positional, so references made before the drop no longer point anywhere
+        kept = [{**claim, "competing_claim_ids": []} for claim in kept]
+    usable = {**payload, "claims": kept}
+    evidence = "\n".join(str(source.get(key) or "") for key in ("body", "title", "published_at"))
+    body, title = payload.get("body"), payload.get("title")
+    if isinstance(body, str) and (dropped or prose_grounding_violation(body, evidence)):
+        usable["body"] = "\n".join(f"- {_text(claim.get('text'))} [S1]" for claim in kept)
+    source_title = " ".join(str(source.get("title") or "").split())[:80]
+    if isinstance(title, str) and source_title and grounding_violation(title, evidence):
+        usable["title"] = source_title
+    if dropped and isinstance(payload.get("limitations", []), list):
+        counts = ", ".join(f"{code} {count}" for code, count in sorted(Counter(dropped).items()))
+        note = (f"{len(dropped)} of {len(claims)} extracted claims failed the source-grounding checks and were "
+                f"left out ({counts}); this note covers only the claims that passed.")
+        usable["limitations"] = [*payload.get("limitations", []), note]
+    return usable, dropped
+
+
 def validate_compilation(payload: dict, source: SourceRevision) -> CompiledSource:
     source = dict(source)
     if not source.get("body") and source.get("text_ref"):
         source["body"] = raw_archive.read_raw_text(source["text_ref"]) or ""
-    allowed = {"action", "kind", "title", "body", "claims", "terms", "limitations", "skip_reason"}
-    if not isinstance(payload, dict) or set(payload) - allowed:
+    if not isinstance(payload, dict) or set(payload) - _PAYLOAD_FIELDS:
         raise ValueError("compilation_fields_invalid")
     action = payload.get("action")
     if action == "skip":
@@ -519,25 +601,7 @@ def validate_compilation(payload: dict, source: SourceRevision) -> CompiledSourc
            for index in range(len(raw_claims))]
     claims = []
     for index, claim in enumerate(raw_claims):
-        if not isinstance(claim, dict) or set(claim) - {"text", "as_of", "scope", "anchor", "competing_claim_ids"}:
-            raise ValueError("claim_fields_invalid")
-        text, as_of, scope = (_text(claim.get(key)) for key in ("text", "as_of", "scope"))
-        anchor = claim.get("anchor")
-        if anchor is not None:
-            if not isinstance(anchor, dict) or set(anchor) not in ({"start", "end", "quote"}, {"quote"}):
-                raise ValueError("anchor_invalid")
-            quote = anchor["quote"]
-            if not isinstance(quote, str) or not quote:
-                raise ValueError("anchor_invalid")
-            if set(anchor) == {"quote"}:
-                # Server-resolved offsets: first exact occurrence, never a fuzzy match.
-                found = source["body"].find(quote)
-                anchor = {"start": found, "end": found + len(quote), "quote": quote}
-            start, end = anchor["start"], anchor["end"]
-            if (type(start) is not int or type(end) is not int or not 0 <= start < end <= len(source["body"])
-                    or source["body"][start:end] != quote):
-                raise ValueError("anchor_invalid")
-            anchor = {"start": start, "end": end, "quote": quote}
+        text, as_of, scope, anchor = _parsed_claim(claim, source)
         competing = _strings(claim.get("competing_claim_ids", []))
         if any(other not in ids or other == ids[index] for other in competing):
             raise ValueError("competing_claim_invalid")
@@ -602,7 +666,7 @@ def compile_source(source: SourceRevision, *, llm_fn: Callable[[str], str | None
         "and title may use only numbers and certainty or multiplier words that the source text or its "
         "metadata contains; every body sentence stays on the source's subject matter and never reverses "
         "a direction it reports; keep the source's uncertainty instead of turning it into a guarantee. "
-        "Violations are rejected. "
+        "A claim that breaks these rules is dropped; a source left with no valid claim is rejected. "
         "Keep competing_claim_ids=[]; claim IDs do not exist until the server assigns them. "
         "terms and limitations must each be JSON arrays of nonempty strings, not objects, "
         "comma-separated strings, arrays of objects, or null; use [] when none. "
@@ -630,6 +694,7 @@ def compile_source(source: SourceRevision, *, llm_fn: Callable[[str], str | None
     payload = wiki_distillation._parse_distillation_plan(response)
     if payload is None:
         raise ValueError("compilation_response_invalid")
+    payload, _ = usable_parts(payload, source)
     compiled = validate_compilation(payload, source)
     _require_grounding(payload, compiled, source)
     return compiled

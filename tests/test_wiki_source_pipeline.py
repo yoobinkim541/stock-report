@@ -277,32 +277,41 @@ def test_invented_claim_is_rejected_before_store_and_search(pipeline_env, claim,
 
 
 # B-fix2-02: a reversed claim or an unrelated body never reaches stored, searchable or context knowledge.
-@pytest.mark.parametrize("change,code", [
-    ({"claim": "Capacity fell."}, "claim_direction_unsupported"),
-    ({"body": "The regulator approved the acquisition and all factories closed [S1]."}, "body_sentence_unrelated"),
-])
-def test_reversed_claim_or_unrelated_body_never_reaches_search_or_context(pipeline_env, change, code):
+def test_reversed_claim_never_reaches_search_or_context(pipeline_env):
     original = pipeline_env["llm"]
     def llm(prompt):
         answer = original(prompt)
         if prompt.startswith("Compile"):
             payload = json.loads(answer)
-            if "claim" in change:
-                payload["claims"][0].update(text=change["claim"], anchor={"quote": "Capacity increased."})
-            if "body" in change:
-                payload["body"] = change["body"]
+            payload["claims"][0].update(text="Capacity fell.", anchor={"quote": "Capacity increased."})
             return json.dumps(payload)
         return answer
     result = module().run(events=[{}], dry_run=False, llm_fn=llm, now=NOW)
     assert result["compile_failed"] == 1 and result["data_committed"] == 0
-    assert result["reason_counts"][code] == 1
+    assert result["reason_counts"]["claim_direction_unsupported"] == 1
     assert wiki.get_page(hashlib.sha256(("compiled-source:" + REV).encode()).hexdigest()) is None
-    pages = wiki.list_pages(query="capacity regulator acquisition", status="all", surface="all")
-    assert not any("regulator" in (page.get("body") or "") or "Capacity fell" in (page.get("body") or "")
-                   for page in pages)
-    context = wiki.build_context_section(query="capacity regulator acquisition", surface="market")
-    assert "regulator" not in context and "Capacity fell" not in context
+    pages = wiki.list_pages(query="capacity fell", status="all", surface="all")
+    assert not any("Capacity fell" in (page.get("body") or "") for page in pages)
+    assert "Capacity fell" not in wiki.build_context_section(query="capacity fell", surface="market")
     assert pipeline_env["calls"] == ["compile"]
+
+
+# 본문만 출처와 어긋나면 출처를 버리지 않고, 통과한 claim 으로 본문을 다시 쓴다. 어긋난 문장은 어디에도 남지 않는다.
+def test_unrelated_body_is_replaced_and_never_reaches_search_or_context(pipeline_env):
+    original = pipeline_env["llm"]
+    def llm(prompt):
+        answer = original(prompt)
+        if prompt.startswith("Compile"):
+            return json.dumps({**json.loads(answer),
+                               "body": "The regulator approved the acquisition and all factories closed [S1]."})
+        return answer
+    result = module().run(events=[{}], dry_run=False, llm_fn=llm, now=NOW)
+    assert result["compile_failed"] == 0 and result["data_committed"] == 1
+    page = wiki.get_page(hashlib.sha256(("compiled-source:" + REV).encode()).hexdigest())
+    assert page is not None and "regulator" not in page["body"]
+    pages = wiki.list_pages(query="capacity regulator acquisition", status="all", surface="all")
+    assert not any("regulator" in (item.get("body") or "") for item in pages)
+    assert "regulator" not in wiki.build_context_section(query="capacity regulator acquisition", surface="market")
 
 
 # B-fix2-01: a faithful Korean claim for an English source is stored, and context labels it unverified.

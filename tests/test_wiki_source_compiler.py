@@ -226,19 +226,59 @@ def test_quote_only_anchor_is_located_server_side_with_exact_offsets():
     ("Revenue is guaranteed to triple in 2027.", {"start": 0, "end": 8, "quote": "Capacity"}, {},
      "anchor_quote_too_short"),
     ("Capacity at Nvidia rose.", {"quote": "Capacity rose."}, {}, "claim_name_unsupported"),
-    ("Capacity rose.", {"quote": "Capacity rose."}, {"body": "Capacity rose 40% [S1]."},
-     "body_number_unsupported"),
-    ("Capacity rose.", {"quote": "Capacity rose."}, {"body": "Demand is guaranteed to triple [S1]."},
-     "body_certainty_unsupported"),
-    ("Capacity rose.", {"quote": "Capacity rose."}, {"title": "Guaranteed demand"},
-     "body_certainty_unsupported"),
 ])
-def test_ungrounded_claims_and_prose_are_rejected(claim, anchor, changes, code):
+def test_source_whose_only_claim_is_ungrounded_is_rejected(claim, anchor, changes, code):
     plan = {**output(), **changes}
     plan["claims"][0].update(text=claim, anchor=anchor)
     with pytest.raises(ValueError, match=code):
         module().compile_source(source(), llm_fn=lambda _: json.dumps(plan))
     assert module().compilation_failure_code(ValueError(code)) == code
+
+
+# 한 claim 이 걸려도 통과한 claim 은 쓴다. 걸린 claim 의 문장은 본문에도 남지 않는다.
+def test_failing_claims_are_dropped_and_the_grounded_ones_are_kept():
+    plan = {**output(), "body": "Capacity rose 300% and demand is guaranteed [S1]."}
+    plan["claims"] = [
+        {"text": "Capacity rose 300%.", "as_of": "2026-10-09", "scope": "capacity",
+         "anchor": {"quote": "Capacity rose."}, "competing_claim_ids": []},
+        {"text": "Demand is uncertain.", "as_of": "2026-10-09", "scope": "demand",
+         "anchor": {"quote": "Demand is uncertain."}, "competing_claim_ids": []},
+        {"text": "Demand is guaranteed.", "as_of": "2026-10-09", "scope": "demand",
+         "anchor": {"quote": "Demand is not in the source."}, "competing_claim_ids": []},
+    ]
+    compiled = module().compile_source(source(), llm_fn=lambda _: json.dumps(plan))
+
+    assert [claim["text"] for claim in compiled["claims"]] == ["Demand is uncertain."]
+    # claim 식별자는 남은 claim 기준으로 다시 매겨져 저장본을 그대로 재검증할 수 있다.
+    assert compiled["claims"][0]["claim_id"] == hashlib.sha256(f"{REV}:0".encode()).hexdigest()
+    assert compiled["body"] == "- Demand is uncertain. [S1](https://example.org/source)"
+    assert "300" not in json.dumps(compiled) and "guaranteed" not in compiled["body"]
+    assert compiled["limitations"][-1].startswith("2 of 3 extracted claims failed the source-grounding checks")
+    assert "anchor_invalid 1, claim_number_unsupported 1" in compiled["limitations"][-1]
+    replay = {key: compiled[key] for key in ("body", "terms", "limitations", "title")}
+    replay.update(action="create", claims=[{key: claim[key] for key in
+                  ("text", "as_of", "scope", "anchor", "competing_claim_ids")} for claim in compiled["claims"]])
+    assert module().validate_compilation(replay, source()) == compiled
+
+
+@pytest.mark.parametrize("changes,gone", [
+    ({"body": "Capacity rose 40% [S1]."}, "40%"),
+    ({"body": "Demand is guaranteed to triple [S1]."}, "guaranteed"),
+    ({"body": "The regulator approved the acquisition and all factories closed [S1]."}, "regulator"),
+    ({"body": "Capacity fell, and demand is uncertain [S1]."}, "fell"),
+])
+def test_unsupported_prose_is_replaced_by_the_grounded_claims(changes, gone):
+    compiled = module().compile_source(source(), llm_fn=lambda _: json.dumps({**output(), **changes}))
+    assert compiled["body"] == "- Capacity rose. [S1](https://example.org/source)" and gone not in compiled["body"]
+    assert [claim["text"] for claim in compiled["claims"]] == ["Capacity rose."]
+    assert compiled["limitations"] == ["Not proof of realized orders"]  # claim 은 버려지지 않았다
+
+
+def test_unsupported_title_falls_back_to_the_source_title():
+    plan = {**output(), "title": "Guaranteed demand"}
+    assert module().compile_source(source(), llm_fn=lambda _: json.dumps(plan))["title"] == "Capacity"
+    with pytest.raises(ValueError, match="body_certainty_unsupported"):  # 출처 제목이 없으면 대신 쓸 것이 없다
+        module().compile_source({**source(), "title": ""}, llm_fn=lambda _: json.dumps(plan))
 
 
 def test_source_numbers_negated_certainty_and_korean_claims_remain_valid():
@@ -339,16 +379,14 @@ def test_reversed_or_invented_claims_are_rejected_in_any_language(quote, claim, 
     assert module().compilation_failure_code(ValueError(code)) == code
 
 
-@pytest.mark.parametrize("body,code", [
-    ("The regulator approved the acquisition and all factories closed [S1].", "body_sentence_unrelated"),
-    ("Capacity rose [S1]. The regulator approved the acquisition and all factories closed.",
-     "body_sentence_unrelated"),
-    ("Capacity fell, and demand is uncertain [S1].", "body_direction_unsupported"),
+@pytest.mark.parametrize("body", [
+    "The regulator approved the acquisition and all factories closed [S1].",
+    "Capacity rose [S1]. The regulator approved the acquisition and all factories closed.",
+    "Capacity fell, and demand is uncertain [S1].",
 ])
-def test_unrelated_or_reversed_body_is_rejected(body, code):
-    with pytest.raises(ValueError, match=code):
-        compile_claim("Capacity rose.", "Capacity rose.", body=body, source_body=source()["body"])
-    assert module().compilation_failure_code(ValueError(code)) == code
+def test_unrelated_or_reversed_body_never_reaches_the_note(body):
+    compiled = compile_claim("Capacity rose.", "Capacity rose.", body=body, source_body=source()["body"])
+    assert compiled["body"] == "- Capacity rose. [S1](https://example.org/source)"
 
 
 def test_translated_body_is_not_rejected_for_lacking_english_words():

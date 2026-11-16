@@ -66,6 +66,17 @@ contract and existing raw retention remain unchanged.
   `- 본문(미검증 모델 합성): …` plus a `주의` line (`wiki.MODEL_SYNTHESIS_WARNING`):
   the deterministic grounding rules cannot verify meaning, so this text must not
   be cited as established fact.
+- The grounding rules gate fresh model output per claim
+  (`wiki_source_compiler.usable_parts`). A claim that fails is dropped and the
+  claims that pass are kept; the source is rejected only when no claim survives,
+  with the first claim's failure code. When a claim was dropped, or the model's
+  prose fails the prose check, the note body is rebuilt as a list of the kept
+  claims, so text about a dropped claim cannot stay in the page. An unsupported
+  title falls back to the source's own title. The dropped count and codes are
+  appended to `limitations` ("N of M extracted claims failed …"). Kept claims
+  are renumbered, so a stored note replays through `validate_compilation`
+  unchanged. Claims with figures fail more often than qualitative ones, so a
+  partial note under-represents the source's numbers.
 - The autonomous curator spends `WIKI_AUTONOMOUS_MAX_JUDGMENTS` (default 12)
   per run before each LLM call, including failures and skips, and remembers
   unapplied outcomes in `<wiki artifacts>/autonomous-curator-state.json`
