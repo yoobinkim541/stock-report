@@ -126,8 +126,26 @@ def test_total_budget_capped_and_each_stage_uses_remaining_time(monkeypatch, pro
 def test_callback_forwards_budget(monkeypatch):
     seen = []
     monkeypatch.setattr(llm_cli, "structured_chat", lambda prompt, **kwargs: seen.append((prompt, kwargs)) or '{"ok":true}')
-    assert wiki_source_compiler.structured_llm_call("source", max_timeout=27) == '{"ok":true}'
-    assert seen == [("source", {"max_timeout": 27})]
+    trace = []
+    assert wiki_source_compiler.structured_llm_call("source", max_timeout=27, provider_timeout=120,
+                                                    trace=trace) == '{"ok":true}'
+    assert seen == [("source", {"max_timeout": 27, "provider_timeout": 120, "trace": trace})]
+
+
+def test_trace_tells_a_silent_provider_from_a_broken_answer_without_keeping_text(providers):
+    _, results = providers
+    results.update({"codex": None, "openrouter": RuntimeError("PRIVATE key"), "hermes": 'prose {"claims":[]}'})
+    trace = []
+    assert llm_cli.structured_chat("PRIVATE source text", trace=trace) is None
+    assert [(row["provider"], row["outcome"]) for row in trace] == [
+        ("codex", "no_text"), ("openrouter", "error"), ("hermes", "not_json")]
+    assert all(set(row) == {"provider", "seconds", "limit", "outcome"} and 0 < row["limit"] <= 60 for row in trace)
+    assert "PRIVATE" not in json.dumps(trace)
+
+    results["hermes"] = '{"claims":[]}'
+    trace = []
+    assert llm_cli.structured_chat("source", trace=trace) == '{"claims":[]}'
+    assert trace[-1]["outcome"] == "answered"
 
 
 @pytest.mark.parametrize("configured", ["codxe", "codex,codxe", "hermes, openai", "codex;hermes"])

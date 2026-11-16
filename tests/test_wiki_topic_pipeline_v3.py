@@ -133,7 +133,7 @@ def test_actual_process_snapshot_provider_receives_only_checked_prompt(worker, m
     from reports import wiki_topic_context
     monkeypatch.setattr(wiki_topic_context, "_note", lambda *a, **kw: pytest.fail("snapshot parsed as legacy"))
     calls = []
-    def engine(prompt):
+    def engine(prompt, **options):
         calls.append(prompt)
         envelope = json.loads(prompt.rsplit("\n", 1)[1])
         assert "notes" in envelope["read_only_source_context"]
@@ -198,7 +198,7 @@ def test_process_persists_explicit_v3_stage_for_resume(worker, monkeypatch):
     data, journal = worker
     notes = [n["note_id"] for n in data["context"]["notes"]]
     monkeypatch.setattr(pipeline, "run", lambda **kw: {"data_committed": 0})
-    monkeypatch.setattr(rollout, "structured_llm_call", lambda prompt: json.dumps(payload(data)))
+    monkeypatch.setattr(rollout, "structured_llm_call", lambda prompt, **options: json.dumps(payload(data)))
     rollout.process(data["source"], [], journal, {"id": "stage", "revision_id": data["source"]["revision_id"]},
                     context_mode="source_note_snapshot", note_ids=notes)
     stage = json.loads(rollout._topic_stage_path(data["source"], journal).read_text())
@@ -289,7 +289,8 @@ def test_rollout_shared_reservation_is_spent_once_and_history_spends_none(worker
     monkeypatch.delenv("WIKI_SOURCE_DAILY_LIMIT", raising=False)
     monkeypatch.setattr(pipeline, "run", lambda **kw: {"data_committed": 0})
     calls = []
-    monkeypatch.setattr(rollout, "structured_llm_call", lambda prompt: calls.append(prompt) or json.dumps(payload(data)))
+    monkeypatch.setattr(rollout, "structured_llm_call",
+                        lambda prompt, **options: calls.append(prompt) or json.dumps(payload(data)))
     budget = journal.root / "automatic-budget.json"
     assert rollout.quota.reserve(budget, "a" * 64) is not None
     notes = [n["note_id"] for n in data["context"]["notes"]]
@@ -331,7 +332,7 @@ def test_bootstrap_disabled_persisted_v3_retry_never_spends_quota(worker, monkey
     monkeypatch.setenv("AGENT_CONSOLE_PUBLIC_TOPIC_BOOTSTRAP_ENABLED", "0")
     monkeypatch.setenv("AGENT_CONSOLE_PUBLIC_SOURCE_NOTES_V3_ENABLED", v3_flag)
     calls = []
-    monkeypatch.setattr(rollout, "structured_llm_call", lambda prompt: calls.append(prompt))
+    monkeypatch.setattr(rollout, "structured_llm_call", lambda prompt, **options: calls.append(prompt))
     before = inventory(tmp_path)
     batch = ([source], lambda source: [], lambda source: False, {"pending_sources": 1})
     for _ in range(2):
@@ -426,7 +427,7 @@ def test_default_process_and_resume_recognize_history_before_mutable_source_read
     path.write_bytes(encoded({"revision_id": data["source"]["revision_id"], "role": "support", "state": "failed"}))
     monkeypatch.setattr(journal, "load_source", lambda *a: pytest.fail("historical source read"))
     monkeypatch.setattr(pipeline, "run", lambda **kw: pytest.fail("history became legacy work"))
-    monkeypatch.setattr(rollout, "structured_llm_call", lambda *a: pytest.fail("historical model"))
+    monkeypatch.setattr(rollout, "structured_llm_call", lambda *a, **kw: pytest.fail("historical model"))
     assert not rollout.pending_public_source(data["source"], journal)
     assert rollout.resume_topic_sources(journal, NOW) == ([], [])
     recovered = rollout.process(data["source"], [], journal,

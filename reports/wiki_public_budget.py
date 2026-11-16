@@ -109,6 +109,19 @@ def reserve(path: str | Path, revision_id: str, now: datetime | None = None,
         return reservation
 
 
+def release(path: str | Path, reservation_id: str) -> bool:
+    """Give back a reservation whose attempt never got a model answer. True when it was still held."""
+    with file_write_lock(str(path)):
+        data = _read(path)
+        for records in data["days"].values():
+            kept = [record for record in records if record["id"] != reservation_id]
+            if len(kept) != len(records):
+                records[:] = kept
+                atomic_write_json(str(path), data)
+                return True
+    return False
+
+
 def status(path: str | Path, now: datetime | None = None) -> dict:
     """Read the current KST-day count without creating or modifying the state file."""
     day = _now(now).astimezone(KST).date().isoformat()

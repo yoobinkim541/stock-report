@@ -22,6 +22,20 @@ def test_clock_is_captured_after_lock_acquisition(tmp_path, monkeypatch):
     assert set(json.loads(path.read_text())['days']) == {'2026-10-14'}
 
 
+def test_release_gives_back_one_reservation_once(tmp_path):
+    path = tmp_path / 'budget.json'
+    kept = wiki_public_budget.reserve(path, 'a' * 64, limit=2)
+    unanswered = wiki_public_budget.reserve(path, 'b' * 64, limit=2)
+    assert wiki_public_budget.reserve(path, 'c' * 64, limit=2) is None
+
+    assert wiki_public_budget.release(path, unanswered['id']) is True
+    assert wiki_public_budget.release(path, unanswered['id']) is False
+    assert wiki_public_budget.status(path)['count'] == 1
+    assert wiki_public_budget.reserve(path, 'c' * 64, limit=2) is not None
+    assert kept['id'] in {record['id'] for records in json.loads(path.read_text())['days'].values()
+                          for record in records}
+
+
 def _reserve_worker(path, revision, output):
     output.put(wiki_public_budget.reserve(path, revision))
 

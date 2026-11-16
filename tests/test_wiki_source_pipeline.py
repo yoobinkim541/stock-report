@@ -166,7 +166,7 @@ def test_default_worker_uses_structured_provider_contract(pipeline_env, monkeypa
     from lib import llm_cli
 
     budgets = []
-    def structured(prompt, *, max_timeout=45):
+    def structured(prompt, *, max_timeout=45, **options):
         budgets.append(max_timeout)
         return pipeline_env["llm"](prompt)
 

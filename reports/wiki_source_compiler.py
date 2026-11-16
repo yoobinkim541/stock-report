@@ -562,11 +562,12 @@ def compilation_failure_code(error: Exception) -> str:
     return "compile_failed"
 
 
-def structured_llm_call(prompt: str, *, max_timeout: int = 180) -> str | None:
+def structured_llm_call(prompt: str, *, max_timeout: int = 180, provider_timeout: int | None = None,
+                        trace: list | None = None) -> str | None:
     """Shared JSON-only compile/route/integrate provider callback for runners."""
     from lib.llm_cli import structured_chat
 
-    return structured_chat(prompt, max_timeout=max_timeout)
+    return structured_chat(prompt, max_timeout=max_timeout, provider_timeout=provider_timeout, trace=trace)
 
 
 class _CompiledTitle(TypedDict, total=False):

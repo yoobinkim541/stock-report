@@ -326,14 +326,14 @@ def test_process_rejects_private_source_before_pipeline(tmp_path, monkeypatch):
                        [], Journal(tmp_path), {'id': 'synthetic-attempt'})
 
 
-def test_selection_caps_five_and_prefers_oldest_pending_public_revisions():
+def test_selection_caps_five_and_prefers_newest_pending_public_revisions():
     sources = [{'revision_id': format(i, '064x'), 'provider': 'telegram:public_channel',
                 'scope': 'public_message', 'canonical_url': f'https://t.me/public_channel/{i}',
                 'published_at': f'2026-10-{i:02d}', 'collected_at': ''} for i in range(1, 8)]
     private = {**sources[0], 'revision_id': 'f' * 64, 'provider': 'saveticker'}
     selected = module().select_pending([*reversed(sources), private], lambda source: source['revision_id'] != sources[0]['revision_id'])
     assert len(selected) == 5
-    assert [source['revision_id'] for source in selected] == [source['revision_id'] for source in sources[1:6]]
+    assert [source['revision_id'] for source in selected] == [source['revision_id'] for source in sources[:1:-1]]
     assert all(is_public(source) for source in selected)
 
 
@@ -345,13 +345,28 @@ def test_selection_takes_turns_between_publishers_and_starts_with_the_longest_wa
     sources = [*busy, post('kwusa', 20), post('kwusa', 21), post('mirae_dm', 22)]
     runner = module()
 
-    # 글이 많은 채널이 가장 오래된 글을 갖고 있어도 한도 5건을 혼자 쓰지 못한다.
+    # 글이 많은 채널도 한도 5건을 혼자 쓰지 못하고, 각 채널에서는 최신 글부터 나온다.
     assert [s['revision_id'] for s in runner.select_pending(sources, lambda source: True)] == [
-        'insidertracking-01', 'kwusa-20', 'mirae_dm-22', 'insidertracking-02', 'kwusa-21']
+        'mirae_dm-22', 'kwusa-21', 'insidertracking-08', 'kwusa-20', 'insidertracking-07']
     # 방금 다룬 발행자는 뒤로 가고, 한 번도 다루지 못한 발행자가 먼저 온다.
     served = {'미국 주식 인사이더': '2026-10-16T03:00:00', '키움증권': '2026-10-16T02:00:00'}
     assert [s['revision_id'] for s in runner.select_pending(sources, lambda source: True, limit=3, served=served)] == [
-        'mirae_dm-22', 'kwusa-20', 'insidertracking-01']
+        'mirae_dm-22', 'kwusa-21', 'insidertracking-08']
+
+
+def test_selection_compares_instants_and_retries_after_untouched_posts():
+    def post(name, **stamps):
+        return {'revision_id': name, 'provider': 'telegram:kwusa', 'scope': 'public_message',
+                'canonical_url': f'https://t.me/kwusa/{len(name)}', 'published_at': '', 'collected_at': '', **stamps}
+    sources = [
+        # 수집 시각은 KST, 발행 시각은 UTC 다: 글자 순서로는 morning 이 더 늦어 보인다.
+        post('morning', collected_at='2026-11-16T09:05:00+09:00'),      # 00:05 UTC
+        post('afternoon', published_at='2026-11-16T05:10:00+00:00'),
+        post('retried', published_at='2026-11-16T08:00:00+00:00', last_attempt_at='2026-11-16T08:30:00+00:00'),
+        post('undated'),
+    ]
+    assert [s['revision_id'] for s in module().select_pending(sources, lambda source: True)] == [
+        'afternoon', 'morning', 'undated', 'retried']
 
 
 def test_discovery_puts_the_publisher_compiled_last_run_at_the_back(tmp_path, monkeypatch):
@@ -403,6 +418,61 @@ def test_failed_source_batch_reports_nonzero_service_exit(tmp_path, monkeypatch)
     monkeypatch.setattr(runner.pipeline, '_pending_source', lambda *args: True)
     monkeypatch.setattr(runner, 'process', lambda *args: {'compile_failed': 1})
     assert runner.main() == 2
+
+
+def test_unanswered_compile_gives_the_reservation_back_and_ends_the_batch(tmp_path, monkeypatch, capsys):
+    runner = module()
+    root = _apply_setup(runner, tmp_path, monkeypatch)
+    monkeypatch.setattr(runner, 'load_source_events', lambda **kw: iter([{'n': 1}, {'n': 2}, {'n': 3}]))
+    monkeypatch.setattr(runner.wiki_source_revision, 'discover_revisions', lambda events, **kw: {
+        'eligible': [{'revision_id': format(events[0]['n'], '064x'), 'role': 'evidence',
+                      'provider': 'telegram:public_channel', 'scope': 'public_message',
+                      'canonical_url': f"https://t.me/public_channel/{events[0]['n']}",
+                      'published_at': f"2026-10-0{events[0]['n']}"}], 'unavailable': []})
+    monkeypatch.setattr(runner.pipeline, '_pending_source', lambda *args: True)
+    outcomes = iter([{'data_committed': 1}, {'compile_failed': 1, 'compile_unanswered': 1}])
+    seen = []
+    monkeypatch.setattr(runner, 'process', lambda source, *args, **kw: seen.append(source['revision_id']) or next(outcomes))
+
+    assert runner.main() == 2
+    # 최신 글부터 두 건을 시도했고, 답을 못 받은 두 번째에서 멈췄다. 한도는 답을 받은 한 건만 쓴다.
+    assert seen == [format(3, '064x'), format(2, '064x')]
+    assert runner.quota.status(root / 'automatic-budget.json')['count'] == 1
+    assert json.loads(capsys.readouterr().out.splitlines()[-1])['attempted'] == 2
+
+
+def test_process_marks_a_compile_no_provider_answered_and_records_each_model_call(tmp_path, monkeypatch):
+    from reports.wiki_source_journal import Journal
+    runner = module()
+    monkeypatch.delenv('AGENT_CONSOLE_PUBLIC_TOPIC_BOOTSTRAP_ENABLED', raising=False)
+    source = {'revision_id': 'a' * 64, 'role': 'evidence', 'provider': 'telegram:public_channel',
+              'scope': 'public_message', 'canonical_url': 'https://t.me/public_channel/1'}
+    prompt = 'Compile one source.\n' + json.dumps({'revision_id': source['revision_id']}) + \
+        '\nBEGIN UNTRUSTED SOURCE TEXT\nbody'
+    answers = iter([None, '{"claims":[]}'])
+    options = []
+
+    def provider(text, **kwargs):
+        options.append(kwargs)
+        kwargs['trace'].append({'provider': 'codex', 'seconds': 120.0, 'limit': 120.0, 'outcome': 'no_text'})
+        return next(answers)
+    monkeypatch.setattr(runner, 'structured_llm_call', provider)
+    monkeypatch.setattr(runner.pipeline, 'run',
+                        lambda **kw: {'compile_failed': int(kw['llm_fn'](prompt) is None)})
+    journal = Journal(tmp_path)
+    (journal.root / 'automatic-attempts').mkdir(parents=True, exist_ok=True)
+
+    silent = runner.process(source, [], journal, {'id': 'one', 'revision_id': source['revision_id']})
+    answered = runner.process(source, [], journal, {'id': 'two', 'revision_id': source['revision_id']})
+
+    assert silent == {'compile_failed': 1, 'compile_unanswered': 1}
+    assert answered == {'compile_failed': 0}
+    assert options[0]['provider_timeout'] == runner.COMPILE_PROVIDER_TIMEOUT
+    saved = json.loads((journal.root / 'automatic-attempts' / 'one.json').read_text())
+    assert saved['model_calls'][0]['answered'] is False
+    assert saved['model_calls'][0]['providers'] == [
+        {'provider': 'codex', 'seconds': 120.0, 'limit': 120.0, 'outcome': 'no_text'}]
+    assert saved['model_calls'][0]['seconds'] >= 0
 
 
 def _apply_setup(runner, tmp_path, monkeypatch):

@@ -239,13 +239,15 @@ def structured_providers(raw: str | None = None) -> list[str] | None:
     return names
 
 
-def structured_chat(prompt: str, *, max_timeout: int = 180, provider_timeout: int | None = None) -> str | None:
+def structured_chat(prompt: str, *, max_timeout: int = 180, provider_timeout: int | None = None,
+                    trace: list | None = None) -> str | None:
     """``structured_chat_with_provider`` 의 본문만."""
-    return structured_chat_with_provider(prompt, max_timeout=max_timeout, provider_timeout=provider_timeout)[0]
+    return structured_chat_with_provider(prompt, max_timeout=max_timeout, provider_timeout=provider_timeout,
+                                         trace=trace)[0]
 
 
 def structured_chat_with_provider(prompt: str, *, max_timeout: int = 180, provider_timeout: int | None = None,
-                                  providers: str | None = None) -> tuple[str | None, str]:
+                                  providers: str | None = None, trace: list | None = None) -> tuple[str | None, str]:
     """Bounded Codex → direct OpenRouter → Hermes JSON-object fallback. Returns (text, provider that answered).
 
     ``providers`` overrides the configured order for one call (same names, same fail-closed validation) — a
@@ -259,6 +261,10 @@ def structured_chat_with_provider(prompt: str, *, max_timeout: int = 180, provid
     and source attribution remain the caller's responsibility; invalid JSON is
     never salvaged. Provider errors and source bodies are deliberately not logged.
     Unknown provider names are a configuration error: nothing is called.
+
+    ``trace`` receives one row per provider tried: ``{provider, seconds, limit, outcome}`` with outcome
+    ``answered`` | ``no_text`` | ``not_json`` | ``late`` | ``error`` | ``disabled``. A ``no_text`` row whose
+    seconds reach its limit is a timeout. Rows never carry the prompt, the answer or an error message.
     """
     from agent_console import agent
     from lib import llm_direct
@@ -275,11 +281,14 @@ def structured_chat_with_provider(prompt: str, *, max_timeout: int = 180, provid
         if remaining < 1:
             return None, ""
         stage_deadline = time.monotonic() + remaining
+        started = stage_deadline - remaining
+        outcome = "error"
         try:
             if provider == "agy":
                 text = agy_structured_call(prompt, timeout=remaining)
             elif provider == "openrouter":
                 if not llm_direct.enabled():
+                    outcome = "disabled"
                     continue
                 text = llm_direct.direct_chat(
                     prompt,
@@ -290,11 +299,23 @@ def structured_chat_with_provider(prompt: str, *, max_timeout: int = 180, provid
                 call = agent._try_codex_chat if provider == "codex" else agent._try_hermes_chat
                 text = call(prompt, max_timeout=remaining, deadline=stage_deadline,
                             search=False, reasoning_effort="medium", structured_output=True)
-            if time.monotonic() <= deadline and isinstance(text, str) and parse_object(text) is not None:
+            on_time = time.monotonic() <= deadline
+            if not isinstance(text, str) or not text.strip():
+                outcome = "no_text"
+            elif parse_object(text) is None:
+                outcome = "not_json"
+            elif not on_time:
+                outcome = "late"
+            else:
+                outcome = "answered"
                 return text, provider
         except Exception:
             # Continue once to the next provider; never print private payloads.
             continue
+        finally:
+            if trace is not None:
+                trace.append({"provider": provider, "seconds": round(time.monotonic() - started, 1),
+                              "limit": round(remaining, 1), "outcome": outcome})
     return None, ""
 
 

@@ -10,6 +10,7 @@ import re
 import shutil
 import sqlite3
 import tempfile
+import time
 from pathlib import Path
 
 import safe_io
@@ -21,6 +22,9 @@ from reports.wiki_source_journal import Journal
 from scripts.run_public_wiki_pilot import source_allowed as is_public, filter_targets, public_target_ids, validate_public_targets, hydrate_public_target
 from reports.wiki_source_compiler import structured_llm_call
 
+# A broker post takes 40-60 s to compile, right at the shared 60 s provider share. 90 s is the provider CLIs' own
+# ceiling and half of the unchanged 180 s total cap, so one fallback provider still gets a full turn.
+COMPILE_PROVIDER_TIMEOUT = 90
 BACKUP_RETENTION = 30   # events.jsonl 백업 보존 개수 (매 apply run마다 ~20MB 생성)
 
 
@@ -79,10 +83,18 @@ def load_source_events(*, now=None, stats=None):
                             rows.close()
 
 
+def _posted_at(source):
+    """When the post appeared, as an instant: published_at is UTC, collected_at is KST. Unknown sorts oldest."""
+    try:
+        stamp = datetime.fromisoformat(str(source.get('published_at') or source.get('collected_at') or ''))
+    except ValueError:
+        return 0.0
+    return (stamp if stamp.tzinfo else stamp.replace(tzinfo=timezone.utc)).timestamp()
+
+
 def _selection_key(source):
-    return (source.get('last_attempt_at', ''),
-            source.get('published_at') or source.get('collected_at') or '',
-            source['revision_id'])
+    """Untouched posts first, newest first; retries follow, least recently tried first."""
+    return (source.get('last_attempt_at', ''), -_posted_at(source), source['revision_id'])
 
 
 def _publisher_id(source):
@@ -93,7 +105,8 @@ def _balanced(sources, limit, served=None):
     """Round-robin across publishers so one busy channel cannot take the whole budget.
 
     Publishers are visited least-recently-attempted first (``served``), and each
-    publisher's own queue keeps the untouched-then-oldest order.
+    publisher's own queue keeps the untouched-then-newest order: more posts arrive
+    than the daily budget covers, so the ones left over are the old ones.
     """
     served = served or {}
     queues = {}
@@ -468,15 +481,25 @@ def process(source, events, journal, attempt, *, context_mode="legacy_pages", no
                                     journal, public_revisions(journal))
         if parent != identity:
             raise ValueError('unreserved_source_model_call')
-        calls.append({'phase': prompt.split(' ', 1)[0], 'source_revision': identity})
+        call = {'phase': prompt.split(' ', 1)[0], 'source_revision': identity, 'providers': []}
+        calls.append(call)
         safe_io.atomic_write_json(str(journal.root / 'automatic-attempts' / (attempt['id'] + '.json')),
                                   {'reservation': attempt, 'model_calls': calls, 'stage': 'running'})
-        print(json.dumps({'phase': calls[-1]['phase'], 'revision_id': identity}), flush=True)
-        if context_mode == 'source_note_snapshot' and prompt.startswith('Propose append-only draft topic synthesis.'):
-            return structured_llm_call(prompt)
-        return structured_llm_call(
-            'Use only supplied evidence. Preserve attribution and uncertainty. '
-            'Do not use tools, read files, browse or load memories. Return only requested JSON.\n' + prompt)
+        print(json.dumps({'phase': call['phase'], 'revision_id': identity}), flush=True)
+        options = {'trace': call['providers']}
+        if call['phase'] == 'Compile':
+            options['provider_timeout'] = COMPILE_PROVIDER_TIMEOUT
+        if not (context_mode == 'source_note_snapshot'
+                and prompt.startswith('Propose append-only draft topic synthesis.')):
+            prompt = ('Use only supplied evidence. Preserve attribution and uncertainty. '
+                      'Do not use tools, read files, browse or load memories. Return only requested JSON.\n' + prompt)
+        started = time.monotonic()
+        try:
+            answer = structured_llm_call(prompt, **options)
+        finally:
+            call['seconds'] = round(time.monotonic() - started, 1)
+        call['answered'] = bool(answer)
+        return answer
     try:
         pipeline.discover_targets = lambda compiled, **kwargs: filter_targets(
             original_targets(compiled, **kwargs), allowed_targets())
@@ -485,6 +508,9 @@ def process(source, events, journal, attempt, *, context_mode="legacy_pages", no
         os.environ['AGENT_CONSOLE_QMD_ENABLED'] = '0'
         result = pipeline.run(events=events, dry_run=False, llm_fn=llm, source_limit=1,
                               allowed_revision_ids={identity})
+        if result.get('compile_failed') and any(
+                call['phase'] == 'Compile' and not call.get('answered') for call in calls):
+            result['compile_unanswered'] = 1
         receipt = journal.load_source(identity)
         is_skipped = bool(receipt) and receipt.get('compile_state') == 'skipped'
         if (topic_enabled and not is_skipped
@@ -612,6 +638,11 @@ def _run_batch(args, journal, budget_path, now, batch):
             result = process(source, list(relevant_events(source)), journal, attempt, **local)
             results.append({'revision_id': source['revision_id'], 'result': result})
             print(json.dumps(results[-1]), flush=True)
+            if result.get('compile_unanswered'):
+                # No provider answered: the budget counts model work, and the rest of the batch would meet
+                # the same silence. The next run starts from another post.
+                quota.release(budget_path, attempt['id'])
+                break
         summary = {'attempted': len(results), 'results': results, 'quota': quota.status(budget_path),
                    'discovery': discovery_stats,
                    'resume_unavailable': len(reasons) + len(topic_reasons), 'unrestricted_pipeline_enabled': pipeline._mode_enabled()}
