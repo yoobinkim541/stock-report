@@ -36,6 +36,13 @@ def _fmt_num(value, digits: int = 2) -> str:
     return "–" if value is None else f"{float(value):,.{digits}f}"
 
 
+def _fmt_price(value) -> str:
+    """지수·가격 칸. 만 단위부터는 소수 자리를 뺀다(좁은 표에서 줄바꿈 방지)."""
+    if value is None:
+        return "–"
+    return f"{float(value):,.0f}" if abs(float(value)) >= 10000 else f"{float(value):,.2f}"
+
+
 def _fmt_pct(value, digits: int = 2) -> str:
     return "–" if value is None else f"{float(value):+.{digits}f}%"
 
@@ -60,13 +67,27 @@ def _tone(value) -> str:
     return "up" if float(value) > 0 else "down"
 
 
-def _heat(value, scale: float = 5.0) -> str:
-    """등락률 셀 배경색. scale 에서 가장 진해진다(상승 빨강·하락 파랑)."""
-    if value is None:
-        return "transparent"
-    strength = min(abs(float(value)) / float(scale), 1.0) * 0.26
-    rgb = "217, 45, 32" if float(value) > 0 else "29, 95, 209"
-    return f"rgba({rgb}, {strength:.3f})"
+def _bar_width(value, scale: float = 5.0) -> str:
+    """표 안 막대의 너비(%). 0 기준선에서 좌우로 뻗으므로 최대 50."""
+    if value is None or not scale:
+        return "0"
+    return f"{min(abs(float(value)) / float(scale), 1.0) * 50.0:.1f}"
+
+
+def _sparkline(values, width: float = 60.0, height: float = 14.0):
+    """표 안에 넣는 추이선(인라인 SVG). 값이 모자라면 빈 문자열."""
+    from markupsafe import Markup
+
+    points = [float(v) for v in values or [] if v is not None]
+    if len(points) < 5:
+        return Markup("")
+    low, high = min(points), max(points)
+    span = (high - low) or 1.0
+    step = width / (len(points) - 1)
+    path = " ".join(f"{i * step:.1f},{1.0 + (height - 2.0) * (1.0 - (v - low) / span):.1f}"
+                    for i, v in enumerate(points))
+    return Markup(f'<svg class="spark {_tone(points[-1] - points[0])}" viewBox="0 0 {width:g} {height:g}" '
+                  f'preserveAspectRatio="none"><polyline points="{path}"/></svg>')
 
 
 def _environment():
@@ -74,7 +95,8 @@ def _environment():
 
     env = Environment(loader=FileSystemLoader(str(TEMPLATE_DIR)), autoescape=True,
                       undefined=StrictUndefined, trim_blocks=True, lstrip_blocks=True)
-    env.filters.update(num=_fmt_num, pct=_fmt_pct, money=_fmt_money, mult=_fmt_multiple, tone=_tone, heat=_heat)
+    env.filters.update(num=_fmt_num, price=_fmt_price, pct=_fmt_pct, money=_fmt_money, mult=_fmt_multiple, tone=_tone,
+                       barw=_bar_width, spark=_sparkline)
     return env
 
 
@@ -86,31 +108,31 @@ def build_figures(model: dict) -> dict:
     holdings = model["portfolio"]["holdings"]
     weights = {h["ticker"]: h["weight"] or 0.0 for h in holdings}
 
-    index, basket = charts.basket_series(prices, weights)
+    index, basket = pdf_data.basket_series(prices, weights)
     relative = charts.relative_chart(
-        [("보유 바스켓", basket), ("SPY", charts.aligned(prices, "SPY", index)),
-         ("QQQ", charts.aligned(prices, "QQQ", index))], index, size=(88, 44)) if index is not None else None
+        [("보유 바스켓", basket), ("SPY", pdf_data.aligned(prices, "SPY", index)),
+         ("QQQ", pdf_data.aligned(prices, "QQQ", index))], index, size=(118, 42)) if index is not None else None
 
-    sectors = model["market"]["sectors"]
-    rows = len(holdings)
+    minis = []
+    for title, symbol, digits in pdf_data.MINI_CHARTS:
+        src = charts.line_chart(prices[symbol], digits=digits) if symbol in prices else None
+        if src:
+            minis.append({"title": title, "src": src})
     return {
         "relative": relative,
+        "minis": minis,
         "equity": charts.equity_chart(model["portfolio"]["history"], size=(88, 44)),
         "spy": charts.price_chart(prices["SPY"], averages=(20, 60, 120), size=(88, 42)) if "SPY" in prices else None,
         "qqq": charts.price_chart(prices["QQQ"], averages=(20, 60, 120), size=(88, 42)) if "QQQ" in prices else None,
-        "sectors": charts.bar_chart([(s["label"], s.get("d1")) for s in sectors], size=(88, 38)),
         "allocation": charts.donut_chart(
             [(h["ticker"], h["weight"]) for h in holdings],
             center=("평가액", f"${model['portfolio']['value_usd']:,.0f}") if model["portfolio"]["value_usd"] else None,
-            size=(88, 60)),
-        "returns": charts.bar_chart([(h["ticker"], h["ret_pct"]) for h in holdings],
-                                    size=(88, min(60, max(40, 4 + rows * 4)))),
+            size=(88, 44)),
         "scores": charts.histogram_chart(model["screens"]["nasdaq_scores"]),
         "accumulation": charts.bar_chart(
-            [(a["ticker"], a["score"]) for a in model["accumulation"][:8]],
-            signed=False, unit="", limit=100, size=(88, 46)),
+            [(a["ticker"], a["score"]) for a in model["accumulation"][:8]], limit=100, size=(88, 46)),
         "stocks": {
-            h["ticker"]: (charts.price_chart(prices[h["ticker"]], size=(66, 36),
+            h["ticker"]: (charts.price_chart(prices[h["ticker"]], size=(66, 33),
                                              reference=("평균단가", h["avg_price"]) if h["avg_price"] else None)
                           if h["ticker"] in prices else None)
             for h in holdings

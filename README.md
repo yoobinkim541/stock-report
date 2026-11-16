@@ -87,7 +87,7 @@ flowchart TD
 **두 가지 핵심 런타임 흐름**
 
 - **일일 리포트 (크론 23:00 UTC = KST 08:00)** — `scripts/deliver_investment_report.sh` → `reports/investment_report` 가 `providers/market_data`(가격) · `reports/*`(펀더멘털·신호·매집·차트) · `ml/*`(랭킹)을 호출 → `~/reports/` 에 `.md/.json/.txt/.png` 산출 → `notify` 로 문서·이미지 발송.
-  같은 산출물을 `reports/report_pdf.py` 가 고정 양식(`reports/templates/daily_report.html.j2`)과 그림(`reports/report_pdf_charts.py`)으로 조판해 `daily-investment-brief-<날짜>.pdf` 로 함께 보낸다. 양식·그림은 코드가 정하고 LLM 은 관여하지 않으며, 인쇄는 헤드리스 Chromium(Playwright 번들 또는 `REPORT_PDF_BROWSER`)이 한다. PDF 가 실패해도 요약·마크다운 전송은 그대로 간다.
+  같은 산출물을 `reports/report_pdf.py` 가 고정 양식(`reports/templates/daily_report.html.j2`)과 그림(`reports/report_pdf_charts.py`)으로 조판해 `daily-investment-brief-<날짜>.pdf` 로 함께 보낸다. 양식은 증권사 리포트 관행(띠 제목, 기간 수익률 표와 추이선, 의견 상자, 쪽 머리글)을 따르고, 양식·그림은 코드가 정하며 LLM 은 관여하지 않는다. 인쇄는 헤드리스 Chromium(Playwright 번들 또는 `REPORT_PDF_BROWSER`)이 한다. PDF 가 실패해도 요약·마크다운 전송은 그대로 간다.
 - **전략 판정 (봇 5분 주기 + 크론)** — `barbell_strategy.run()` → `market_data.fetch_qqq_data()`(**stale 서킷브레이커**) → `classify_market()`(히스테리시스 + 낙폭 앵커) → `calculate_dca()`(+ **leverage_dca_guard**: 변동성 캡·낙폭 정지) → `build_report()` → `notify`.
 
 **특정 기능이 어느 파일에 있는지 찾는다면** → [`docs/project-structure.md`](docs/project-structure.md)

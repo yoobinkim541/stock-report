@@ -18,6 +18,7 @@ matplotlib.use("Agg")
 from matplotlib import font_manager, rc_context
 from matplotlib.figure import Figure
 from matplotlib.patches import Rectangle
+from matplotlib.ticker import MaxNLocator
 
 FONT_DIR = Path(__file__).resolve().parent / "assets" / "fonts"
 FONT_FAMILY = "Pretendard"
@@ -167,6 +168,36 @@ def price_chart(frame, *, sessions: int = 126, averages: tuple[int, ...] = (20, 
         return _encode(fig)
 
 
+def line_chart(frame, *, sessions: int = 63, digits: int = 2, size: tuple[float, float] = (43, 29)) -> str | None:
+    """작은 추이선 하나 — 여러 개를 나란히 놓는 용도. 마지막 값을 오른쪽 위에 적는다."""
+    try:
+        closes = frame["Close"].dropna().iloc[-sessions:]
+    except Exception:
+        return None
+    if len(closes) < 20:
+        return None
+    _ensure_fonts()
+    values = [float(v) for v in closes.tolist()]
+    x = list(range(len(values)))
+    with rc_context(_rc()):
+        fig = _figure(*size)
+        ax = fig.add_axes(_rect(size, left=8.5, right=2, top=5, bottom=4.5))
+        floor = min(values) - (max(values) - min(values)) * 0.08
+        ax.fill_between(x, values, floor, color=NAVY, alpha=0.07, linewidth=0)
+        ax.plot(x, values, color=NAVY, linewidth=1.0)
+        ax.scatter([x[-1]], [values[-1]], s=7, color=NAVY, zorder=5)
+        ax.text(1.0, 1.04, f"{values[-1]:,.{digits}f}", transform=ax.transAxes, ha="right", va="bottom",
+                fontsize=7.2, fontweight="bold", color=NAVY)
+        ax.set_ylim(bottom=floor)
+        ax.yaxis.set_major_locator(MaxNLocator(nbins=4))
+        ax.yaxis.set_major_formatter(lambda v, _pos: f"{v:,.{digits}f}")
+        ax.margins(x=0.02)
+        _clean_axes(ax)
+        ticks, labels = _month_ticks(closes.index)
+        ax.set_xticks(ticks, labels)
+        return _encode(fig)
+
+
 def relative_chart(series: list[tuple[str, list[float]]], index, *, size: tuple[float, float] = (88, 52)) -> str | None:
     """여러 시계열을 시작=100 으로 맞춘 비교선. series 는 (라벨, 값) — 길이는 index 와 같다."""
     series = [(label, values) for label, values in series if len(values) == len(index) and len(values) >= 5 and values[0]]
@@ -191,9 +222,9 @@ def relative_chart(series: list[tuple[str, list[float]]], index, *, size: tuple[
         return _encode(fig)
 
 
-def bar_chart(rows: list[tuple[str, float]], *, size: tuple[float, float] = (88, 52), unit: str = "%",
-              signed: bool = True, limit: float | None = None) -> str | None:
-    """가로 막대. signed 면 부호로 색을 정하고 0 기준선을 그린다."""
+def bar_chart(rows: list[tuple[str, float]], *, size: tuple[float, float] = (88, 52), unit: str = "",
+              limit: float | None = None) -> str | None:
+    """가로 막대(0 이상 값). limit 은 눈금의 끝 — 없으면 가장 큰 값에 맞춘다."""
     rows = [(label, float(value)) for label, value in rows if value is not None]
     if not rows:
         return None
@@ -201,24 +232,17 @@ def bar_chart(rows: list[tuple[str, float]], *, size: tuple[float, float] = (88,
     labels = [r[0] for r in rows]
     values = [r[1] for r in rows]
     y = list(range(len(rows)))
-    span = max([abs(v) for v in values] + [1e-9])
+    span = limit or max(values + [1e-9])
     with rc_context(_rc()):
         fig = _figure(*size)
         label_mm = min(30.0, 3.0 + max(sum(2.3 if ord(ch) > 0x2E7F else 1.25 for ch in label) for label in labels))
         ax = fig.add_axes(_rect(size, left=label_mm, right=3, top=1.5, bottom=1.5))
-        ax.barh(y, values, color=[(UP if v >= 0 else DOWN) if signed else NAVY for v in values],
-                height=0.62, linewidth=0)
-        pad = span * 0.03
+        ax.barh(y, values, color=NAVY, height=0.62, linewidth=0)
         for i, v in enumerate(values):
-            ax.text(v + (pad if v >= 0 else -pad), i, f"{v:+.1f}{unit}" if signed else f"{v:.0f}{unit}",
-                    va="center", ha="left" if v >= 0 else "right", fontsize=6.3, color=INK)
+            ax.text(v + span * 0.03, i, f"{v:.0f}{unit}", va="center", ha="left", fontsize=6.3, color=INK)
         ax.set_yticks(y, labels, fontsize=6.8, color=INK)
         ax.invert_yaxis()
-        if signed:
-            ax.axvline(0, color=MUTED, linewidth=0.6)
-            ax.set_xlim(-span * 1.28 if min(values) < 0 else 0, span * 1.28)
-        else:
-            ax.set_xlim(0, limit or span * 1.15)
+        ax.set_xlim(0, span * 1.15)
         ax.set_xticks([])
         for side in ("top", "right", "left", "bottom"):
             ax.spines[side].set_visible(False)
@@ -316,29 +340,3 @@ def histogram_chart(values: list[float], *, bins: tuple[int, ...] = (0, 20, 30, 
             ax.spines[side].set_visible(False)
         return _encode(fig)
 
-
-def basket_series(prices: dict, weights: dict[str, float], *, sessions: int = 63, calendar: str = "SPY"):
-    """현재 보유 비중을 고정한 바스켓의 과거 궤적 — (index, 값). 실제 계좌 수익률이 아니다.
-
-    거래일은 calendar 심볼(비교 대상인 SPY)을 따른다. 시작값 100, 길이는 sessions + 1.
-    """
-    usable = {t: w for t, w in weights.items() if w and t in prices and len(prices[t]) > sessions}
-    if not usable or calendar not in prices:
-        return None, []
-    index = prices[calendar]["Close"].dropna().index[-sessions - 1:]
-    total_weight = sum(usable.values())
-    values = [0.0] * len(index)
-    for ticker, weight in usable.items():
-        closes = prices[ticker]["Close"].reindex(index).ffill().bfill()
-        base = float(closes.iloc[0])
-        if not base:
-            return None, []
-        for i, close in enumerate(closes.tolist()):
-            values[i] += weight / total_weight * float(close) / base * 100.0
-    return index, values
-
-
-def aligned(prices: dict, symbol: str, index) -> list[float]:
-    if symbol not in prices or index is None:
-        return []
-    return [float(v) for v in prices[symbol]["Close"].reindex(index).ffill().bfill().tolist()]
