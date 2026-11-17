@@ -412,6 +412,38 @@ def test_enabled_worker_excludes_direct_legacy_source_writes(monkeypatch):
 
 
 
+def test_public_target_survives_relink_that_trims_body_edges(pipeline_env, monkeypatch):
+    """Crosslink maintenance rebuilds the record, which strips the body the receipt froze."""
+    from agent_console import agent, shared_memory
+    from reports.wiki_source_journal import Journal
+    from scripts import run_public_wiki_rollout as rollout
+
+    source = pipeline_env["source"]
+    source.update(provider="telegram:public_channel", scope="public_message",
+                  canonical_url="https://t.me/public_channel/1")
+    journal = Journal(pipeline_env["root"] / "public-journal")
+    monkeypatch.setattr(agent, "_try_codex_chat",
+                        lambda prompt, **kwargs: pipeline_env["llm"](prompt.split("\n", 1)[1]))
+    assert rollout.process(source, [], journal, {"id": "synthetic-attempt",
+                                                 "revision_id": source["revision_id"]})["data_committed"] == 1
+    page_id = hashlib.sha256(("compiled-source:" + REV).encode()).hexdigest()
+    assert page_id in rollout.public_target_ids(journal, {REV})
+
+    def rewrite(change):
+        with shared_memory._events_lock():
+            rows = shared_memory._read_jsonl_checked(shared_memory._paths()["events"])
+            page = wiki._record_to_page(next(row for row in rows if row["id"] == page_id))
+            record = shared_memory.normalize_record(wiki._build_wiki_record(change(page), existing=page))
+            shared_memory._write_jsonl_locked([record if row["id"] == page_id else row for row in rows])
+        wiki._CACHE.clear()
+
+    rewrite(lambda page: {**page, "links": [*page.get("links", []), "overview-synthetic-01"]})
+    assert page_id in rollout.public_target_ids(journal, {REV})
+
+    rewrite(lambda page: {**page, "body": page["body"] + "\nAdded sentence."})
+    assert page_id not in rollout.public_target_ids(journal, {REV})
+
+
 def test_public_rollout_does_not_reauthorize_privately_changed_compiled_note(pipeline_env, monkeypatch):
     from agent_console import agent
     from reports.wiki_source_journal import Journal

@@ -60,14 +60,23 @@ def filter_targets(state, allowed):
 
 
 def _matches_receipt_page(identity, batch, rows):
-    """Navigation maintenance does not authorize edits to any knowledge field."""
+    """Navigation maintenance may relink a page and trim the blank edges of its body, nothing else."""
     expected = batch['expected_after'][identity]
     if wiki._source_fingerprint(identity, rows) == expected:
         return True
     originals = {row['id']: row for row in batch['upserts']}
-    projected = [{**row, 'links': originals[row['id']].get('links', [])}
-                 if row['id'] in originals else row for row in rows]
-    return wiki._source_fingerprint(identity, projected) == expected
+
+    def committed(row):
+        original = originals.get(row['id'])
+        if original is None:
+            return row
+        restored = {**row, 'links': original.get('links', [])}
+        # Rebuilding a record strips the body; the receipt froze it with its leading blank lines.
+        if isinstance(original.get('body'), str) and row.get('body') == original['body'].strip():
+            restored['body'] = original['body']
+        return restored
+
+    return wiki._source_fingerprint(identity, [committed(row) for row in rows]) == expected
 
 
 def _public_v3_target_ids(journal, allowed_revisions, rows):
