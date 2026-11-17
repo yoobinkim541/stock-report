@@ -427,6 +427,8 @@ def test_apply_leaves_a_busy_provider_alone_without_scanning_or_reserving(tmp_pa
     root = _apply_setup(runner, tmp_path, monkeypatch)
     root.mkdir(parents=True)
     monkeypatch.delenv('WIKI_STRUCTURED_PROVIDERS', raising=False)
+    for key in ('OPENROUTER_API_KEY', 'HIVE_API_KEY'):   # Codex 계정 밖의 제공자가 하나도 없다
+        monkeypatch.delenv(key, raising=False)
     monkeypatch.setattr(runner.llm_cli, 'codex_usage', lambda: account(short=88))
     monkeypatch.setattr(runner, 'load_source_events', lambda **kw: pytest.fail('scanned sources with a busy provider'))
     assert runner.main() == 0
@@ -435,6 +437,28 @@ def test_apply_leaves_a_busy_provider_alone_without_scanning_or_reserving(tmp_pa
         'provider_busy', 'usage_window_300m_at_88', 0)
     assert summary['usage']['before']['windows'][0]['used_percent'] == 88
     assert not (root / 'automatic-budget.json').exists() and not (root / 'backups').exists()
+
+
+def test_apply_goes_on_with_providers_outside_the_busy_codex_account(tmp_path, monkeypatch, capsys):
+    runner = module()
+    _apply_setup(runner, tmp_path, monkeypatch)
+    monkeypatch.setenv('WIKI_STRUCTURED_PROVIDERS', 'codex,hive,hermes')
+    monkeypatch.setenv('HIVE_API_KEY', 'k')
+    monkeypatch.setattr(runner.llm_cli, 'codex_usage', lambda: account(short=88))
+    monkeypatch.setattr(runner, 'load_source_events', lambda **kw: iter([{'n': 1}]))
+    monkeypatch.setattr(runner.wiki_source_revision, 'discover_revisions', lambda events, **kw: {
+        'eligible': [{'revision_id': format(1, '064x'), 'role': 'evidence', 'provider': 'telegram:kwusa',
+                      'scope': 'public_message', 'canonical_url': 'https://t.me/kwusa/1',
+                      'published_at': '2026-10-01'}], 'unavailable': []})
+    monkeypatch.setattr(runner.pipeline, '_pending_source', lambda *args: True)
+    asked = []
+    monkeypatch.setattr(runner, 'process',
+                        lambda source, *args, **kw: asked.append(kw.get('providers')) or {'data_committed': 1})
+
+    assert runner.main() == 0
+    summary = json.loads(capsys.readouterr().out.splitlines()[-1])
+    # Hermes 는 Codex 와 같은 계정이라 함께 빠진다.
+    assert asked == ['hive'] and (summary['attempted'], summary['providers']) == (1, 'hive')
 
 
 def test_relays_wait_for_the_days_pace_while_untried_research_does_not(tmp_path, monkeypatch, capsys):

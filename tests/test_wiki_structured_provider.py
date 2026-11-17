@@ -128,8 +128,8 @@ def test_callback_forwards_budget(monkeypatch):
     monkeypatch.setattr(llm_cli, "structured_chat", lambda prompt, **kwargs: seen.append((prompt, kwargs)) or '{"ok":true}')
     trace = []
     assert wiki_source_compiler.structured_llm_call("source", max_timeout=27, provider_timeout=120,
-                                                    trace=trace) == '{"ok":true}'
-    assert seen == [("source", {"max_timeout": 27, "provider_timeout": 120, "trace": trace})]
+                                                    providers="hive", trace=trace) == '{"ok":true}'
+    assert seen == [("source", {"max_timeout": 27, "provider_timeout": 120, "providers": "hive", "trace": trace})]
 
 
 def test_trace_tells_a_silent_provider_from_a_broken_answer_without_keeping_text(providers):
@@ -190,3 +190,40 @@ def test_one_call_can_ask_another_provider_first_and_reports_who_answered(monkey
     assert llm_cli.structured_chat_with_provider("검토", providers="openrouter,nope") == (None, "")
     assert calls == []
 
+
+def test_hive_is_an_opt_in_stage_that_is_skipped_without_its_key(providers, monkeypatch):
+    providers[1]["codex"] = '{"from":"codex"}'
+    sent = []
+
+    class Reply:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"choices": [{"message": {"content": '{"from":"hive"}'}, "finish_reason": "stop"}]}
+
+    monkeypatch.setattr(llm_direct.requests, "post", lambda url, **request: sent.append((url, request)) or Reply())
+    monkeypatch.setenv("WIKI_STRUCTURED_PROVIDERS", "hive,codex")
+    monkeypatch.delenv("HIVE_URL", raising=False)
+    monkeypatch.delenv("HIVE_API_KEY", raising=False)
+    trace = []
+    assert llm_cli.structured_chat_with_provider("JSON 원문", trace=trace) == ('{"from":"codex"}', "codex")
+    assert [(row["provider"], row["outcome"]) for row in trace] == [("hive", "disabled"), ("codex", "answered")]
+    assert not sent
+
+    monkeypatch.setenv("HIVE_API_KEY", "k")
+    assert llm_cli.structured_chat_with_provider("JSON 원문") == ('{"from":"hive"}', "hive")
+    (url, request), = sent
+    assert url.startswith("https://api-cdn.thehive.ai/") and request["headers"] == {"Authorization": "Bearer k"}
+    assert request["json"]["messages"] == [{"role": "user", "content": "JSON 원문"}]
+    assert request["json"]["response_format"] == {"type": "json_object"}
+    assert request["json"]["reasoning_effort"] == "none"
+
+
+def test_providers_outside_the_codex_account_need_their_own_credentials(monkeypatch):
+    order = ["codex", "hive", "openrouter", "hermes"]
+    monkeypatch.setenv("HIVE_API_KEY", "k")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    assert llm_cli.independent_providers(order) == ["hive"]
+    monkeypatch.delenv("HIVE_API_KEY")
+    assert llm_cli.independent_providers(order) == []

@@ -29,6 +29,7 @@
   OPENROUTER_API_KEY      필수(없으면 hermes 명령으로 실행).
   LLM_DIRECT_AGY          기본 true. false 면 agy provider 도 hermes 명령으로 실행.
   LLM_BACKUP_CLI          agy 실행 파일(기본 agy).
+  HIVE_API_KEY            Hive(thehive.ai, OpenAI 호환) 키. 없으면 hive 제공자는 건너뛴다.
 """
 from __future__ import annotations
 
@@ -46,6 +47,9 @@ logger = logging.getLogger(__name__)
 def _openrouter_url():
     return os.getenv("OPENROUTER_URL", "https://openrouter.ai/api/v1/chat/completions")
 
+def _hive_url():
+    return os.getenv("HIVE_URL", "https://api-cdn.thehive.ai/api/v3/chat/completions")
+
 AGY_PROVIDER = "agy"
 
 
@@ -55,6 +59,10 @@ def enabled() -> bool:
 
 def agy_enabled() -> bool:
     return os.getenv("LLM_DIRECT_AGY", "true").lower() != "false"
+
+
+def hive_enabled() -> bool:
+    return bool(os.getenv("HIVE_API_KEY", "").strip())
 
 
 def _arg(cmd: list[str], *names: str) -> str | None:
@@ -110,6 +118,28 @@ def direct_chat(prompt: str, model: str, *, timeout: float | None = None, post=N
     resp = (post or requests.post)(
         _openrouter_url(), json=body, timeout=timeout or 120,
         headers={"Authorization": f"Bearer {key}", "X-Title": "stock-report"})
+    return _reply_text(resp, structured_output)
+
+
+def hive_chat(prompt: str, model: str, *, timeout: float | None = None, post=None, max_tokens: int = 8192) -> str:
+    """Hive chat completions 1회, JSON 객체 응답만. 성공 시 응답 텍스트, 실패 시 예외.
+
+    ChatGPT 계정과 따로 과금되는 제공자라 Codex 사용 한도가 찬 시간에도 답한다. 추론은 끈다: 증권사 글 15건
+    정리에서 끄면 13–31초에 13건이 검증을 통과했고, 켜면(low·high) 20번 모두 45–65초 뒤 쓸 수 있는 JSON 없이
+    끝났다 (2026-11-17 실측).
+    """
+    key = os.getenv("HIVE_API_KEY", "").strip()
+    if not key:
+        raise RuntimeError("HIVE_API_KEY 없음")
+    resp = (post or requests.post)(
+        _hive_url(), timeout=timeout or 120, headers={"Authorization": f"Bearer {key}"},
+        json={"model": model, "messages": [{"role": "user", "content": prompt}], "max_tokens": max_tokens,
+              "reasoning_effort": "none",
+              "response_format": {"type": "json_object"}})
+    return _reply_text(resp, True)
+
+
+def _reply_text(resp, structured_output: bool) -> str:
     resp.raise_for_status()
     data = resp.json()
     if data.get("error"):

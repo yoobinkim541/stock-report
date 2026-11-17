@@ -172,7 +172,9 @@ def chat_once(prompt: str, *, model: str = "gpt-5-mini", provider: str = "openai
 
 
 DEFAULT_STRUCTURED_PROVIDERS = ("codex", "openrouter", "hermes")
-STRUCTURED_PROVIDERS = frozenset({"codex", "openrouter", "hermes", "agy"})
+STRUCTURED_PROVIDERS = frozenset({"codex", "openrouter", "hermes", "agy", "hive"})
+# Hermes signs in with the same ChatGPT account as Codex: neither answers while that account's window is spent.
+CODEX_ACCOUNT_PROVIDERS = frozenset({"codex", "hermes"})
 _AGY_DEFAULT_MODELS = "gemini-3.8-flash-high,gemini-3.8-flash-medium,gemini-4-argon-low"
 _AGY_COOLDOWN: dict[str, float] = {}
 _AGY_QUOTA_COOLDOWN_SECONDS = 600
@@ -306,10 +308,20 @@ def structured_providers(raw: str | None = None) -> list[str] | None:
 
 
 def structured_chat(prompt: str, *, max_timeout: int = 180, provider_timeout: int | None = None,
-                    trace: list | None = None) -> str | None:
+                    providers: str | None = None, trace: list | None = None) -> str | None:
     """``structured_chat_with_provider`` 의 본문만."""
     return structured_chat_with_provider(prompt, max_timeout=max_timeout, provider_timeout=provider_timeout,
-                                         trace=trace)[0]
+                                         providers=providers, trace=trace)[0]
+
+
+def independent_providers(order: list[str] | None = None) -> list[str]:
+    """Configured providers, in order, that can answer without the Codex account."""
+    from lib import llm_direct
+
+    ready = {"hive": llm_direct.hive_enabled(),
+             "openrouter": llm_direct.enabled() and bool(os.getenv("OPENROUTER_API_KEY", "").strip()),
+             "agy": bool(shutil.which(os.getenv("LLM_BACKUP_CLI", "agy")))}
+    return [name for name in (structured_providers() if order is None else order) or [] if ready.get(name)]
 
 
 def structured_chat_with_provider(prompt: str, *, max_timeout: int = 180, provider_timeout: int | None = None,
@@ -319,7 +331,7 @@ def structured_chat_with_provider(prompt: str, *, max_timeout: int = 180, provid
     ``providers`` overrides the configured order for one call (same names, same fail-closed validation) — a
     reviewer pass uses it to ask a different model first than the one that produced the draft.
 
-    No parallel calls or web search; agy is an opt-in stage via WIKI_STRUCTURED_PROVIDERS. Each provider gets at most 60
+    No parallel calls or web search; agy and hive are opt-in stages via WIKI_STRUCTURED_PROVIDERS. Each provider gets at most 60
     seconds within a shared, hard-capped 180-second budget; ``provider_timeout``
     raises that per-provider share for long batch prompts (the 180-second cap
     still holds, so later providers get what is left). Codex's existing
@@ -352,6 +364,13 @@ def structured_chat_with_provider(prompt: str, *, max_timeout: int = 180, provid
         try:
             if provider == "agy":
                 text = agy_structured_call(prompt, timeout=remaining)
+            elif provider == "hive":
+                if not llm_direct.hive_enabled():
+                    outcome = "disabled"
+                    continue
+                text = llm_direct.hive_chat(
+                    prompt, os.getenv("WIKI_STRUCTURED_HIVE_MODEL", "deepseek-ai/deepseek-v4.1-flash-1017"),
+                    timeout=remaining)
             elif provider == "openrouter":
                 if not llm_direct.enabled():
                     outcome = "disabled"

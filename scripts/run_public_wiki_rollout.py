@@ -455,7 +455,7 @@ def checked_topic_provider(llm_fn, *, journal, reserved_revision_id, now,
     return checked
 
 
-def process(source, events, journal, attempt, *, context_mode="legacy_pages", note_ids=None):
+def process(source, events, journal, attempt, *, context_mode="legacy_pages", note_ids=None, providers=None):
     identity = source['revision_id']
     receipt = pipeline._public_topic_for_source(source, journal)
     if not (receipt and receipt['schema_version'] == 3) and not is_public(source):
@@ -527,6 +527,8 @@ def process(source, events, journal, attempt, *, context_mode="legacy_pages", no
                                   {'reservation': attempt, 'model_calls': calls, 'stage': 'running'})
         print(json.dumps({'phase': call['phase'], 'revision_id': identity}), flush=True)
         options = {'trace': call['providers']}
+        if providers:
+            options['providers'] = providers
         if call['phase'] == 'Compile':
             options['provider_timeout'] = COMPILE_PROVIDER_TIMEOUT
         if not (context_mode == 'source_note_snapshot'
@@ -593,29 +595,33 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if not 1 <= args.source_limit <= 20:
         raise ValueError('source_limit_invalid')
-    if args.apply and not (shutil.which('codex') or shutil.which('hermes') or os.getenv('OPENROUTER_API_KEY')):
+    if args.apply and not (shutil.which('codex') or shutil.which('hermes') or os.getenv('OPENROUTER_API_KEY')
+                           or os.getenv('HIVE_API_KEY')):
         raise ValueError('structured_provider_unavailable')
     journal = Journal(raw_archive.reports_root() / 'public-wiki-pilot-20261013')
     budget_path = journal.root / 'automatic-budget.json'
     now = datetime.now(timezone.utc)
     usage = llm_cli.codex_usage() if args.apply else None
+    busy = provider_busy(usage)
+    # While the Codex account is busy the run goes on with the providers that do not draw on it, if any.
+    providers = ','.join(llm_cli.independent_providers()) if busy else None
     if args.apply and os.getenv('AGENT_CONSOLE_PUBLIC_TOPIC_BOOTSTRAP_ENABLED', '0') != '1':
         budget = quota.status(budget_path, now)
-        busy = provider_busy(usage)
-        if busy or budget['count'] >= budget['limit']:
+        idle = busy and not providers
+        if idle or budget['count'] >= budget['limit']:
             # 쿼터 소진·제공자 한도 임박 시 소스 스캔(CPU 2분+)·이벤트 백업 없이 종료. 토픽 복구는 bootstrap 활성 시만 필요.
             summary = {'attempted': 0, 'results': [], 'quota': budget,
-                       'skipped': 'provider_busy' if busy else 'quota_exhausted'}
-            if busy:
+                       'skipped': 'provider_busy' if idle else 'quota_exhausted'}
+            if idle:
                 summary.update(reason=busy, usage={'before': usage})
             safe_io.atomic_write_json(str(journal.root / 'automatic-latest.json'), summary)
             print(json.dumps(summary), flush=True)
             return 0
     with discover_source_batch(journal, now, limit=args.source_limit) as batch:
-        return _run_batch(args, journal, budget_path, now, batch, usage)
+        return _run_batch(args, journal, budget_path, now, batch, usage, providers)
 
 
-def _run_batch(args, journal, budget_path, now, batch, usage=None):
+def _run_batch(args, journal, budget_path, now, batch, usage=None, providers=None):
     candidates, relevant_events, already_pending, discovery_stats = batch
     topic_sources, topic_reasons = resume_topic_sources(journal, now)
     if not args.apply:
@@ -684,6 +690,8 @@ def _run_batch(args, journal, budget_path, now, batch, usage=None):
                 break
             local = ({'context_mode': source['context_mode'], 'note_ids': source['note_ids']}
                      if source.get('context_mode') == 'source_note_snapshot' else {})
+            if providers:
+                local['providers'] = providers
             result = process(source, list(relevant_events(source)), journal, attempt, **local)
             results.append({'revision_id': source['revision_id'], 'result': result})
             print(json.dumps(results[-1]), flush=True)
@@ -695,6 +703,7 @@ def _run_batch(args, journal, budget_path, now, batch, usage=None):
         summary = {'attempted': len(results), 'results': results,
                    'quota': {**quota.status(budget_path), 'paced_limit': quota.paced_limit()},
                    'usage': {'before': usage, 'after': llm_cli.codex_usage() if results else usage},
+                   **({'providers': providers} if providers else {}),
                    'discovery': discovery_stats,
                    'resume_unavailable': len(reasons) + len(topic_reasons), 'unrestricted_pipeline_enabled': pipeline._mode_enabled()}
         if topic_recovery:
