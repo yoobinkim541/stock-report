@@ -82,14 +82,32 @@
   같은 계정을 쓴다. 한도가 차면 둘 다 답하지 않고, 2026-11-07~13 의 무응답은 모두 이 경우였다 (`usage_limit_reached`).
   사용량을 읽지 못하거나 Codex 가 첫 제공자가 아니면 그대로 실행한다. 실행 요약의 `usage` 에 실행 전후 값이 남는다.
 - Hive DeepSeek (`hive`, 모델 `deepseek-ai/deepseek-v4.1-flash-1017`) 는 ChatGPT 계정과 따로 과금되는 제공자다. 키는
-  `.env` 의 `HIVE_API_KEY`, 순서는 서비스의 `WIKI_STRUCTURED_PROVIDERS=codex,hive,openrouter,hermes` 로 정한다
-  (코드 기본 순서에는 없다). 증권사 글 15건 정리에서 13건이 검증을 통과했고 한 건에 13–31초가 걸렸다. 같은 글에서
-  Codex 는 12건 통과, 35–63초였다 (2026-11-17 실측). 추론은 라우팅 호출에만 켠다 (`low`). 끄면 라우팅이 새 문서를
+  `.env` 의 `HIVE_API_KEY`, 순서는 서비스(`stock-report-public-wiki.service`)의 `WIKI_STRUCTURED_PROVIDERS=codex,hive,hermes` 로 정한다
+  (코드 기본 순서 `codex,hermes` 에는 없다). 증권사 글 15건 정리에서 13건이 검증을 통과했고 한 건에 13–31초가 걸렸다. 같은 글에서
+  Codex 는 12건 통과, 35–63초였다 (2026-11-17 실측). 그래서 정리(Compile) 호출만 Hive 를 먼저 부르고, 라우팅과 통합
+  제안은 설정 순서(Codex 먼저)를 따른다. 요금은 100만 토큰당 입력 $0.10, 출력 $0.35 다 (2026-10-26 인하).
+  추론은 라우팅 호출에만 켠다 (`low`). 끄면 라우팅이 새 문서를
   제안하지 않고, 정리와 통합 제안은 켜면 검증 통과가 줄거나 제한 시간을 넘는다.
+- OpenRouter 는 2026-11-17 에 충전액 $35 를 다 써서 402 만 돌려준다. 위키 순서와 코드 기본 순서에서 뺐다. 다시 쓰려면
+  충전한 뒤 `WIKI_STRUCTURED_PROVIDERS` 에 넣는다.
+- agy(Antigravity CLI)는 2026-11-15 18:40 UTC 부터 계정이 이용약관 위반으로 막혀 모든 호출이 오류다. 이것을 쓰던 작업
+  다섯 개(`NEWS_SPIKE_LLM_PROVIDER`, `NEWS_LLM_LABELS_PROVIDER`, `DASH_LLM_ANALYSIS_PROVIDER`, `DASH_AI_BRIEFING_PROVIDER`,
+  `DASH_LLM_RELATED_PROVIDER`)는 `hive` 로 옮겼다. `lib.llm_direct.run` 이 `hermes chat --provider hive` 명령을 Hive 직접
+  호출(추론 끔, 응답 형식은 호출부가 검증)로 바꾼다. 직접 호출이 실패하면 Hermes 가 모르는 제공자로 보고 Codex 로 답한다.
+  agy 일 때도 같은 일이 나서, 11-17 하루에 51번 Codex 가 대신 답했다.
 - 정리(Compile) 호출은 제공자 한 곳에 90초까지 준다 (증권사 글 실측 39–62초, 기본 몫 60초). 전체 180초 상한은 그대로다.
   어느 제공자도 답하지 않은 시도는 하루 한도를 돌려주고 그 실행을 끝낸다. 다음 실행은 다른 글부터 시작한다.
   시도 기록(`automatic-attempts/*.json`)의 `model_calls` 에 호출별 소요 시간과 제공자별 결과
   (`answered`·`no_text`·`not_json`·`late`·`error`·`disabled`)가 남는다. 프롬프트·응답·오류 문구는 남기지 않는다.
+- 통합에 실패하면 요약의 `reason_counts` 에 `integration_failed` 와 함께 이유 코드가 남는다. 검증기가 낸 코드
+  (`ValueError` 의 식별자, 예: `public_target_changed`)는 그대로, 그 밖의 예외는 `integration_error:<예외 종류>` 로만 남긴다.
+  오류 문구는 출처 본문을 담을 수 있어 남기지 않는다.
+- 기존 문서를 고칠 수 있는 대상(`public_target_ids`)은 편입 기록이 남긴 상태와 같은 문서뿐이다. 교차 링크를 다시 걸거나
+  본문에서 글자를 조금 지운 변경(본문의 10% 이하, 덧붙이거나 순서를 바꾼 글자는 없음)은 같은 문서로 본다. 2026-11-12
+  06:40–06:47 UTC 에 편입 문서 252개의 문체를 한꺼번에 고친 일이 있다 (쉼표·이모지 삭제, 영문 머리말 번역). 그중
+  지우기만 한 95개(가장 많이 지운 문서가 본문의 9.5%)가 이 규칙으로 다시 대상이 됐고, 글자를 더하거나 바꾼 157개는 계속 빠진다.
+- 매일 도는 `reports.wiki_backfill` 은 `source_knowledge.claims` 가 있는 문서(원문에서 정리한 문서)를 다시 쓰지 않는다.
+  다시 쓰면 본문이 claim 과 어긋나고 그 문서는 고칠 수 있는 대상에서 빠진다. 이 규칙 전에 편입 문서 35개가 이렇게 빠졌다.
 
 ## 지어내지 못하게 막는 규칙
 
@@ -127,8 +145,8 @@ uv run python -m reports.wiki_ontology_insights --apply    # 추출·반대 검�
 
 호출 상한은 `--extract-calls` / `WIKI_ONTOLOGY_EXTRACT_CALLS` (기본 6), `--review-calls` / `WIKI_ONTOLOGY_REVIEW_CALLS`
 (기본 6, 반대 검토와 되검토에 각각 적용), `--insights` / `WIKI_INSIGHT_MAX_PER_RUN` (기본 3). 검토자 제공자 순서는 `WIKI_ONTOLOGY_REVIEW_PROVIDERS`
-(기본: `WIKI_STRUCTURED_PROVIDERS` 를 한 칸 돌린 순서 — Codex 가 추출하면 OpenRouter 가 먼저 검토하고, 응답이 없으면 Hermes 로 넘어간다). 되검토는 추출과 같은 순서로 부른다. 이 잡은 `.env` 를 직접 읽는다 — 읽지 않으면 Codex 가 계정에서 못 쓰는 기본 모델로 떠서 Hermes 혼자 세 역할을 다 한다 (2026-11-16 운영에서 확인). 크론은 6시간마다 (`deploy/crontab.stock-report`, 잠금 `/tmp/wiki_ontology.lock`, 로그 `/tmp/wiki_ontology.log`).
-LLM 은 `lib.llm_cli.structured_chat` (Codex → OpenRouter → Hermes) 를 쓴다. 관계 추출 프롬프트는 claim 30건 묶음이라
+(기본: `WIKI_STRUCTURED_PROVIDERS` 를 한 칸 돌린 순서 — 운영 순서 `codex,hive,hermes` 에서는 Codex 가 추출하면 Hive 가 먼저 검토하고, 응답이 없으면 Hermes 로 넘어간다). 되검토는 추출과 같은 순서로 부른다. 이 잡은 `.env` 를 직접 읽는다 — 읽지 않으면 Codex 가 계정에서 못 쓰는 기본 모델로 떠서 Hermes 혼자 세 역할을 다 한다 (2026-11-16 운영에서 확인). 크론은 6시간마다 (`deploy/crontab.stock-report`, 잠금 `/tmp/wiki_ontology.lock`, 로그 `/tmp/wiki_ontology.log`).
+LLM 은 `lib.llm_cli.structured_chat` (`WIKI_STRUCTURED_PROVIDERS` 순서, 운영은 Codex → Hive → Hermes) 를 쓴다. 관계 추출 프롬프트는 claim 30건 묶음이라
 Codex 응답이 60초를 넘기도 해서 (운영 실측: 13건 51초, 44건 78초) 공급자별 한도를 120초로 올려 부른다. Codex 호출의 자체 상한(90초)도 이 잡에서는 120초로 맞춘다
 (`AGENT_CONSOLE_CODEX_TIMEOUT` 을 따로 정했으면 그 값). 검토 프롬프트 한 건이 77초 걸린 실측이 있다.
 전체 180초 상한은 그대로다.

@@ -15,6 +15,8 @@ def providers(monkeypatch):
     monkeypatch.setenv("AGENT_CONSOLE_LLM_ENABLED", "1")
     monkeypatch.setenv("LLM_DIRECT_OPENROUTER", "true")
     monkeypatch.delenv("WIKI_STRUCTURED_OPENROUTER_MODEL", raising=False)
+    # The fallback mechanics need three stages; OpenRouter is opt-in since its credit ran out.
+    monkeypatch.setenv("WIKI_STRUCTURED_PROVIDERS", "codex,openrouter,hermes")
 
     def invoke(name):
         def call(prompt, *args, **kwargs):

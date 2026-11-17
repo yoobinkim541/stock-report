@@ -531,6 +531,12 @@ def process(source, events, journal, attempt, *, context_mode="legacy_pages", no
             options['providers'] = providers
         if call['phase'] == 'Compile':
             options['provider_timeout'] = COMPILE_PROVIDER_TIMEOUT
+            # Hive compiled broker posts as well as Codex in a third of the time (2026-11-17: 13 of 15 valid in
+            # 15 s against 12 of 15 in 46 s) and does not draw on the shared Codex window. Route and Propose
+            # keep the configured order.
+            order = llm_cli.structured_providers(providers)
+            if order and 'hive' in order:
+                options['providers'] = ','.join(['hive', *(name for name in order if name != 'hive')])
         elif call['phase'] == 'Route':
             options['reasoning'] = 'low'
         if not (context_mode == 'source_note_snapshot'

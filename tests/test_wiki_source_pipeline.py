@@ -386,6 +386,22 @@ def test_routed_new_concept_redelivery_does_not_duplicate_prose(pipeline_env):
     assert "actual-redelivery" in snap["evidence_ids"]
 
 
+@pytest.mark.parametrize("error,code", [(ValueError("proposal_relation_identity_invalid"), "proposal_relation_identity_invalid"),
+                                        (ValueError("private source sentence"), "integration_error:valueerror"),
+                                        (KeyError("synthetic-private-marker"), "integration_error:keyerror")])
+def test_integration_failure_keeps_validator_code_but_never_error_text(pipeline_env, error, code):
+    wiki.upsert_page({"id": "topic", "title": "Capacity planning", "body": "Prior caveat.",
+                      "kind": "concept", "surface": "market"})
+    def failing(prompt):
+        if prompt.startswith("Propose"):
+            raise error
+        return pipeline_env["llm"](prompt)
+    result = module().run(events=[{}], dry_run=False, llm_fn=failing, target_limit=1, now=NOW)
+    assert result["reason_counts"]["integration_failed"] == 1
+    assert result["reason_counts"][code] == 1
+    assert "private" not in json.dumps(result)
+
+
 def test_failed_final_routing_pass_is_retried_with_unchanged_evidence(pipeline_env):
     wiki.upsert_page({"id": "topic", "title": "Capacity planning", "body": "Prior caveat.",
                       "kind": "concept", "surface": "market"})
@@ -412,8 +428,8 @@ def test_enabled_worker_excludes_direct_legacy_source_writes(monkeypatch):
 
 
 
-def test_public_target_survives_relink_that_trims_body_edges(pipeline_env, monkeypatch):
-    """Crosslink maintenance rebuilds the record, which strips the body the receipt froze."""
+def test_public_target_survives_relink_and_small_deletions_only(pipeline_env, monkeypatch):
+    """Crosslink maintenance strips the body the receipt froze; a style pass deletes punctuation."""
     from agent_console import agent, shared_memory
     from reports.wiki_source_journal import Journal
     from scripts import run_public_wiki_rollout as rollout
@@ -440,7 +456,18 @@ def test_public_target_survives_relink_that_trims_body_edges(pipeline_env, monke
     rewrite(lambda page: {**page, "links": [*page.get("links", []), "overview-synthetic-01"]})
     assert page_id in rollout.public_target_ids(journal, {REV})
 
-    rewrite(lambda page: {**page, "body": page["body"] + "\nAdded sentence."})
+    middle = len(page_body := wiki._record_to_page(next(
+        row for row in shared_memory.inspect_records() if row["id"] == page_id))["body"]) // 2
+    rewrite(lambda page: {**page, "body": page_body[:middle] + page_body[middle + 1:]})
+    assert page_id in rollout.public_target_ids(journal, {REV})
+
+    rewrite(lambda page: {**page, "body": page_body[:middle] + "x" + page_body[middle + 1:]})
+    assert page_id not in rollout.public_target_ids(journal, {REV})
+
+    rewrite(lambda page: {**page, "body": page_body[:middle]})
+    assert page_id not in rollout.public_target_ids(journal, {REV})
+
+    rewrite(lambda page: {**page, "body": page_body + "\nAdded sentence."})
     assert page_id not in rollout.public_target_ids(journal, {REV})
 
 

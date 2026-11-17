@@ -47,6 +47,9 @@ def select_backfill_candidates(pages: list[dict], *, limit: int | None = None) -
         and page.get("id")
         and page.get("kind") in _JUDGMENT_KINDS
         and page.get("status") != "archived"
+        # A page compiled from sources holds claims its body must keep matching; a free rewrite would break
+        # that and drop the page from the public wiki's update targets.
+        and not (page.get("source_knowledge") or {}).get("claims")
         and (not page.get("report_citation") or _schema_version(page) < wiki.WIKI_SCHEMA_VERSION)
     ]
     candidates.sort(key=lambda page: str(page.get("updated_at") or page.get("created_at") or ""))

@@ -10,7 +10,7 @@ Environment=WIKI_SOURCE_ALLOW_PRIVATE=1
 Environment=AGENT_CONSOLE_PUBLIC_TOPIC_BOOTSTRAP_ENABLED=1
 Environment=WIKI_SOURCE_DAILY_LIMIT=240
 Environment=WIKI_SOURCE_SCAN_DAYS=7
-Environment=WIKI_STRUCTURED_PROVIDERS=agy,codex,openrouter,hermes
+Environment=WIKI_STRUCTURED_PROVIDERS=codex,hive,hermes
 Environment=WIKI_PROVIDER_TIMEOUT=240
 Environment=WIKI_STRUCTURED_DEADLINE=600
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin

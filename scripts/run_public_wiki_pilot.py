@@ -59,8 +59,22 @@ def filter_targets(state, allowed):
     return result
 
 
+def _only_deletions(current, frozen):
+    """``current`` is ``frozen`` with at most a tenth of its characters removed; nothing added or reordered."""
+    current, frozen = current.strip(), frozen.strip()
+    if len(current) < len(frozen) * 0.9:
+        return False
+    rest = iter(frozen)
+    return all(char in rest for char in current)
+
+
 def _matches_receipt_page(identity, batch, rows):
-    """Navigation maintenance may relink a page and trim the blank edges of its body, nothing else."""
+    """Maintenance may relink a page and delete a few characters of its body, nothing else.
+
+    Rebuilding a record strips the body's blank edges, and the 2026-11-12 style pass removed commas and emoji
+    (95 pages, at most 9.5 % of a body). A deletion cannot bring in knowledge the receipt did not hold; an
+    added or reordered character, or a changed field, still takes the page out of the public targets.
+    """
     expected = batch['expected_after'][identity]
     if wiki._source_fingerprint(identity, rows) == expected:
         return True
@@ -71,8 +85,8 @@ def _matches_receipt_page(identity, batch, rows):
         if original is None:
             return row
         restored = {**row, 'links': original.get('links', [])}
-        # Rebuilding a record strips the body; the receipt froze it with its leading blank lines.
-        if isinstance(original.get('body'), str) and row.get('body') == original['body'].strip():
+        if (isinstance(original.get('body'), str) and isinstance(row.get('body'), str)
+                and _only_deletions(row['body'], original['body'])):
             restored['body'] = original['body']
         return restored
 

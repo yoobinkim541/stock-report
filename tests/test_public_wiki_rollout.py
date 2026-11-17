@@ -28,6 +28,7 @@ def test_missing_provider_does_not_consume_quota(monkeypatch):
     monkeypatch.setattr('sys.argv', ['rollout', '--apply'])
     monkeypatch.setenv('WIKI_SOURCE_PIPELINE_ENABLED', '1')
     monkeypatch.delenv('OPENROUTER_API_KEY', raising=False)
+    monkeypatch.delenv('HIVE_API_KEY', raising=False)   # the host .env sets it
     monkeypatch.setattr('shutil.which', lambda command: None)
     monkeypatch.setattr(runner, 'load_source_events',
                         lambda **kw: pytest.fail('read sources before model preflight'))
@@ -625,11 +626,44 @@ def test_process_marks_a_compile_no_provider_answered_and_records_each_model_cal
     assert silent == {'compile_failed': 1, 'compile_unanswered': 1}
     assert answered == {'compile_failed': 0}
     assert options[0]['provider_timeout'] == runner.COMPILE_PROVIDER_TIMEOUT
+    assert 'providers' not in options[0]   # the default order has no hive to move forward
     saved = json.loads((journal.root / 'automatic-attempts' / 'one.json').read_text())
     assert saved['model_calls'][0]['answered'] is False
     assert saved['model_calls'][0]['providers'] == [
         {'provider': 'codex', 'seconds': 120.0, 'limit': 120.0, 'outcome': 'no_text'}]
     assert saved['model_calls'][0]['seconds'] >= 0
+
+
+@pytest.mark.parametrize('order, busy, expected', [
+    ('codex,hive,hermes', None, {'Compile': 'hive,codex,hermes', 'Route': None}),
+    ('codex,hermes', None, {'Compile': None, 'Route': None}),
+    ('codex,hive,hermes', 'hive', {'Compile': 'hive', 'Route': 'hive'}),
+])
+def test_compile_asks_hive_first_and_other_phases_keep_the_order(tmp_path, monkeypatch, order, busy, expected):
+    from reports.wiki_source_journal import Journal
+    runner = module()
+    monkeypatch.setenv('WIKI_STRUCTURED_PROVIDERS', order)
+    monkeypatch.delenv('AGENT_CONSOLE_PUBLIC_TOPIC_BOOTSTRAP_ENABLED', raising=False)
+    identity = 'a' * 64
+    source = {'revision_id': identity, 'role': 'evidence', 'provider': 'telegram:public_channel',
+              'scope': 'public_message', 'canonical_url': 'https://t.me/public_channel/1'}
+    compile_prompt = 'Compile one source.\n' + json.dumps({'revision_id': identity}) + \
+        '\nBEGIN UNTRUSTED SOURCE TEXT\nbody'
+    route_prompt = 'Route one source.\n' + json.dumps({'compiled': {'revision_id': identity}, 'candidates': []})
+    asked = {}
+
+    def provider(text, **kwargs):
+        asked[text.split('\n', 1)[1].split(' ', 1)[0]] = kwargs.get('providers')
+        return '{}'
+    monkeypatch.setattr(runner, 'structured_llm_call', provider)
+    monkeypatch.setattr(runner.pipeline, 'run',
+                        lambda **kw: {'answers': [kw['llm_fn'](compile_prompt), kw['llm_fn'](route_prompt)]})
+    journal = Journal(tmp_path)
+    (journal.root / 'automatic-attempts').mkdir(parents=True, exist_ok=True)
+
+    runner.process(source, [], journal, {'id': 'one', 'revision_id': identity}, providers=busy)
+
+    assert asked == expected
 
 
 def _apply_setup(runner, tmp_path, monkeypatch):

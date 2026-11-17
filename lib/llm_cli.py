@@ -171,7 +171,7 @@ def chat_once(prompt: str, *, model: str = "gpt-5-mini", provider: str = "openai
     return backup_chat(prompt, timeout=deadline - time.monotonic(), runner=runner)
 
 
-DEFAULT_STRUCTURED_PROVIDERS = ("codex", "openrouter", "hermes")
+DEFAULT_STRUCTURED_PROVIDERS = ("codex", "hermes")
 STRUCTURED_PROVIDERS = frozenset({"codex", "openrouter", "hermes", "agy", "hive"})
 # Hermes signs in with the same ChatGPT account as Codex: neither answers while that account's window is spent.
 CODEX_ACCOUNT_PROVIDERS = frozenset({"codex", "hermes"})
@@ -328,14 +328,14 @@ def independent_providers(order: list[str] | None = None) -> list[str]:
 def structured_chat_with_provider(prompt: str, *, max_timeout: int = 180, provider_timeout: int | None = None,
                                   providers: str | None = None, trace: list | None = None,
                                   reasoning: str | None = None) -> tuple[str | None, str]:
-    """Bounded Codex → direct OpenRouter → Hermes JSON-object fallback. Returns (text, provider that answered).
+    """Bounded Codex → Hermes JSON-object fallback, plus the opt-in direct stages. Returns (text, provider that answered).
 
     ``providers`` overrides the configured order for one call (same names, same fail-closed validation) — a
     reviewer pass uses it to ask a different model first than the one that produced the draft.
     ``reasoning`` is the reasoning effort for a provider that takes one per call (hive, off unless given);
     the others keep their own setting.
 
-    No parallel calls or web search; agy and hive are opt-in stages via WIKI_STRUCTURED_PROVIDERS. Each provider gets at most 60
+    No parallel calls or web search; hive, openrouter and agy are opt-in stages via WIKI_STRUCTURED_PROVIDERS. Each provider gets at most 60
     seconds within a shared, hard-capped 180-second budget; ``provider_timeout``
     raises that per-provider share for long batch prompts (the 180-second cap
     still holds, so later providers get what is left). Codex's existing

@@ -1,4 +1,4 @@
-"""lib/llm_direct.py — `hermes chat --provider openrouter|agy` 배치 호출을 API/agy 직접 호출로 대신 실행.
+"""lib/llm_direct.py — `hermes chat --provider openrouter|agy|hive` 배치 호출을 API/agy 직접 호출로 대신 실행.
 
 배경(2026-10-09 실측): 뉴스 라벨·속보 판정·대시보드 해설 같은 한 번짜리 JSON 작업도 `hermes chat -Q`로
 부르면 Hermes 에이전트 전체(시스템 프롬프트·도구 목록 약 2만 토큰 + 기본 reasoning_effort xhigh)가 함께
@@ -11,6 +11,10 @@
     공용 CLI 러너(`lib.llm_cli.run_cli`)에 그대로 넘긴다(openai-codex 등 기존 경로 불변).
   - `--provider agy` 는 Antigravity CLI(`agy --print --model M`)를 빈 스크래치 cwd 에서 직접 실행한다
     (구독 기반 — API 키 불필요, 에이전트 파일 도구가 레포를 못 보게 격리).
+  - `--provider hive` 는 Hive chat completions 를 추론 없이 부른다. 응답 형식은 강제하지 않는다
+    (줄마다 JSON 을 내는 작업이 있어 검증은 호출부 몫).
+  - Hermes 는 agy·hive 를 모르는 제공자로 보고 자기 대체 모델(Codex)로 답한다. 직접 호출 실패가 곧
+    Codex 사용량이 되는 이유다.
   - 직접 호출이 실패하면(키 없음·HTTP 오류·빈 응답) 원래 hermes 명령을 실행해 Hermes의 대체 체인에 맡긴다.
   - 반환값은 subprocess.CompletedProcess 이므로 호출부의 returncode/stdout 처리 코드를 바꿀 필요가 없다.
 
@@ -29,7 +33,7 @@
   OPENROUTER_API_KEY      필수(없으면 hermes 명령으로 실행).
   LLM_DIRECT_AGY          기본 true. false 면 agy provider 도 hermes 명령으로 실행.
   LLM_BACKUP_CLI          agy 실행 파일(기본 agy).
-  HIVE_API_KEY            Hive(thehive.ai, OpenAI 호환) 키. 없으면 hive 제공자는 건너뛴다.
+  HIVE_API_KEY            Hive(thehive.ai, OpenAI 호환) 키. 없으면 hive 제공자는 건너뛰고, hermes 명령은 그대로 실행.
 """
 from __future__ import annotations
 
@@ -121,9 +125,17 @@ def direct_chat(prompt: str, model: str, *, timeout: float | None = None, post=N
     return _reply_text(resp, structured_output)
 
 
+def parse_hive_chat(cmd) -> tuple[str, str] | None:
+    """`--provider hive` hermes 명령이면 (prompt, model), 아니면 None."""
+    return _parse_chat(cmd, "hive")
+
+
 def hive_chat(prompt: str, model: str, *, timeout: float | None = None, post=None, max_tokens: int = 8192,
-              reasoning: str = "none") -> str:
-    """Hive chat completions 1회, JSON 객체 응답만. 성공 시 응답 텍스트, 실패 시 예외.
+              reasoning: str = "none", structured_output: bool = True) -> str:
+    """Hive chat completions 1회. 성공 시 응답 텍스트, 실패 시 예외.
+
+    ``structured_output`` 이면 JSON 객체 하나만 받는다. 줄마다 JSON 을 내는 배치 작업(뉴스 라벨, 관련 종목)은
+    끄고 호출부가 직접 검증한다.
 
     ChatGPT 계정과 따로 과금되는 제공자라 Codex 사용 한도가 찬 시간에도 답한다. ``reasoning`` 은 추론 강도
     (none|low|high) 이고 호출부가 단계마다 고른다. 2026-11-17 실측 (증권사 글): 정리는 끄면 13–31초에 15건 중
@@ -139,8 +151,8 @@ def hive_chat(prompt: str, model: str, *, timeout: float | None = None, post=Non
         _hive_url(), timeout=timeout or 120, headers={"Authorization": f"Bearer {key}"},
         json={"model": model, "messages": [{"role": "user", "content": prompt}], "max_tokens": max_tokens,
               "reasoning_effort": reasoning,
-              "response_format": {"type": "json_object"}})
-    return _reply_text(resp, True)
+              **({"response_format": {"type": "json_object"}} if structured_output else {})})
+    return _reply_text(resp, structured_output)
 
 
 def _reply_text(resp, structured_output: bool) -> str:
@@ -190,7 +202,7 @@ def _fallback_within(deadline, fallback, cmd, args, kwargs):
 
 def run(cmd, *args, post=None, fallback=None, agy_runner=None, max_tokens: int | None = None,
         **kwargs):
-    """subprocess.run 호환 runner. openrouter·agy hermes 명령만 직접 호출로 바꾼다."""
+    """subprocess.run 호환 runner. openrouter·agy·hive hermes 명령만 직접 호출로 바꾼다."""
     fallback = fallback or llm_cli.run_cli
     timeout = kwargs.get("timeout")
     started = time.monotonic()
@@ -201,6 +213,16 @@ def run(cmd, *args, post=None, fallback=None, agy_runner=None, max_tokens: int |
             text = agy_chat(*agy, timeout=timeout, runner=agy_runner)
         except Exception as exc:  # noqa: BLE001 — 실패 시 기존 hermes 경로로
             logger.info("agy 직접 호출 실패 → hermes로 실행: error=%s elapsed=%.1fs",
+                        type(exc).__name__, time.monotonic() - started)
+            return _fallback_within(deadline, fallback, cmd, args, kwargs)
+        return subprocess.CompletedProcess(cmd, 0, text + "\n", "")
+    hive = parse_hive_chat(cmd) if hive_enabled() else None
+    if hive is not None:
+        try:
+            text = hive_chat(*hive, timeout=timeout, post=post, structured_output=False,
+                             max_tokens=max_tokens or int(os.getenv("LLM_DIRECT_MAX_TOKENS", "4096")))
+        except Exception as exc:  # noqa: BLE001 — 실패 시 기존 hermes 경로로
+            logger.info("Hive 직접 호출 실패 → hermes로 실행: error=%s elapsed=%.1fs",
                         type(exc).__name__, time.monotonic() - started)
             return _fallback_within(deadline, fallback, cmd, args, kwargs)
         return subprocess.CompletedProcess(cmd, 0, text + "\n", "")

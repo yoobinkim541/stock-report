@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import os
+import re
 from typing import Callable
 
 import safe_io
@@ -324,6 +325,14 @@ def _build_batch(source: dict, compiled: dict, state: dict, llm_fn: Callable) ->
     return batch
 
 
+def integration_failure_code(error: Exception) -> str:
+    """Validator codes are bare identifiers; any other exception is reported by type, never by its text."""
+    if (type(error) is ValueError and len(error.args) == 1 and type(error.args[0]) is str
+            and re.fullmatch(r"[a-z][a-z0-9_]{2,79}", error.args[0])):
+        return error.args[0]
+    return "integration_error:" + type(error).__name__.lower()[:60]
+
+
 def run(*, events: list[dict] | None = None, dry_run: bool = True, llm_fn: Callable | None = None,
         source_limit: int = 5, target_limit: int = 20, now: datetime | None = None,
         allowed_revision_ids: set[str] | None = None) -> dict:
@@ -407,8 +416,9 @@ def run(*, events: list[dict] | None = None, dry_run: bool = True, llm_fn: Calla
                 recovered.append(_recover_locked(operation, journal))
                 if state["unexamined"]:
                     result["routing_pending"] += 1
-            except Exception:
-                result["reason_counts"]["integration_failed"] = result["reason_counts"].get("integration_failed", 0) + 1
+            except Exception as exc:
+                for code in ("integration_failed", integration_failure_code(exc)):
+                    result["reason_counts"][code] = result["reason_counts"].get(code, 0) + 1
                 result["routing_pending"] += 1
     result["operation_ids"] = list(dict.fromkeys(item["operation_id"] for item in recovered))
     result["data_committed"] = len({item["operation_id"] for item in recovered if item["newly_committed"]})

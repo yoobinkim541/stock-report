@@ -35,6 +35,8 @@ def test_select_backfill_candidates_returns_only_legacy_judgment_pages(monkeypat
         report_citation="최신 요약",
     )
     _page(wiki, title="메모", body="메모", kind="note")
+    _page(wiki, title="원문에서 정리한 리스크", body="수요 둔화 [S1]",
+          source_knowledge={"claims": [{"text": "수요 둔화"}]})
 
     candidates = backfill.select_backfill_candidates(wiki._all_wiki_pages())
 

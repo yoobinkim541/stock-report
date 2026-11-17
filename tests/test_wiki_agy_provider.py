@@ -87,4 +87,4 @@ def test_structured_chat_uses_agy_stage_and_validates_json(monkeypatch):
 def test_default_provider_order_is_unchanged(monkeypatch):
     monkeypatch.delenv("WIKI_STRUCTURED_PROVIDERS", raising=False)
     monkeypatch.setenv("AGENT_CONSOLE_LLM_ENABLED", "1")
-    assert llm_cli.DEFAULT_STRUCTURED_PROVIDERS == ("codex", "openrouter", "hermes")
+    assert llm_cli.DEFAULT_STRUCTURED_PROVIDERS == ("codex", "hermes")

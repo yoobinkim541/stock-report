@@ -254,3 +254,24 @@ def test_direct_failure_logs_carry_no_prompt_or_error_body(monkeypatch, caplog):
     D.run(secret_agy, timeout=5, agy_runner=agy_timeout, fallback=lambda *a, **k: "hermes")
     assert "직접 호출 실패" in caplog.text
     assert SECRET not in caplog.text
+
+
+def test_hive_command_keeps_line_json_and_falls_back_to_hermes(monkeypatch):
+    """News labels answer one JSON object per line, so the hive call must not demand a single object."""
+    monkeypatch.setenv("HIVE_API_KEY", "k")
+    cmd = ["hermes", "chat", "-q", "프롬프트", "--provider", "hive", "--model", "deepseek-ai/m", "-Q"]
+    calls = []
+
+    def post(url, json=None, timeout=None, headers=None):
+        calls.append(json)
+        return FakeResp({"choices": [{"message": {"content": '{"i": 1}\n{"i": 2}'}}]})
+    r = D.run(cmd, timeout=30, post=post, fallback=must_not_fallback, max_tokens=900)
+    assert r.stdout == '{"i": 1}\n{"i": 2}\n'
+    assert calls[0]["model"] == "deepseek-ai/m" and calls[0]["max_tokens"] == 900
+    assert "response_format" not in calls[0] and calls[0]["reasoning_effort"] == "none"
+
+    seen = []
+    def failing(url, json=None, timeout=None, headers=None):
+        return FakeResp({}, status=500)
+    D.run(cmd, timeout=30, post=failing, fallback=lambda c, *a, **k: seen.append(c) or "hermes")
+    assert seen == [cmd]
