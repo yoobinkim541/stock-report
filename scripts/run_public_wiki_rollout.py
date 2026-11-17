@@ -531,6 +531,8 @@ def process(source, events, journal, attempt, *, context_mode="legacy_pages", no
             options['providers'] = providers
         if call['phase'] == 'Compile':
             options['provider_timeout'] = COMPILE_PROVIDER_TIMEOUT
+        elif call['phase'] == 'Route':
+            options['reasoning'] = 'low'
         if not (context_mode == 'source_note_snapshot'
                 and prompt.startswith('Propose append-only draft topic synthesis.')):
             prompt = ('Use only supplied evidence. Preserve attribution and uncertainty. '

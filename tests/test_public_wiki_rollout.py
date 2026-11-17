@@ -576,6 +576,28 @@ def test_unanswered_compile_gives_the_reservation_back_and_ends_the_batch(tmp_pa
     assert json.loads(capsys.readouterr().out.splitlines()[-1])['attempted'] == 2
 
 
+def test_process_asks_for_reasoning_on_the_route_call_only(tmp_path, monkeypatch):
+    from reports.wiki_source_journal import Journal
+    runner = module()
+    monkeypatch.delenv('AGENT_CONSOLE_PUBLIC_TOPIC_BOOTSTRAP_ENABLED', raising=False)
+    source = {'revision_id': 'a' * 64, 'role': 'evidence', 'provider': 'telegram:public_channel',
+              'scope': 'public_message', 'canonical_url': 'https://t.me/public_channel/1'}
+    prompts = ['Compile one source.\n' + json.dumps({'revision_id': source['revision_id']})
+               + '\nBEGIN UNTRUSTED SOURCE TEXT\nbody',
+               'Route source knowledge.\n' + json.dumps({'compiled': {'revision_id': source['revision_id']},
+                                                          'candidates': []})]
+    options = []
+    monkeypatch.setattr(runner, 'structured_llm_call', lambda text, **kwargs: options.append(kwargs) or '{}')
+    monkeypatch.setattr(runner.pipeline, 'run',
+                        lambda **kw: {'compile_failed': 0, 'calls': len([kw['llm_fn'](text) for text in prompts])})
+    journal = Journal(tmp_path)
+    (journal.root / 'automatic-attempts').mkdir(parents=True, exist_ok=True)
+
+    runner.process(source, [], journal, {'id': 'one', 'revision_id': source['revision_id']})
+
+    assert [row.get('reasoning') for row in options] == [None, 'low']
+
+
 def test_process_marks_a_compile_no_provider_answered_and_records_each_model_call(tmp_path, monkeypatch):
     from reports.wiki_source_journal import Journal
     runner = module()

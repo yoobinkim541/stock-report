@@ -128,8 +128,9 @@ def test_callback_forwards_budget(monkeypatch):
     monkeypatch.setattr(llm_cli, "structured_chat", lambda prompt, **kwargs: seen.append((prompt, kwargs)) or '{"ok":true}')
     trace = []
     assert wiki_source_compiler.structured_llm_call("source", max_timeout=27, provider_timeout=120,
-                                                    providers="hive", trace=trace) == '{"ok":true}'
-    assert seen == [("source", {"max_timeout": 27, "provider_timeout": 120, "providers": "hive", "trace": trace})]
+                                                    providers="hive", trace=trace, reasoning="low") == '{"ok":true}'
+    assert seen == [("source", {"max_timeout": 27, "provider_timeout": 120, "providers": "hive", "trace": trace,
+                                "reasoning": "low"})]
 
 
 def test_trace_tells_a_silent_provider_from_a_broken_answer_without_keeping_text(providers):
@@ -218,6 +219,8 @@ def test_hive_is_an_opt_in_stage_that_is_skipped_without_its_key(providers, monk
     assert request["json"]["messages"] == [{"role": "user", "content": "JSON 원문"}]
     assert request["json"]["response_format"] == {"type": "json_object"}
     assert request["json"]["reasoning_effort"] == "none"
+    assert llm_cli.structured_chat("JSON 원문", reasoning="low") == '{"from":"hive"}'
+    assert sent[-1][1]["json"]["reasoning_effort"] == "low"
 
 
 def test_providers_outside_the_codex_account_need_their_own_credentials(monkeypatch):

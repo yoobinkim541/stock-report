@@ -121,12 +121,16 @@ def direct_chat(prompt: str, model: str, *, timeout: float | None = None, post=N
     return _reply_text(resp, structured_output)
 
 
-def hive_chat(prompt: str, model: str, *, timeout: float | None = None, post=None, max_tokens: int = 8192) -> str:
+def hive_chat(prompt: str, model: str, *, timeout: float | None = None, post=None, max_tokens: int = 8192,
+              reasoning: str = "none") -> str:
     """Hive chat completions 1회, JSON 객체 응답만. 성공 시 응답 텍스트, 실패 시 예외.
 
-    ChatGPT 계정과 따로 과금되는 제공자라 Codex 사용 한도가 찬 시간에도 답한다. 추론은 끈다: 증권사 글 15건
-    정리에서 끄면 13–31초에 13건이 검증을 통과했고, 켜면(low·high) 20번 모두 45–65초 뒤 쓸 수 있는 JSON 없이
-    끝났다 (2026-11-17 실측).
+    ChatGPT 계정과 따로 과금되는 제공자라 Codex 사용 한도가 찬 시간에도 답한다. ``reasoning`` 은 추론 강도
+    (none|low|high) 이고 호출부가 단계마다 고른다. 2026-11-17 실측 (증권사 글): 정리는 끄면 13–31초에 15건 중
+    13건이 검증을 통과했다. 켜면 추론이 6천~1만6천 토큰을 써서 이 상한에서는 20번 모두 답이 잘렸고, 상한을
+    두 배로 올려도 46–104초가 걸렸다. 라우팅은 끄면 새 문서를 한 번도 제안하지 않고 10번 중 5번이 형식
+    오류였고, low 면 5번 모두 형식이 맞고 4번이 새 문서를 제안했다. 통합 제안은 끄면 10건 중 9건, low 면
+    6건이 검증을 통과했다.
     """
     key = os.getenv("HIVE_API_KEY", "").strip()
     if not key:
@@ -134,7 +138,7 @@ def hive_chat(prompt: str, model: str, *, timeout: float | None = None, post=Non
     resp = (post or requests.post)(
         _hive_url(), timeout=timeout or 120, headers={"Authorization": f"Bearer {key}"},
         json={"model": model, "messages": [{"role": "user", "content": prompt}], "max_tokens": max_tokens,
-              "reasoning_effort": "none",
+              "reasoning_effort": reasoning,
               "response_format": {"type": "json_object"}})
     return _reply_text(resp, True)
 

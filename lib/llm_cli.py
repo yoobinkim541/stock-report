@@ -308,10 +308,11 @@ def structured_providers(raw: str | None = None) -> list[str] | None:
 
 
 def structured_chat(prompt: str, *, max_timeout: int = 180, provider_timeout: int | None = None,
-                    providers: str | None = None, trace: list | None = None) -> str | None:
+                    providers: str | None = None, trace: list | None = None,
+                    reasoning: str | None = None) -> str | None:
     """``structured_chat_with_provider`` 의 본문만."""
     return structured_chat_with_provider(prompt, max_timeout=max_timeout, provider_timeout=provider_timeout,
-                                         providers=providers, trace=trace)[0]
+                                         providers=providers, trace=trace, reasoning=reasoning)[0]
 
 
 def independent_providers(order: list[str] | None = None) -> list[str]:
@@ -325,11 +326,14 @@ def independent_providers(order: list[str] | None = None) -> list[str]:
 
 
 def structured_chat_with_provider(prompt: str, *, max_timeout: int = 180, provider_timeout: int | None = None,
-                                  providers: str | None = None, trace: list | None = None) -> tuple[str | None, str]:
+                                  providers: str | None = None, trace: list | None = None,
+                                  reasoning: str | None = None) -> tuple[str | None, str]:
     """Bounded Codex → direct OpenRouter → Hermes JSON-object fallback. Returns (text, provider that answered).
 
     ``providers`` overrides the configured order for one call (same names, same fail-closed validation) — a
     reviewer pass uses it to ask a different model first than the one that produced the draft.
+    ``reasoning`` is the reasoning effort for a provider that takes one per call (hive, off unless given);
+    the others keep their own setting.
 
     No parallel calls or web search; agy and hive are opt-in stages via WIKI_STRUCTURED_PROVIDERS. Each provider gets at most 60
     seconds within a shared, hard-capped 180-second budget; ``provider_timeout``
@@ -370,7 +374,7 @@ def structured_chat_with_provider(prompt: str, *, max_timeout: int = 180, provid
                     continue
                 text = llm_direct.hive_chat(
                     prompt, os.getenv("WIKI_STRUCTURED_HIVE_MODEL", "deepseek-ai/deepseek-v4.1-flash-1017"),
-                    timeout=remaining)
+                    timeout=remaining, reasoning=reasoning or "none")
             elif provider == "openrouter":
                 if not llm_direct.enabled():
                     outcome = "disabled"

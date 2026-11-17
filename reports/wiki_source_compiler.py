@@ -608,12 +608,13 @@ def compilation_failure_code(error: Exception) -> str:
 
 
 def structured_llm_call(prompt: str, *, max_timeout: int = 180, provider_timeout: int | None = None,
-                        providers: str | None = None, trace: list | None = None) -> str | None:
+                        providers: str | None = None, trace: list | None = None,
+                        reasoning: str | None = None) -> str | None:
     """Shared JSON-only compile/route/integrate provider callback for runners."""
     from lib.llm_cli import structured_chat
 
     return structured_chat(prompt, max_timeout=max_timeout, provider_timeout=provider_timeout,
-                           providers=providers, trace=trace)
+                           providers=providers, trace=trace, reasoning=reasoning)
 
 
 class _CompiledTitle(TypedDict, total=False):
