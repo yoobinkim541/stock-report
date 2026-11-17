@@ -46,6 +46,33 @@ os.environ.setdefault("STOCK_REPORT_OHLC_CACHE_DIR", os.path.join(_TMPDIR, "ohlc
 os.environ.setdefault("STOCK_REPORT_DATA_DIR", os.path.join(_TMPDIR, "legacy-data"))
 
 
+# The topic fixtures archive their sources on 2026-10-15 and 2026-10-20 with the default retention, while the
+# public-target and rollout checks read the wall clock. From mid-November 2026 every archived fixture had expired
+# and the topic tests failed on the date alone. Tests that need those sources live set the clock with this.
+WIKI_FIXTURE_CLOCK = (2026, 10, 20, 1)
+_WIKI_CLOCK_MODULES = ("scripts.run_public_wiki_pilot", "scripts.run_public_wiki_rollout", "scripts.run_public_topic_pilot",
+                       "reports.wiki_source_pipeline", "reports.wiki_topic_pilot_state")
+
+
+@pytest.fixture
+def wiki_fixture_clock(monkeypatch):
+    import datetime as real
+    import importlib
+
+    instant = real.datetime(*WIKI_FIXTURE_CLOCK, tzinfo=real.UTC)
+
+    class FixtureClock(real.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return instant.astimezone(tz) if tz else instant.replace(tzinfo=None)
+
+    for name in _WIKI_CLOCK_MODULES:
+        module = importlib.import_module(name)
+        assert module.datetime is real.datetime, name
+        monkeypatch.setattr(module, "datetime", FixtureClock)
+    return instant
+
+
 @pytest.fixture(autouse=True)
 def _isolate_agent_background_jobs(monkeypatch):
     """Keep deferred writes out of the next test's mocks and temporary store."""

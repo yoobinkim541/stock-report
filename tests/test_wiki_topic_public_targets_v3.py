@@ -12,6 +12,8 @@ from scripts import run_public_wiki_pilot as public
 from test_wiki_source_notes import NOW, store
 from test_wiki_topic_v3 import evidence, propose, payload, validate
 
+pytestmark = pytest.mark.usefixtures("wiki_fixture_clock")
+
 
 @pytest.fixture
 def committed(evidence, store, tmp_path, monkeypatch, request):

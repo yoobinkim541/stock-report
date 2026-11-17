@@ -13,6 +13,8 @@ from scripts import run_public_wiki_rollout as rollout
 from test_wiki_source_notes import NOW, encoded, inventory, store
 from test_wiki_topic_v3 import evidence, payload, propose
 
+pytestmark = pytest.mark.usefixtures("wiki_fixture_clock")
+
 
 @pytest.fixture
 def worker(evidence, tmp_path, monkeypatch):

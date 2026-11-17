@@ -13,6 +13,8 @@ from reports import wiki_topic_transaction_v3 as transaction
 from test_wiki_source_notes import NOW, encoded, store
 from test_wiki_topic_v3 import evidence, payload, propose
 
+pytestmark = pytest.mark.usefixtures("wiki_fixture_clock")
+
 
 @pytest.mark.parametrize("stage", ["prepared", "committed"])
 def test_actual_store_witness_rejection_preserves_bytes(evidence, store, tmp_path, monkeypatch, stage):

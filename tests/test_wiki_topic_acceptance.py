@@ -2,9 +2,13 @@
 import copy
 import json
 
+import pytest
+
 from agent_console import agent as agent_module, shared_memory, wiki
 from scripts import run_public_wiki_rollout as runner
 from test_wiki_topic_transaction import transaction, evidence
+
+pytestmark = pytest.mark.usefixtures("wiki_fixture_clock")
 
 
 def test_failed_topic_can_resume_without_recent_feed_events(transaction, monkeypatch):

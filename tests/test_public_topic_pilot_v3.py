@@ -17,6 +17,8 @@ from reports import wiki_public_budget as quota
 from reports.wiki_source_notes import materialize_source_note
 from test_wiki_source_notes import NOW, encoded, inventory, store
 
+pytestmark = pytest.mark.usefixtures("wiki_fixture_clock")
+
 
 def api():
     assert importlib.util.find_spec("reports.wiki_topic_pilot_state") is not None, "Task8 state API missing"

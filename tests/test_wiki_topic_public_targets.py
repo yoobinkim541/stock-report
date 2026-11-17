@@ -1,9 +1,13 @@
 """Public eligibility of committed multi-source topics, never private records."""
 import copy
 
+import pytest
+
 from agent_console import shared_memory
 from scripts.run_public_wiki_pilot import public_target_ids
 from test_wiki_topic_transaction import transaction, evidence, prepare, recover
+
+pytestmark = pytest.mark.usefixtures("wiki_fixture_clock")
 
 
 def test_committed_topic_is_eligible_only_with_all_public_revisions(transaction):

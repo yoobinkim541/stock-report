@@ -10,6 +10,8 @@ from test_wiki_source_notes import store
 
 from reports.wiki_source_journal import Journal, _encoded
 
+pytestmark = pytest.mark.usefixtures("wiki_fixture_clock")
+
 
 @pytest.mark.parametrize("prepared_at", ["2026-10-21T00:00:00+00:00", "2026-10-20T00:00:00", "not-a-time"])
 def test_frozen_prepared_time_is_aware_and_not_in_future(evidence_fixture, store, tmp_path, monkeypatch, prepared_at):

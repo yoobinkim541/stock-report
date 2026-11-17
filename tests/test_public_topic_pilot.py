@@ -10,6 +10,8 @@ from reports import wiki_topic_pilot_state as pilot
 from reports.wiki_source_notes import _bytes, _sha
 from test_wiki_topic_transaction import transaction, evidence, NOW
 
+pytestmark = pytest.mark.usefixtures("wiki_fixture_clock")
+
 
 def api():
     return importlib.import_module('scripts.run_public_topic_pilot')
