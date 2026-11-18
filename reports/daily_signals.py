@@ -34,6 +34,9 @@ def _detect_price_signals(ticker):
         hist = ticker.history(period="1mo")
         if hist is None or hist.empty:
             return signals
+        # Yahoo 가 KRX 최신 일봉을 거래량만 채우고 종가 NaN 으로 줄 때가 있다(2026-11-19 실측).
+        # 마지막 행만 보고 판단하면 가격 정보 전체가 비어 KR 모의 주문이 0 건이 된다.
+        hist = hist.dropna(subset=["Close"])
 
         closes = hist["Close"]
         volumes = hist["Volume"]

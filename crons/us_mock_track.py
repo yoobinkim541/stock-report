@@ -163,6 +163,37 @@ TRANCHES = _int_env("US_MOCK_TRANCHES", 3)
 QUOTE_STALE_S = _int_env("REALTIME_QUOTE_STALE_S", 10)
 LEV_ETF_MAX_POS = _int_env("US_MOCK_LEVERAGE_MAX_POS", 2)
 LEV_ETF_MAX_WEIGHT = _float_env("US_MOCK_LEVERAGE_MAX_WEIGHT", 0.35)
+# 잔고 조회가 일시 장애(KIS '모의투자 서비스가 지연되고 있습니다'·NAV 미확인·응답 없음)면 이 간격으로
+# 다시 조회한다. 하루 1회 실행이라 한 번 실패하면 그날 리밸런스가 통째로 빠졌다(2026-11-19 00:00 KST
+# 실패 — 체결기준현재잔고만 ≥1시간 '지연'). 기본 10분×6회 = 최대 1시간(겨울 10~11시 ET, 장중).
+BALANCE_RETRIES = _int_env("US_MOCK_BALANCE_RETRIES", 6)
+BALANCE_RETRY_S = _float_env("US_MOCK_BALANCE_RETRY_S", 600.0)
+_TRANSIENT_BROKER_SIGNS = ("지연", "잠시후", "잠시 후")
+
+
+def _transient_balance_problem(problem: str | None) -> bool:
+    """다시 조회하면 풀릴 수 있는 잔고 이상. 계좌 미신청 같은 브로커 거부는 재시도하지 않는다."""
+    if not problem:
+        return False
+    if problem in ("nav_missing", "balance_failed"):
+        return True
+    return problem.startswith("broker_rejected") and any(s in problem for s in _TRANSIENT_BROKER_SIGNS)
+
+
+def _fetch_balance(retries: int | None = None, wait_s: float | None = None) -> tuple[dict, str | None]:
+    """kis_mock.get_balance + 일시 장애 재시도. 반환 (잔고, balance_problem 사유 또는 None)."""
+    retries = BALANCE_RETRIES if retries is None else max(0, int(retries))
+    wait_s = BALANCE_RETRY_S if wait_s is None else float(wait_s)
+    for attempt in range(retries + 1):
+        bal = kis_mock.get_balance()
+        problem = mock_generations.balance_problem(bal)
+        if not _transient_balance_problem(problem) or attempt >= retries:
+            return bal, problem
+        logger.warning("KIS 모의 잔고 일시 이상(%s) — %.0f초 뒤 재조회 (%d/%d)",
+                       problem, wait_s, attempt + 1, retries)
+        time.sleep(wait_s)
+    return bal, problem
+
 
 # ★Tier3 구조적 레버리지 슬리브 (모의 한정 라이브 검증) — 게이트 GO shadow 가 신선할 때만
 # NAV 의 (reco_lev − 1) 비율을 2x ETF 로 보유 → 유효 레버리지 ≈ reco_lev.
@@ -327,9 +358,10 @@ def compute_us_signals(universe: list[str] | None = None) -> list[dict]:
             feats = us_policy.extract_features(fund, earnings, sig)
             # ★가격 축(mom12·hi52·lowvol) + PEAD 축 — 기본 가중 0(수집 전용) → 원장 축적 후
             # 학습 게이트(us_mock_learn) 채택. 실패 시 미기록 → score() 재정규화 (graceful)
+            # mom12 는 253행이 필요해 2년치를 쓴다(1y 는 ~250행이라 mom12 가 빠졌다 — 2026-11-19).
             try:
                 from providers.market_data import _history_cached
-                h = _history_cached(tk, period="1y")
+                h = _history_cached(tk, period="2y")
                 closes = h["Close"] if (h is not None and "Close" in getattr(h, "columns", [])) else None
                 if closes is not None:
                     feats.update(us_policy.price_axes(closes))
@@ -631,8 +663,7 @@ def main(argv: list[str] | None = None) -> int:
 
     cash_derived = False
     if not dry:
-        bal = kis_mock.get_balance()
-        balance_issue = mock_generations.balance_problem(bal)
+        bal, balance_issue = _fetch_balance()
         # 잔고를 모르면(조회 실패·브로커 거부·NAV 미확인) 빈 보유로 오인하거나 시드/보유평가액
         # 예산으로 매수하면 안 된다 — snapshot 대신 실패 이벤트만 남기고 주문 보류.
         if balance_issue:
@@ -649,21 +680,33 @@ def main(argv: list[str] | None = None) -> int:
 
     signals = compute_us_signals()
     sweet_orders = None
+    sweet_basis = ""
+    sweet_weights: dict[str, float] = {}
+    max_positions = MAX_POS
     if os.getenv("MOCK_SWEET_SPOT", "1") != "0":
         from ml.data_pipeline import fetch_prices
-        from ml.mock_sweet_spot import etf_orders, us_n_weights
+        from ml.mock_sweet_spot import etf_orders, us_n_basis, us_n_state
         loaded = fetch_prices(["QQQ", "QLD", "SGOV", "GLD", "^VIX", "^VIX3M"], days=400)
         closes = {t: df["Close"] for t, df in loaded.items()
                   if df is not None and not getattr(df, "empty", True) and "Close" in df.columns}
-        weights = us_n_weights(closes)
+        state = us_n_state(closes)
+        weights = state.get("weights", {})
         prices = {t: float(s.dropna().iloc[-1]) for t, s in closes.items() if t in weights and len(s.dropna())}
         if weights:
-            sweet_orders = etf_orders(weights, positions, nav * INVEST, prices, band=REBAL_BAND)
-            logger.info("스위트스팟 US N: %s",
-                        " ".join(f"{k} {v:.0%}" for k, v in weights.items()))
+            # 매수는 주식 경로와 같은 현금 상한 — 역산 현금(cash_derived)이면 더 보수적인 버퍼
+            buffer = CASH_BUFFER_DERIVED if cash_derived else CASH_BUFFER
+            buy_cash = (cash * buffer) if cash is not None else None
+            sweet_orders = etf_orders(weights, positions, nav * INVEST, prices, band=REBAL_BAND,
+                                      cash=buy_cash, min_cash=MIN_CASH_USD)
+            sweet_basis = us_n_basis(state)
+            sweet_weights = weights
+            logger.info("%s (매수현금 상한 %s)", sweet_basis,
+                        f"${buy_cash:,.0f}" if buy_cash is not None else "없음")
     if sweet_orders is not None:
         plan = sweet_orders
-        logger.info("리밸런스 계획 %d건 (스위트스팟 ETF)", len(plan))
+        budget = nav * INVEST
+        max_positions = sum(1 for w in sweet_weights.values() if w > 0)
+        logger.info("리밸런스 계획 %d건 (스위트스팟 ETF · US_MOCK_MAX_POS 미적용)", len(plan))
     elif not signals:
         logger.warning("US 신호 0건 — 종료")
         return 0
@@ -722,6 +765,20 @@ def main(argv: list[str] | None = None) -> int:
     ledger = Ledger("us_mock")
     llm_shadow_ledger = Ledger("us_mock_llm_shadow")
     sig_by = {s["ticker"]: s for s in signals}
+    if sweet_orders is not None:
+        # 스위트스팟 ETF(SGOV·GLD 등)는 종목 신호에 없거나 다른 근거(주식 정책)를 달고 있다 —
+        # 실제 선택 근거로 덮어 원장·알림·LLM 검토가 같은 근거를 보게 한다.
+        for sym, w in sweet_weights.items():
+            row = dict(sig_by.get(sym) or {"ticker": sym})
+            row["selection_basis"] = f"{sweet_basis} · {sym} 목표 {w:.0%}"
+            row["rationale"] = {**(row.get("rationale") or {}), "one_line_reason": row["selection_basis"]}
+            sig_by[sym] = row
+        for o in plan:
+            if o["symbol"] not in sweet_weights:
+                row = dict(sig_by.get(o["symbol"]) or {"ticker": o["symbol"]})
+                row["selection_basis"] = f"{sweet_basis} · {o['symbol']} 바구니 밖 → 전량 매도"
+                row["rationale"] = {**(row.get("rationale") or {}), "one_line_reason": row["selection_basis"]}
+                sig_by[o["symbol"]] = row
     today = datetime.now(KST).strftime("%Y-%m-%d")
 
     # ★랭킹 섀도 — KR 미러(kiwoom_mock_track). 주문된 상위 N 만 원장에 남기면 점수 분산이
@@ -733,8 +790,8 @@ def main(argv: list[str] | None = None) -> int:
     logger.info("랭킹 섀도 적재: %d건 (유니버스 %d)", _shadow_n, len(signals))
 
     llm_payload = llm_exec.build_order_review_payload(
-        market="US", nav=nav, cash=cash, budget=budget, max_positions=MAX_POS,
-        orders=plan, positions=positions, signals=signals)
+        market="US", nav=nav, cash=cash, budget=budget, max_positions=max_positions,
+        orders=plan, positions=positions, signals=list(sig_by.values()))
     llm_reviews, llm_status = llm_exec.run_order_review(llm_payload)
     logged = llm_exec.log_shadow_reviews(
         llm_shadow_ledger, market="US", date=today, plan=plan, reviews=llm_reviews,
@@ -796,7 +853,7 @@ def main(argv: list[str] | None = None) -> int:
                                          "kind": "cost", "cost": round(day_cost, 2),
                                          "notional": round(day_notional, 2)})
     _record_snapshot(bal, None)
-    _notify(nav, results, llm_note=llm_exec.fallback_note(llm_record))
+    _notify(nav, results, llm_note=llm_exec.fallback_note(llm_record), basis=sweet_basis or None)
     logger.info("=== 완료: 집행 %d건 ===", sum(1 for r in results if r.get("ok")))
     return 0
 
@@ -819,10 +876,11 @@ def _log_decision(ledger, sig, sym, kind, order_side, qty, ok, today):
             "market": sig.get("market"),
             "reason_codes": sig.get("reason_codes"),
             "rationale": sig.get("rationale"), "features": sig.get("features"), "ok": ok,
+            "selection_basis": sig.get("selection_basis"),
         })
         if kind in ("편입", "퇴출"):
             icon = "📥" if kind == "편입" else "📤"
-            rr = (sig.get("rationale") or {}).get("one_line_reason", "")
+            rr = sig.get("selection_basis") or (sig.get("rationale") or {}).get("one_line_reason", "")
             ledger.append_journal(today, f"- {today} {icon} {kind} {sym} — {rr} (정책 {sig.get('policy_score','')})")
     except Exception as e:
         logger.warning("결정 원장 기록 실패 %s: %s", sym, e)
@@ -865,11 +923,13 @@ def _order_blocker(msg) -> str | None:
     return None
 
 
-def _notify(nav, results, llm_note: str | None = None):
+def _notify(nav, results, llm_note: str | None = None, basis: str | None = None):
     _ICON = {"편입": "📥", "증액": "➕", "퇴출": "📤", "감액": "➖", "레버슬리브": "🏗️"}
     lines = ["🧪 [모의] 미국 페이퍼트레이딩 (KIS 해외)", "━━━━━━━━━━━━━━"]
     if nav is not None:
         lines.append(f"  NAV  ${nav:,.0f}")
+    if basis:
+        lines.append(f"  근거: {basis}")
     if not results:
         lines.append("  주문 없음 (목표 = 보유)")
 

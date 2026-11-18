@@ -429,10 +429,17 @@ def test_a_exec_fix2_unknown_nav_with_holdings_holds_orders(monkeypatch):
     rows["us_mock_history"] = [{"date": "2026-08-24 06:40", "kind": "snapshot", "nav": 255_000.0,
                                 "cash": 120_000.0, "positions": 5}]
     monkeypatch.setattr(T.kis_mock, "is_enabled", lambda: True)
-    monkeypatch.setattr(T.kis_mock, "get_balance", lambda: {
-        "ok": True, "positions": {"AAPL": {"shares": 10, "value": 128_000.0}}, "pos_value": 128_000.0,
-        "cash_usd": None, "cash_derived": False, "nav": None, "krw_asset": 360_000_000.0, "fx": None,
-        "raw": {"rt_cd": "0"}})
+    calls = []
+
+    def _balance():
+        calls.append(1)
+        return {"ok": True, "positions": {"AAPL": {"shares": 10, "value": 128_000.0}},
+                "pos_value": 128_000.0, "cash_usd": None, "cash_derived": False, "nav": None,
+                "krw_asset": 360_000_000.0, "fx": None, "raw": {"rt_cd": "0"}}
+
+    monkeypatch.setattr(T.kis_mock, "get_balance", _balance)
+    sleeps = []
+    monkeypatch.setattr(T.time, "sleep", sleeps.append)
 
     def _no_signals():
         raise AssertionError("NAV 미확인 시 신호·주문 단계로 진행하면 안 된다")
@@ -442,3 +449,95 @@ def test_a_exec_fix2_unknown_nav_with_holdings_holds_orders(monkeypatch):
     assert T.main([]) == 1
     assert [r["kind"] for r in rows["us_mock_history"]] == ["snapshot", "snapshot_failed"]
     assert rows["us_mock_history"][-1]["reason"] == "nav_missing"
+    assert len(calls) == T.BALANCE_RETRIES + 1                 # 재조회 후에도 미확인이면 보류
+    assert sleeps == [T.BALANCE_RETRY_S] * T.BALANCE_RETRIES
+
+
+def _ok_balance(nav=250_000.0, cash=250_000.0, positions=None):
+    return {"ok": True, "positions": positions or {}, "pos_value": nav - cash, "cash_usd": cash,
+            "cash_derived": True, "nav": nav, "fx": 1400.0, "raw": {"rt_cd": "0"}}
+
+
+def test_fetch_balance_retries_kis_delay_then_succeeds(monkeypatch):
+    """2026-11-19 00시: 체결기준현재잔고가 '모의투자 서비스가 지연' 으로 실패 → 그날 리밸런스가
+    통째로 빠졌다. 일시 장애는 재조회해서 성공한 잔고를 써야 한다."""
+    delayed = {"ok": False, "positions": {}, "nav": None,
+               "raw": {"rt_cd": "1", "msg1": "모의투자 서비스가 지연되고 있습니다. 잠시후 재시도 바랍니다."}}
+    seq = [delayed, delayed, _ok_balance()]
+    monkeypatch.setattr(T.kis_mock, "get_balance", lambda: seq.pop(0))
+    sleeps = []
+    monkeypatch.setattr(T.time, "sleep", sleeps.append)
+
+    bal, problem = T._fetch_balance(retries=3, wait_s=60)
+
+    assert problem is None and bal["nav"] == 250_000.0
+    assert sleeps == [60, 60]
+
+
+def test_fetch_balance_does_not_retry_account_rejection(monkeypatch):
+    rejected = {"ok": False, "positions": {}, "nav": None,
+                "raw": {"rt_cd": "1", "msg1": "모의투자 신청내역이 없습니다"}}
+    calls = []
+    monkeypatch.setattr(T.kis_mock, "get_balance", lambda: calls.append(1) or rejected)
+    monkeypatch.setattr(T.time, "sleep", lambda s: (_ for _ in ()).throw(AssertionError("no retry")))
+
+    _, problem = T._fetch_balance(retries=3, wait_s=60)
+
+    assert problem.startswith("broker_rejected") and len(calls) == 1
+
+
+class _FakeLedger:
+    decisions: list = []
+
+    def __init__(self, surface, *a, **k):
+        self.surface = surface
+
+    def log_decision(self, row):
+        _FakeLedger.decisions.append((self.surface, dict(row)))
+
+    def __getattr__(self, name):
+        return lambda *a, **k: None
+
+
+def test_sweet_spot_etf_path_places_cash_capped_orders_with_real_basis(monkeypatch):
+    """스위트스팟 ETF 경로가 budget 미정의로 주문 전에 죽던 버그 회귀 + 현금 상한 + 실제 근거 기록."""
+    import pandas as pd
+    import ml.adaptive
+    import ml.data_pipeline
+
+    rows = _fake_history(monkeypatch)
+    monkeypatch.setenv("MOCK_SWEET_SPOT", "1")
+    monkeypatch.setenv("MOCK_ORDER_LLM_ENABLED", "0")
+    monkeypatch.setattr(T.kis_mock, "is_enabled", lambda: True)
+    monkeypatch.setattr(T.kis_mock, "get_balance", lambda: _ok_balance())
+    monkeypatch.setattr(T, "compute_us_signals", lambda: [])
+    monkeypatch.setattr(T, "_rt_best", lambda sym, side: None)
+    monkeypatch.setattr(T.kis_mock, "get_price", lambda sym: {"SGOV": 100.0, "GLD": 400.0}.get(sym))
+    placed = []
+    monkeypatch.setattr(T.kis_mock, "place_order",
+                        lambda sym, qty, side, price=None: placed.append((sym, side, qty, price)) or {"ok": True})
+    monkeypatch.setattr(T.trade_events, "record_trade", lambda **k: None)
+    monkeypatch.setattr(T.time, "sleep", lambda s: None)
+    notes = {}
+    monkeypatch.setattr(T, "_notify", lambda nav, results, llm_note=None, basis=None: notes.update(basis=basis))
+    _FakeLedger.decisions = []
+    monkeypatch.setattr(ml.adaptive, "Ledger", _FakeLedger)
+
+    idx = pd.bdate_range("2025-01-01", periods=280)
+    down = pd.Series(range(380, 100, -1), index=idx, dtype=float)     # 하락 추세 → 위험자산 0
+    flat = lambda v: pd.Series(v, index=idx, dtype=float)
+    frames = {"QQQ": down, "QLD": down, "SGOV": flat(100.0), "GLD": flat(400.0),
+              "^VIX": flat(20.0), "^VIX3M": flat(21.0)}
+    monkeypatch.setattr(ml.data_pipeline, "fetch_prices",
+                        lambda tickers, days=400: {t: pd.DataFrame({"Close": frames[t]}) for t in tickers})
+
+    assert T.main([]) == 0
+
+    buys = {sym: qty * px for sym, side, qty, px in placed if side == "buy"}
+    assert set(buys) == {"SGOV", "GLD"}
+    assert sum(buys.values()) <= 250_000 * T.CASH_BUFFER_DERIVED     # 역산 현금 버퍼 상한
+    assert notes["basis"] and "SGOV" in notes["basis"]
+    us = [row for surface, row in _FakeLedger.decisions if surface == "us_mock"]
+    assert len(us) == 2
+    assert all((r.get("selection_basis") or "").startswith(notes["basis"]) for r in us)
+    assert rows["us_mock_history"][-1]["kind"] == "snapshot"

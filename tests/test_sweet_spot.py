@@ -47,3 +47,54 @@ def test_etf_orders_sell_names_outside_the_basket():
     )
     assert orders[0] == {"symbol": "AAPL", "side": "sell", "qty": 3, "reason": "스위트스팟이탈"}
     assert any(o["symbol"] == "SGOV" and o["side"] == "buy" for o in orders)
+
+
+def _kr_plan(signals, positions, n):
+    import importlib
+    import os
+    import sys
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "crons"))
+    kt = importlib.import_module("kiwoom_mock_track")
+    return kt.plan_rebalance(signals, positions, 10_000_000, n, exit_buffer=2)
+
+
+def test_kr_exit_buffer_keeps_held_boundary_name_without_topping_up():
+    """상위 k 밖으로 막 밀려난 보유 종목은 유예(매도·증액 없음), 한참 밖이면 판다."""
+    signals = [_sig(c, m, v, h) for c, m, v, h in (
+        ("A", 1.0, 1.0, 1.0), ("B", 0.9, 0.9, 0.9), ("C", 0.5, 0.5, 0.5),
+        ("D", 0.4, 0.4, 0.4), ("E", 0.0, 0.0, 0.0))]
+    positions = {"C": {"shares": 100, "cur_price": 10000}, "E": {"shares": 50, "cur_price": 10000}}
+
+    marked, n = apply_kr_signals(signals, k=2, exit_buffer=1)
+    by = {s["code"]: s for s in marked}
+    orders = {(o["code"], o["side"]) for o in _kr_plan(marked, positions, n)}
+
+    assert n == 2
+    assert by["C"]["selection_basis"].startswith("스위트스팟 유예")
+    assert ("C", "sell") not in orders and ("C", "buy") not in orders
+    assert ("E", "sell") in orders                       # 3위 밖(k+buffer) — 청산
+    assert ("A", "buy") in orders and ("B", "buy") in orders
+    assert by["A"]["selection_basis"].startswith("스위트스팟 선정")
+
+
+def test_kr_without_exit_buffer_sells_boundary_name():
+    signals = [_sig(c, m, v, h) for c, m, v, h in (
+        ("A", 1.0, 1.0, 1.0), ("B", 0.9, 0.9, 0.9), ("C", 0.5, 0.5, 0.5))]
+    marked, n = apply_kr_signals(signals, k=2)
+    orders = {(o["code"], o["side"]) for o in _kr_plan(marked, {"C": {"shares": 100}}, n)}
+    assert ("C", "sell") in orders
+
+
+def test_etf_orders_scale_buys_to_available_cash():
+    weights = {"SGOV": 0.5, "GLD": 0.5}
+    prices = {"SGOV": 100.0, "GLD": 400.0}
+    orders = etf_orders(weights, {}, 200_000, prices, cash=50_000)
+    buys = {o["symbol"]: o["qty"] for o in orders if o["side"] == "buy"}
+    assert buys == {"SGOV": 250, "GLD": 62}             # 각 목표의 1/4 — 같은 비율로 축소
+    assert sum(q * prices[s] for s, q in buys.items()) <= 50_000
+
+
+def test_etf_orders_skip_buys_below_min_cash_but_keep_sells():
+    orders = etf_orders({"SGOV": 1.0}, {"QQQ": {"shares": 3}}, 100_000, {"SGOV": 100.0},
+                        cash=300, min_cash=500)
+    assert orders == [{"symbol": "QQQ", "side": "sell", "qty": 3, "reason": "스위트스팟이탈"}]

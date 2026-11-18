@@ -194,13 +194,17 @@ def compute_kr_signals(limit: int = UNIVERSE) -> list[dict]:
             price = float((sig.get("price_info") or {}).get("current_price") or 0)
             action = dec.get("action", "")
             feats = kr_policy.extract_features(fund, sig, dec)
-            # ★가격 축(mom12·hi52·lowvol) — 12M 수정주가 point-in-time (그래이스풀:
-            # 이력 부족/네트워크 실패 시 미기록 → score() 가 사용분만 재정규화)
+            # ★가격 축(mom12·hi52·lowvol) — 수정주가 point-in-time. mom12 는 253행이 필요해
+            # 2년치를 쓴다(1y 는 ~245행이라 mom12 가 한 번도 계산되지 않았다 — 2026-11-19 감사).
+            # (그래이스풀: 이력 부족/네트워크 실패 시 미기록 → score() 가 사용분만 재정규화)
             try:
                 from providers.market_data import _history_cached
-                h = _history_cached(tk, period="1y")
+                h = _history_cached(tk, period="2y")
                 if h is not None and "Close" in getattr(h, "columns", []):
-                    feats.update(kr_policy.price_axes(h["Close"]))
+                    close_hist = h["Close"].dropna()
+                    feats.update(kr_policy.price_axes(close_hist))
+                    if price <= 0 and len(close_hist):
+                        price = float(close_hist.iloc[-1])   # 신호 현재가 결측 → 마지막 유효 종가
             except Exception:
                 pass
             # ★LLM 뉴스 구조화 축 — news_llm_snapshot 라벨 집계 (없으면 미기록 → 재정규화)
@@ -615,12 +619,14 @@ def _log_decision(ledger, sig: dict, code: str, kind: str, order_side: str,
             "reason_codes": sig.get("reason_codes"),
             "score": sig.get("score"),
             "rationale": sig.get("rationale"),
+            "selection_basis": sig.get("selection_basis"),   # 실제 선택 근거(스위트스팟 순위)
+            "sweet_spot_ranks": sig.get("sweet_spot_ranks"),
             "features": sig.get("features"),      # point-in-time — 학습 입력
             "ok": ok,
         })
         if kind in ("편입", "퇴출"):
             icon = "📥" if kind == "편입" else "📤"
-            rr = (sig.get("rationale") or {}).get("one_line_reason", "")
+            rr = sig.get("selection_basis") or (sig.get("rationale") or {}).get("one_line_reason", "")
             ledger.append_journal(
                 today, f"- {today} {icon} {kind} {code} {sig.get('action','')} — {rr} (점수 {sig.get('score','')})")
     except Exception as e:
@@ -711,7 +717,9 @@ def _decision_detail_lines(sig: dict | None, order: dict | None = None) -> list[
 
     lines = []
     if parts:
-        lines.append("     근거: " + " · ".join(parts))
+        # 스위트스팟 경로에선 _decision_v2 판단·정책점수가 선택에 쓰이지 않는다 — 참고로만 표시
+        label = "     참고(선택 미사용): " if sig.get("selection_basis") else "     근거: "
+        lines.append(label + " · ".join(parts))
 
     statuses = [(label, r.get(key)) for label, key in (
         ("재무", "financial"), ("타이밍", "timing"), ("뉴스", "news"), ("리스크", "risk")) if r.get(key)]
@@ -756,13 +764,16 @@ def _notify_llm_lines(nav: float | None, results: list[dict], signals_by_code: d
             "financial_score": sig.get("score"),
             "policy_score": sig.get("policy_score"),
             "rationale": sig.get("rationale") or {},
+            "selection_basis": sig.get("selection_basis"),
             "features": sig.get("features") or {},
         })
     payload = {
         "market": "KR",
         "nav": nav,
         "recent_decisions": decisions[:5],
-        "instruction": "최근 모의 편입/퇴출의 판단근거만 2~3줄로 설명. 입력에 없는 전망·뉴스·숫자는 금지.",
+        "instruction": ("최근 모의 편입/퇴출의 판단근거만 2~3줄로 설명. selection_basis 가 있으면 그것이 실제 "
+                        "선택 근거이고 action·financial_score·policy_score 는 선택에 쓰이지 않은 참고값이다. "
+                        "입력에 없는 전망·뉴스·숫자는 금지."),
     }
     try:
         from lib import mock_llm_rationale
@@ -796,7 +807,8 @@ def _notify(nav: float | None, results: list[dict], signals: list[dict],
         code = r.get("code")
         if code and code not in name_by_code:
             name_by_code[code] = _company_name_for_code(code)
-    reason_by_code = {s["code"]: (s.get("rationale") or {}).get("one_line_reason", "")
+    reason_by_code = {s["code"]: (s.get("selection_basis")
+                                  or (s.get("rationale") or {}).get("one_line_reason", ""))
                       for s in signals if s.get("code")}
 
     lines = ["🧪 [모의] 국내 페이퍼트레이딩", "━━━━━━━━━━━━━━━━━━━━━━━"]
@@ -920,6 +932,13 @@ def main(argv: list[str] | None = None) -> int:
     if not signals and not book.get("ok"):
         logger.warning("신호 0건 — 종료")
         return 0
+    unpriced = [s["code"] for s in signals if float(s.get("price") or 0) <= 0]
+    data_note = None
+    if signals and len(unpriced) == len(signals):
+        data_note = f"⚠️ 현재가 없음 {len(signals)}/{len(signals)}종목 — 가격 데이터 결측으로 주문 계획 불가"
+        logger.error("KR 신호 %d종목 전부 현재가 없음 — 주문 계획 불가", len(signals))
+    elif unpriced:
+        logger.warning("KR 현재가 없음 %d종목(선정 제외): %s", len(unpriced), ",".join(unpriced))
 
     min_hold = MIN_HOLD_DAYS
     tranches = TRANCHES
@@ -939,10 +958,13 @@ def main(argv: list[str] | None = None) -> int:
         logger.info("장점 앙상블 미적용 — 기존 정책 유지: %s", book.get("error"))
         if os.getenv("MOCK_SWEET_SPOT", "1") != "0":
             from ml.mock_sweet_spot import apply_kr_signals
-            signals, sweet_n = apply_kr_signals(signals)
+            signals, sweet_n = apply_kr_signals(signals, exit_buffer=EXIT_BUFFER)
             if sweet_n:
                 pos_n = sweet_n
-                logger.info("스위트스팟 KR: mom12+lowvol 50%% + lowvol+hi52 50%%, 목표 %d종목", sweet_n)
+                logger.info("스위트스팟 KR: mom12+lowvol 50%% + lowvol+hi52 50%%, 목표 %d종목 "
+                            "(KR_MOCK_MAX_POS=%d 미적용 · 유예 상위 5+%d)", sweet_n, MAX_POS, EXIT_BUFFER)
+            else:
+                logger.warning("스위트스팟 KR 비중 산출 실패(가격·축 결측) — 기존 정책으로 폴백")
     budget = nav if target_weights is not None else nav * INVEST
     held_days = _held_days(positions) if min_hold > 0 else {}
     plan = plan_rebalance(signals, positions, budget, pos_n, cash_krw=cash,
@@ -990,7 +1012,7 @@ def main(argv: list[str] | None = None) -> int:
     logger.info("랭킹 섀도 적재: %d건 (유니버스 %d)", _shadow_n, len(signals))
 
     llm_payload = llm_exec.build_order_review_payload(
-        market="KR", nav=nav, cash=cash, budget=budget, max_positions=MAX_POS,
+        market="KR", nav=nav, cash=cash, budget=budget, max_positions=pos_n,
         orders=plan, positions=positions, signals=signals)
     llm_reviews, llm_status = llm_exec.run_order_review(llm_payload)
     logged = llm_exec.log_shadow_reviews(
@@ -1054,7 +1076,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if day_notional > 0:                       # 당일 거래비용 1건 적재 (리포트 누적·회전율용)
         _append_history({"kind": "cost", "cost": round(day_cost, 2), "notional": round(day_notional, 2)})
-    _notify(nav, results, signals, llm_note=llm_exec.fallback_note(llm_record))
+    note = " / ".join(n for n in (data_note, llm_exec.fallback_note(llm_record)) if n) or None
+    _notify(nav, results, signals, llm_note=note)
     logger.info("=== 완료: 집행 %d건 ===", sum(1 for r in results if r.get("ok")))
     return 0
 
