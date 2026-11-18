@@ -77,6 +77,26 @@ contract and existing raw retention remain unchanged.
   are renumbered, so a stored note replays through `validate_compilation`
   unchanged. Claims with figures fail more often than qualitative ones, so a
   partial note under-represents the source's numbers.
+- A fresh claim the model dates `unknown` gets the post's KST date labelled as
+  such (`2026-11-11 게시`), or the first collection date when the source has no
+  `published_at` (`2026-10-12 수집`; 675 of 689 community and 21 of 235
+  sell-side journal sources lacked it on 2026-11-18). Without either it stays
+  as the model wrote it. Only new output is
+  relabelled (`wiki_source_compiler._date_unknown_claims`); stored compilations
+  replay unchanged, so older claims keep `unknown`.
+- A page that a source batch creates gets a summary: its own additions with
+  citation markers removed, at most `NEW_PAGE_SUMMARY_LIMIT` (400) characters.
+  Routing matches candidates by title and summary, and 798 of 843 market pages had
+  none. Existing pages keep their summaries: any field change takes a page out of
+  the public targets (`_matches_receipt_page` allows only relinks and deletions of
+  at most 10% of the body).
+- 2026-11-18 one-off tidy (backup `/home/ubuntu/backups/stockbot-wiki-tidy-20261118T054630Z`,
+  revisions under `<wiki artifacts>/revisions/`, `body_tidy` log entries): 442
+  pages lost `unknown | ` from 798 headings, 70 local-path bullet lines and 9
+  exact repeated lines. Deletions only; 3 pages that would have dropped out of
+  the public targets were left alone (targets 605 before and after). Repeated
+  sentences inside a line were kept, because removing one also removed the
+  citation that ended the line.
 - The autonomous curator spends `WIKI_AUTONOMOUS_MAX_JUDGMENTS` (default 12)
   per run before each LLM call, including failures and skips, and remembers
   unapplied outcomes in `<wiki artifacts>/autonomous-curator-state.json`

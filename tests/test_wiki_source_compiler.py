@@ -44,6 +44,23 @@ def test_legacy_output_without_title_remains_loadable():
     assert compiled['claims']
 
 
+@pytest.mark.parametrize("dates, want", [
+    ({"published_at": "2026-11-10T23:30:00+00:00", "collected_at": "2026-11-12T01:00:00+00:00"}, "2026-11-11 게시"),
+    ({"published_at": "", "collected_at": "2026-10-12T07:05:05+00:00"}, "2026-10-12 수집"),
+    ({"published_at": "", "collected_at": ""}, "Unknown"),
+])
+def test_undated_claim_takes_the_post_date_and_stored_compilations_still_validate(dates, want):
+    item = {**source(), **dates}
+    plan = output()
+    plan["claims"].append({**plan["claims"][0], "as_of": "2026-10-09"})
+    plan["claims"][0]["as_of"] = "Unknown"
+    compiled = module().compile_source(item, llm_fn=lambda _: json.dumps(plan))
+    assert [claim["as_of"] for claim in compiled["claims"]] == [want, "2026-10-09"]
+    stored = {**plan, "claims": [{key: claim[key] for key in ("text", "as_of", "scope", "anchor",
+                                  "competing_claim_ids")} for claim in compiled["claims"]]}
+    assert module().validate_compilation(stored, item)["claims"] == compiled["claims"]
+
+
 def test_complete_source_and_synthesis_tail_preserved():
     item = source()
     item["body"] = "source details " * 1000 + "final exception"

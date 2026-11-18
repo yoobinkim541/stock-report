@@ -57,6 +57,19 @@ def test_atomic_additions_preserve_old_prose_trust_history_and_unrelated(store):
                for page_id, expected in batch["expected_after"].items())
 
 
+def test_new_page_is_summarised_by_its_own_additions_and_existing_summaries_stay(store):
+    from reports.wiki_source_integration import _new_spec
+    proposal, compiled, source = inputs(("entity",))
+    spec = _new_spec({"title": "Capacity outlook", "kind": "concept", "surface": "market",
+                      "purpose": "Track capacity separately from demand"}, REV, "market")
+    proposal["targets"].append({**spec, "before_hash": None, "relations": [], "additions": [
+        {"claim_ids": ["new-claim"], "as_of": "2026-10-09", "scope": "capacity",
+         "body": "Capacity was added [S1](https://example.org/new).\nDemand is unproven [S1]."}]})
+    assert wiki.apply_source_batch(wiki.prepare_source_batch(proposal, compiled, source))["status"] == "applied"
+    assert wiki.get_page(spec["page_id"])["summary"] == "Capacity was added. Demand is unproven."
+    assert wiki.get_page("entity")["summary"] == ""
+
+
 def test_conflict_without_claim_mapping_is_explicitly_unresolved(store):
     proposal, compiled, source = inputs(('entity',))
     proposal['role'] = source['role'] = 'conflict'

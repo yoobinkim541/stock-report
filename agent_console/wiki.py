@@ -28,6 +28,7 @@ VALID_KINDS = ("note", "playbook", "decision", "risk", "concept", "overview", "s
 MAX_LINKS = 12
 MAX_SOURCE_REFS = 100
 WIKI_SUMMARY_LIMIT = 2400
+NEW_PAGE_SUMMARY_LIMIT = 400
 WIKI_BODY_LIMIT = 12000
 WIKI_CONTEXT_BODY_SNIPPET = 1600
 WIKI_SPLIT_TARGET = 9000
@@ -1175,6 +1176,11 @@ def prepare_source_batch(proposal: dict, compiled: dict, source: dict) -> dict:
         prose = [f"\n\n### {addition['as_of']} | {addition['scope']}\n{addition['body']}"
                  for addition in target["additions"]]
         page.update(body=old_body + "".join(prose), updated_at=fixed_time, _preserve_body_exact=True)
+        if snap is None:
+            # Routing judges candidates by title and summary; 798 of 843 market pages had none (2026-11-18). The
+            # page's own validated additions, without citation markers, describe it.
+            page["summary"] = _clean(re.sub(r"\s+", " ", re.sub(r"\s*\[S\d+\](?:\([^)\s]*\))?", "", " ".join(
+                addition["body"] for addition in target["additions"]))).strip(), NEW_PAGE_SUMMARY_LIMIT)
         refs = list(dict.fromkeys([*(snap["source_refs"] if snap else []), source["canonical_url"],
                                   source["raw_ref"], source["text_ref"]]))
         support = list(snap["evidence_ids"] if snap else [])

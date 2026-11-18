@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from collections import Counter
 from decimal import Decimal
+from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 import hashlib
 import json
@@ -845,4 +846,30 @@ def compile_source(source: SourceRevision, *, llm_fn: Callable[[str], str | None
     payload, _ = usable_parts(payload, source)
     compiled = validate_compilation(payload, source)
     _require_grounding(payload, compiled, source)
+    return _date_unknown_claims(compiled, source)
+
+
+_KST = timezone(timedelta(hours=9))
+
+
+def _date_unknown_claims(compiled: CompiledSource, source: SourceRevision) -> CompiledSource:
+    """Give a claim whose source states no date the post's KST date, labelled as such.
+
+    Close to half of all claims came back as_of="unknown" (2026-11-18: Codex 544 of 1310, Hive 507 of 1071) and
+    pages showed '### unknown | …' headings. Only fresh model output is relabelled: stored compilations are
+    re-validated byte for byte and keep their value. A post without published_at falls back to its first
+    collection time and says so.
+    """
+    for field, label in (("published_at", "게시"), ("collected_at", "수집")):
+        try:
+            stamp = datetime.fromisoformat(str(source.get(field) or ""))
+        except ValueError:
+            continue
+        as_of = f"{(stamp.astimezone(_KST) if stamp.tzinfo else stamp):%Y-%m-%d} {label}"
+        break
+    else:
+        return compiled
+    for claim in compiled["claims"]:
+        if claim["as_of"].strip().lower() == "unknown":
+            claim["as_of"] = as_of
     return compiled
