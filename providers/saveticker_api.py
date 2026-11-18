@@ -2,7 +2,8 @@
 
 2026-11-12 실측:
 - ``https://saveticker.com/api/*`` 는 Cloudflare 챌린지로 403(HTML)을 돌려준다.
-- ``https://api.saveticker.com/api/calendar/events`` 는 아직 일정 JSON을 돌려준다.
+- ``https://api.saveticker.com/api/calendar/events`` 는 2026-11-17부터 HTTP 426 이다 (경제 캘린더는
+  ``providers/econ_calendar.py`` 가 ForexFactory 로 대체).
 - 같은 호스트의 ``news/top-stories`` 와 ``news/list`` 는 서비스 종료
   공지(``id=legacy-news-sunset-notice``)만 반환한다. 이 공지를 기사로 저장하면 안 된다.
 

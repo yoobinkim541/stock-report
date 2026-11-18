@@ -14,9 +14,9 @@ def test_browser_api_restricts_same_origin_and_reports_challenges(monkeypatch):
     expressions = []
     def evaluate(expression):
         expressions.append(expression)
-        return {'status': 200, 'data': {'events': [{'id': 'one'}]}}
+        return {'status': 200, 'data': {'news_list': [{'id': 'one'}]}}
     monkeypatch.setattr(browser, '_evaluate', evaluate)
-    assert browser.fetch_json('/api/calendar/events', {'start_date': '2026-10-16'})['events']
+    assert browser.fetch_json('/api/news/list', {'page': 1})['news_list']
     assert "credentials:'same-origin'" in expressions[0]
     assert 'document.cookie' not in expressions[0]
     for path in ['https://evil.test/api/news/list', '/api/../auth', '/api/auth', '//evil.test/api/news/list']:
@@ -42,22 +42,3 @@ def test_browser_discovery_prioritizes_unseen_valid_ids_not_clipboard(monkeypatc
     assert result['links'] == ['https://saveticker.com/news/fresh']
     assert result['article_metadata'][result['links'][0]]['published_at'] == '2026-10-16T11:00:00Z'
     assert len(calls) <= 5
-
-
-
-def test_calendar_http_block_falls_back_to_authenticated_browser(monkeypatch):
-    import requests
-    from providers import econ_calendar
-    m = module()
-    class Response:
-        ok = False
-        status_code = 403
-    monkeypatch.setattr(requests, 'get', lambda *a, **kw: Response())
-    monkeypatch.setattr(m.CDPBrowser, 'fetch_json', lambda self, path, params=None:
-        {'events': [{'title': 'CPI', 'event_date': '2026-10-20T12:30:00Z', 'color': '#EF4444'}]})
-    events = econ_calendar.upcoming_events()
-    assert len(events) == 1 and events[0]['title'] == 'CPI'
-    assert events[0]['when'].tzinfo is not None
-
-
-

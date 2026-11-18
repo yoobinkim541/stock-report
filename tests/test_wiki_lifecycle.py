@@ -59,11 +59,25 @@ def test_list_stale_pages_returns_only_stale(monkeypatch, tmp_path):
         "updated_at": _iso(45),
     })
 
+    # A compiled source note records a post as published: age is not a reason to refresh it.
+    record = wiki.upsert_page({
+        "title": "오래된 원문 노트",
+        "summary": "게시 시점 기록",
+        "body": "원문 본문",
+        "surface": "portfolio",
+        "kind": "note",
+        "status": "draft",
+        "tags": ["compiled_source"],
+        "source_refs": [],
+        "updated_at": _iso(45),
+    })
+
     stale_pages = wiki.list_stale_pages(max_age_days=30)
     stale_ids = {p["id"] for p in stale_pages}
 
     assert stale["id"] in stale_ids
     assert fresh["id"] not in stale_ids
+    assert record["id"] not in stale_ids
 
 
 def test_archive_stale_pages_marks_status_archived(monkeypatch, tmp_path):

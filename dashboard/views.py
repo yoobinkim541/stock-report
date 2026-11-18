@@ -223,7 +223,7 @@ def intrinsic_value(ticker: str) -> dict:
 
 
 def econ_events(days: int = 14, start: str | None = None) -> list[dict]:
-    """경제 일정 (saveticker /calendar/events, QT2). start 는 YYYY-MM-DD."""
+    """경제 일정 (ForexFactory 이번 주 일정, QT2). start 는 YYYY-MM-DD."""
     from datetime import date
     from providers import econ_calendar
     try:

@@ -1740,7 +1740,7 @@ def _index_category(page: dict | None) -> str:
         return _INDEX_INSIGHT
     if kind == "overview" or str(page.get("id") or "").startswith("overview-"):
         return _INDEX_PORTAL
-    if kind == "source_digest" or "compiled_source" in tags:
+    if is_source_record(page):
         return _INDEX_SOURCE
     if page.get("surface") == "ticker" or any(tag.startswith("ticker:") for tag in tags):
         return _INDEX_PLAYBOOK
@@ -2111,12 +2111,21 @@ def _is_page_stale(page: dict, max_age_days: int = 30) -> bool:
     return (datetime.now(timezone.utc) - updated).days >= max_age_days
 
 
+def is_source_record(page: dict) -> bool:
+    """원문 한 건의 시점 기록: source_digest 와 원문 컴파일 노트 (``compiled_source``).
+
+    게시 시점의 내용을 보존하는 페이지라 오래됐다고 갱신·보관할 대상이 아니다.
+    2026-11-18 위생 경고의 stale 97 중 73, unused 100 중 45 가 원문 컴파일 노트였다.
+    """
+    return page.get("kind") == "source_digest" or "compiled_source" in (page.get("tags") or [])
+
+
 def list_stale_pages(max_age_days: int = 30) -> list[dict]:
     pages = _all_wiki_pages()
     return [
         page for page in pages
         if page.get("status") != "archived"
-        and page.get("kind") != "source_digest"
+        and not is_source_record(page)
         and _is_page_stale(page, max_age_days)
     ]
 

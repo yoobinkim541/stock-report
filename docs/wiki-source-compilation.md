@@ -28,6 +28,13 @@ contract and existing raw retention remain unchanged.
   targets require a new proposal; stale/failed operations remain visible.
 - `data_committed` means verified storage, not factual correctness. Markdown/
   index, search and operation log effects have separate retryable states.
+  `pipeline.run` recovers only the operation of the revision it was given, and
+  a revision whose data committed is not selected again, so each public run
+  first retries the effects of every committed operation
+  (`run_public_wiki_rollout.recover_source_effects`, search refresh off as in
+  `process`) and reports them as `source_recovery`. Before this, 28 operations
+  from 2026-11-13/14 kept `artifacts=failed` until recovered by hand on
+  2026-11-18 (about 14 s each, one artifact rebuild per operation).
 - Retry and role changes reuse compilation; only actually observed evidence
   IDs are associated. A recovered old operation cannot roll back routing.
 - Advancing routing invalidates integration completion until the prepared
@@ -59,6 +66,11 @@ contract and existing raw retention remain unchanged.
   active under an archived parent.
 - `wiki_cleanup.apply_cleanup` rechecks, backs up and writes under the store
   lock; a page changed after planning is `skipped_stale`.
+- Wiki hygiene counts (`list_stale_pages`, unused provenance in the health
+  reports) treat a source record, `source_digest` or a compiled source note
+  (`wiki.is_source_record`), as a dated record rather than a page to refresh:
+  on 2026-11-18, 73 of 97 stale and 45 of 100 unused pages were compiled source
+  notes, and `archive_stale_pages` already refused to archive them by age.
 - `build_context_section` drops archived pages from retrieved and injected
   pages unless `include_archived=True`; `list_pages` keeps the full history view
   by default for the browser and batch jobs. The knowledge view

@@ -5,6 +5,8 @@
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from providers import econ_calendar, intrinsic
@@ -67,32 +69,42 @@ def test_intrinsic_missing_inputs_graceful(monkeypatch):
     assert out["upside_pct"] is None
 
 
-def test_econ_importance():
-    assert econ_calendar._importance("#EF4444")[0] == "high"
-    assert econ_calendar._importance("#10B981")[0] == "low"
-    assert econ_calendar._importance(None)[0] == "info"
-
-
-def test_econ_parse_converts_utc_z_suffix_to_kst():
-    """saveticker API 는 UTC(Z 접미) 로 이벤트 시각을 준다 — KST 로 변환 없이 naive
-    로 그대로 쓰면 '오늘' 필터링·표시 시각이 최대 하루/9시간 어긋난다."""
-    sample = [{"title": "FOMC", "event_date": "2026-07-11T23:00:00Z", "color": "#EF4444"}]
-    out = econ_calendar._parse(sample)
-    when = out[0]["when"]
-    assert when is not None
-    assert when.utcoffset().total_seconds() == 9 * 3600          # KST = UTC+9
-    assert (when.year, when.month, when.day, when.hour) == (2026, 7, 12, 8)  # 다음날 08:00 KST
-    assert out[0]["date_str"] == "07/12 08:00"
-
-
-def test_econ_parse_sort_and_marker():
-    sample = [
-        {"title": "  CPI  ", "event_date": "2026-07-11T21:30:00", "color": "#EF4444"},
-        {"title": "no date", "event_date": None, "color": "#10B981"},
-        {"title": "FOMC", "event_date": "2026-07-01T18:00:00", "color": "#EF4444"},
+def test_econ_parse_keeps_us_events_and_high_impact_abroad_in_kst_order():
+    rows = [
+        {"title": "Core CPI m/m", "country": "USD", "date": "2026-11-19T08:30:00-05:00", "impact": "High",
+         "forecast": "0.3%", "previous": "0.2%"},
+        {"title": "German ZEW", "country": "EUR", "date": "2026-11-18T05:00:00-05:00", "impact": "Medium"},
+        {"title": "BOJ Policy Rate", "country": "JPY", "date": "2026-11-18T22:00:00-05:00", "impact": "High"},
+        {"title": "Bank Holiday", "country": "USD", "date": "2026-11-26T00:00:00-05:00", "impact": "Holiday"},
+        {"title": "no zone", "country": "USD", "date": "2026-11-19T08:30:00", "impact": "High"},
     ]
-    out = econ_calendar._parse(sample)
-    assert out[0]["title"] == "FOMC"                 # 가장 이른 날짜
-    assert out[0]["marker"] == "🔴" and out[0]["importance"] == "high"
-    assert out[0]["when"] is not None
-    assert out[-1]["title"] == "no date"             # 무일자 → 맨 뒤
+    out = econ_calendar._parse(rows)
+    assert [event["title"] for event in out] == ["JPY BOJ Policy Rate", "Core CPI m/m", "Bank Holiday"]
+    cpi = out[1]
+    assert cpi["when"].utcoffset().total_seconds() == 9 * 3600
+    assert cpi["date_str"] == "11/19 22:30"                     # 08:30 ET = 22:30 KST
+    assert (cpi["importance"], cpi["marker"]) == ("high", "🔴")
+    assert (cpi["forecast"], cpi["previous"]) == ("0.3%", "0.2%")
+    assert out[2]["importance"] == "info"
+
+
+def test_econ_upcoming_window_and_failed_feed_is_not_an_empty_week(monkeypatch):
+    from datetime import date
+
+    import requests
+
+    class Response:
+        def __init__(self, status, rows=None):
+            self.status_code, self.ok, self._rows = status, status == 200, rows
+        def json(self):
+            return self._rows
+    rows = [{"title": t, "country": "USD", "date": d, "impact": "Medium"} for t, d in (
+        ("past", "2026-11-16T10:00:00-05:00"), ("today", "2026-11-18T10:00:00-05:00"),
+        ("later", "2026-11-21T10:00:00-05:00"))]
+    monkeypatch.setattr(requests, "get", lambda *a, **kw: Response(200, rows))
+    assert [e["title"] for e in econ_calendar.upcoming_events(days=3, start=date(2026, 11, 18))] == ["today"]
+    for status, availability in ((429, "blocked"), (426, "error")):
+        monkeypatch.setattr(requests, "get", lambda *a, status=status, **kw: Response(status))
+        with pytest.raises(Exception) as exc_info:
+            econ_calendar.upcoming_events()
+        assert (exc_info.value.availability, exc_info.value.status_code) == (availability, status)

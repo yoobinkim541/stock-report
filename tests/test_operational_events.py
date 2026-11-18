@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-import pytest
 
 
 KST = timezone(timedelta(hours=9))
@@ -31,7 +30,7 @@ def test_economic_calendar_events_normalize_time_importance_and_source():
     assert event["record_kind"] == "content"
     assert event["published_at"] == when.isoformat(timespec="seconds")
     assert event["metrics"]["importance"] == "high"
-    assert event["source_url"] == "https://saveticker.com/calendar"
+    assert event["source_url"] == "https://www.forexfactory.com/calendar"
     assert "Fed Chair speech" in event["title"]
 
 
@@ -61,41 +60,3 @@ def test_default_source_registry_includes_calendar_group():
 
     assert specs["economic_calendar"].group == "calendar"
     assert specs["economic_calendar"].sources == ("economic_calendar",)
-
-
-def test_economic_calendar_raises_blocked_status(monkeypatch):
-    import requests
-    from providers import econ_calendar
-
-    response = requests.Response()
-    response.status_code = 403
-    response.url = "https://saveticker.com/api/calendar/events"
-
-    def blocked_get(*args, **kwargs):
-        raise requests.HTTPError("403 blocked", response=response)
-
-    monkeypatch.setattr(requests, "get", blocked_get)
-
-    try:
-        econ_calendar.upcoming_events(days=7)
-    except Exception as exc:
-        assert exc.availability == "blocked"
-        assert exc.status_code == 403
-    else:
-        raise AssertionError("blocked calendar response must not look like an empty success")
-
-
-def test_economic_calendar_non_ok_response_is_not_silent_success(monkeypatch):
-    import requests
-    from providers import econ_calendar
-
-    response = requests.Response()
-    response.status_code = 403
-    response.url = "https://saveticker.com/api/calendar/events"
-    monkeypatch.setattr(requests, "get", lambda *args, **kwargs: response)
-
-    with pytest.raises(Exception) as exc_info:
-        econ_calendar.upcoming_events(days=7)
-
-    assert exc_info.value.availability == "blocked"
-    assert exc_info.value.status_code == 403

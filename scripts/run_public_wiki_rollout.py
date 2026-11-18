@@ -631,6 +631,26 @@ def main(argv=None):
         return _run_batch(args, journal, budget_path, now, batch, usage, providers)
 
 
+def recover_source_effects(journal):
+    """Retry the effects of committed source operations, whichever revision they belong to.
+
+    ``pipeline.run`` only recovers the operation of the revision it was given, and a revision
+    whose data committed is not selected again, so an effect that failed after commit stayed
+    failed: 28 operations from 2026-11-13/14 kept ``artifacts=failed``. The data is already
+    applied and every effect is idempotent. Search refresh is off here as in ``process``.
+    """
+    original_qmd = os.environ.get('AGENT_CONSOLE_QMD_ENABLED')
+    os.environ['AGENT_CONSOLE_QMD_ENABLED'] = '0'
+    try:
+        return [pipeline.recover_operation(receipt, journal=journal)
+                for receipt in journal.pending_operations() if receipt['stage'] == 'committed']
+    finally:
+        if original_qmd is None:
+            os.environ.pop('AGENT_CONSOLE_QMD_ENABLED', None)
+        else:
+            os.environ['AGENT_CONSOLE_QMD_ENABLED'] = original_qmd
+
+
 def _run_batch(args, journal, budget_path, now, batch, usage=None, providers=None):
     candidates, relevant_events, already_pending, discovery_stats = batch
     topic_sources, topic_reasons = resume_topic_sources(journal, now)
@@ -661,6 +681,7 @@ def _run_batch(args, journal, budget_path, now, batch, usage=None, providers=Non
                         and (receipt['stage'] != 'committed' or any(
                             receipt[key] != 'done' for key in ('artifacts', 'search', 'log')))):
                     topic_recovery.append(pipeline._recover_public_topic(receipt, journal=journal, now=now))
+        source_recovery = recover_source_effects(journal)
         backup = journal.root / 'backups' / (now.strftime('%Y%m%dT%H%M%S%fZ') + '-events.jsonl')
         backup.parent.mkdir(parents=True, exist_ok=True)
         with shared_memory._events_lock():
@@ -718,10 +739,12 @@ def _run_batch(args, journal, budget_path, now, batch, usage=None, providers=Non
                    'resume_unavailable': len(reasons) + len(topic_reasons), 'unrestricted_pipeline_enabled': pipeline._mode_enabled()}
         if topic_recovery:
             summary['topic_recovery'] = topic_recovery
+        if source_recovery:
+            summary['source_recovery'] = source_recovery
         safe_io.atomic_write_json(str(journal.root / 'automatic-latest.json'), summary)
         print(json.dumps(summary), flush=True)
     recovery_pending = any(item.get('stage') != 'committed' or any(
-        value != 'done' for value in item.get('effects', {}).values()) for item in topic_recovery)
+        value != 'done' for value in item.get('effects', {}).values()) for item in [*topic_recovery, *source_recovery])
     failed = any(item['result'].get(field, 0) for item in results for field in
                  ('compile_failed', 'routing_pending', 'effects_pending', 'stale_base', 'topic_failed'))
     return 2 if recovery_pending or failed else 0

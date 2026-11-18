@@ -175,12 +175,13 @@ def test_wiki_health_separates_provenance_pages_from_actionable_unused_pages():
         [],
         [
             {"id": "digest", "kind": "source_digest"},
+            {"id": "compiled", "kind": "note", "tags": ["note", "compiled_source"]},
             {"id": "note", "kind": "note"},
         ],
     )
 
-    assert summary["unused_count"] == 2
-    assert summary["unused_provenance_count"] == 1
+    assert summary["unused_count"] == 3
+    assert summary["unused_provenance_count"] == 2
     assert summary["unused_actionable_count"] == 1
 
 

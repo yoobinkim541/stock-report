@@ -5,7 +5,6 @@ from datetime import datetime, timezone
 from typing import Callable
 
 
-CALENDAR_URL = "https://saveticker.com/calendar"
 
 
 def _iso(value: object) -> str:
@@ -21,6 +20,8 @@ def fetch_economic_calendar_events(
     fetcher: Callable[..., list[dict]] | None = None,
 ) -> list[dict]:
     """Normalize upcoming macro events into the common source-event contract."""
+    from providers.econ_calendar import CALENDAR_URL
+
     if fetcher is None:
         from providers.econ_calendar import upcoming_events
 
@@ -40,7 +41,8 @@ def fetch_economic_calendar_events(
             "type": "economic_calendar",
             "record_kind": "content",
             "title": title,
-            "body": f"{scheduled_at} 예정 경제 일정: {title}",
+            "body": f"{scheduled_at} 예정 경제 일정: {title}" + "".join(
+                f" · {label} {raw[key]}" for key, label in (("forecast", "예상"), ("previous", "이전")) if raw.get(key)),
             "published_at": scheduled_at,
             "scheduled_at": scheduled_at,
             "tags": ["경제일정", str(raw.get("importance") or "info")],
@@ -48,7 +50,9 @@ def fetch_economic_calendar_events(
                 "scheduled_at": scheduled_at,
                 "importance": str(raw.get("importance") or "info"),
                 "marker": str(raw.get("marker") or ""),
-                "color": str(raw.get("color") or ""),
+                "country": str(raw.get("country") or ""),
+                "forecast": str(raw.get("forecast") or ""),
+                "previous": str(raw.get("previous") or ""),
             },
         })
 

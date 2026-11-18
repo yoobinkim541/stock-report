@@ -80,7 +80,7 @@ class CDPBrowser:
         return value
 
     def fetch_json(self, path, params=None):
-        if path not in {'/api/news/list', '/api/news/top-stories', '/api/calendar/events'}:
+        if path not in {'/api/news/list', '/api/news/top-stories'}:
             raise ValueError('unsupported same-origin API')
         address = path + ('?' + urlencode(params) if params else '')
         expression = """(async()=>{

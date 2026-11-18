@@ -79,8 +79,8 @@ def build_health_report(dry_run: bool = False) -> dict:
         "lint_issues": lint_data.get("issues", []),
         "stale_count": len(stale_pages),
         "unused_count": len(unused_pages),
-        "unused_provenance_count": sum(1 for page in unused_pages if page.get("kind") == "source_digest"),
-        "unused_actionable_count": sum(1 for page in unused_pages if page.get("kind") != "source_digest"),
+        "unused_provenance_count": sum(1 for page in unused_pages if wiki.is_source_record(page)),
+        "unused_actionable_count": sum(1 for page in unused_pages if not wiki.is_source_record(page)),
         "very_unused_count": len(very_unused_pages),
         "recommendations": [],
     }

@@ -1,6 +1,7 @@
 from scripts.run_public_wiki_pilot import is_public
 import pytest
 import json
+import os
 from datetime import datetime, timedelta, timezone
 
 
@@ -706,3 +707,34 @@ def test_apply_prunes_event_backups_to_retention(tmp_path, monkeypatch):
     names = sorted(path.name for path in backups.iterdir())
     assert len(names) == runner.BACKUP_RETENTION
     assert names[0] == f'20261001T{5:06d}000000Z-events.jsonl'
+
+
+def test_apply_retries_failed_effects_of_operations_from_other_revisions(tmp_path, monkeypatch, capsys):
+    runner = module()
+    _apply_setup(runner, tmp_path, monkeypatch)
+    monkeypatch.setattr(runner, 'load_source_events', lambda **kw: iter([]))
+    monkeypatch.setattr(runner.shared_memory, '_paths', lambda: {'events': str(tmp_path / 'no-events.jsonl')})
+    monkeypatch.setenv('AGENT_CONSOLE_QMD_ENABLED', '1')
+    committed = {'operation_id': 'c' * 64, 'revision_id': '1' * 64, 'stage': 'committed',
+                 'artifacts': 'failed', 'search': 'done', 'log': 'done'}
+    prepared = {'operation_id': 'p' * 64, 'revision_id': '2' * 64, 'stage': 'prepared',
+                'artifacts': 'failed', 'search': 'failed', 'log': 'failed'}
+    monkeypatch.setattr(runner.Journal, 'pending_operations', lambda self: [committed, prepared])
+    recovered = []
+
+    def recover(receipt, *, journal, artifacts='done'):
+        recovered.append((receipt['operation_id'], os.environ.get('AGENT_CONSOLE_QMD_ENABLED')))
+        return {'operation_id': receipt['operation_id'], 'stage': 'committed',
+                'effects': {'artifacts': artifacts, 'search': 'done', 'log': 'done'}}
+    monkeypatch.setattr(runner.pipeline, 'recover_operation', recover)
+
+    assert runner.main() == 0
+    # Only the committed one: a prepared operation still belongs to the run that selects its revision.
+    assert recovered == [('c' * 64, '0')]
+    assert os.environ['AGENT_CONSOLE_QMD_ENABLED'] == '1'
+    summary = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert summary['source_recovery'][0]['effects']['artifacts'] == 'done'
+
+    monkeypatch.setattr(runner.pipeline, 'recover_operation',
+                        lambda receipt, *, journal: recover(receipt, journal=journal, artifacts='failed'))
+    assert runner.main() == 2

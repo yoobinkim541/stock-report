@@ -425,8 +425,8 @@ def _summarize_wiki_health(
     open_question_count = sum(len(page.get("openQuestions") or []) for page in pages)
     lint_issues = lint_data.get("issues") or []
     lint_codes = Counter(_clean(issue.get("code") or "", 80) for issue in lint_issues)
-    unused_provenance = [page for page in unused_pages or [] if _page_kind(page) == "source_digest"]
-    unused_actionable = [page for page in unused_pages or [] if _page_kind(page) != "source_digest"]
+    unused_provenance = [page for page in unused_pages or [] if wiki.is_source_record(page)]
+    unused_actionable = [page for page in unused_pages or [] if not wiki.is_source_record(page)]
     return {
         "page_count": len(pages),
         "stats": stats_data,
