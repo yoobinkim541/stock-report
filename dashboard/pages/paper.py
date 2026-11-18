@@ -136,12 +136,9 @@ def _account_section(surface: str):
     life_excess = None
     if d.get("lifetime_cum_ret") is not None and d.get("lifetime_bench_ret") is not None:
         life_excess = d["lifetime_cum_ret"] - d["lifetime_bench_ret"]
-    is_margin = surface == "us_mock" and d.get("fx")   # 통합증거금 — 원화가 증거금·USD 예수금 0
     m = st.columns(4)
     m[0].metric("순자산", _money(d["nav"], cur),
-                delta=(f"{d['day_ret']:+.2f}% 전일" if d.get("day_ret") is not None else None),
-                help=("계좌 원화 총자산 ÷ 환율 (통합증거금 — 환율 변동도 순자산에 반영됨)"
-                      if is_margin else None))
+                delta=(f"{d['day_ret']:+.2f}% 전일" if d.get("day_ret") is not None else None))
     m[1].metric("세대 누적 수익률", data.f_pct_s(d.get("cum_ret"), 2),
                 help=f"세대 {d.get('generation') or '—'} · 인셉션 {d.get('inception_date') or '—'} 이후")
     m[2].metric("전체 누적 수익률", data.f_pct_s(d.get("lifetime_cum_ret"), 2),
@@ -205,19 +202,8 @@ def _account_section(surface: str):
         else:
             st.caption("보유 내역을 불러오지 못했습니다.")
     with right:
-        if is_margin:
-            # 달러/원화 혼동 방지 — '현금'처럼 보이던 값은 원화 여유증거금의 달러 환산(파생값)
-            st.markdown("##### 여유 증거금")
-            st.metric("여유 증거금 (환산)", _money(d.get("cash"), cur), label_visibility="collapsed",
-                      help="순자산 − 포지션 평가액 (파생값). USD 실예수금이 아니라 "
-                           "원화 여유 증거금의 달러 환산입니다.")
-            usd_dep = d.get("usd_deposit") or 0.0
-            st.caption(f"💱 USD 실예수금 {_money(usd_dep, '$')} · "
-                       f"원화 총자산 ₩{(d.get('krw_asset') or 0):,.0f}\n\n"
-                       f"환율 ₩{d['fx']:,.0f}/$ — 통합증거금(원화로 미국주식 주문)")
-        else:
-            st.markdown("##### 현금")
-            st.metric("예수금", _money(d.get("cash"), cur), label_visibility="collapsed")
+        st.markdown("##### 현금")
+        st.metric("예수금", _money(d.get("cash"), cur), label_visibility="collapsed")
         c = d.get("cost")
         if c:
             st.caption(f"💸 누적 거래비용 {_money(c['total'], cur)}\n\n"

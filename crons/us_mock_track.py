@@ -27,6 +27,7 @@ env: US_MOCK_UNIVERSE(쉼표 티커, 기본 내장)·US_MOCK_MAX_POS(5)·US_MOCK
 from __future__ import annotations
 
 import logging
+import math
 import os
 import sys
 import time
@@ -146,14 +147,12 @@ MAX_POS = _int_env("US_MOCK_MAX_POS", 5)
 INVEST = _float_env("US_MOCK_INVEST", 0.9)
 SEED_USD = _float_env("KOREA_MOCK_SEED", 100_000)
 SLIPPAGE = _float_env("US_MOCK_SLIPPAGE", 0.01)
-# 주문가능금액(frcr_use_psbl_amt)의 일부만 매수에 사용 — 수수료(KIS 해외 ~0.25%)·통합증거금
-# USD 환산 haircut·지정가 틱업 여유. 1% 슬리피지만으론 "주문가능금액 부족" 거부가 남아 별도 버퍼.
+# USD 주문가능금액의 일부만 매수에 사용 — 수수료(KIS 해외 ~0.25%)·지정가 여유(LIMIT_BUFFER).
+# 1% 슬리피지만으론 "주문가능금액 부족" 거부가 남아 별도 버퍼.
 CASH_BUFFER = _float_env("US_MOCK_CASH_BUFFER", 0.95)
-# cash_usd 가 KIS 실측(frcr_use_psbl_amt)이 아니라 nav-pos_value 역산 추정치(kis_mock.get_balance
-# 의 cash_derived=True)일 때 — 포지션 평가액이 NAV 근접/초과 시 부정확해지기 쉬워 더 보수적으로
-# (2026-07-24: 실계좌 확인 결과 cash_derived=True·frcr_use_psbl_amt=0 상태에서도 매수 재시도 반복
-# → 주문가능금액 부족 실패의 주 원인이었음)
-CASH_BUFFER_DERIVED = _float_env("US_MOCK_CASH_BUFFER_DERIVED", 0.5)
+# 실시간 우호가가 없을 때 지정가 = 현재가 × (1 ± 이 값). 현재가 그대로면 체결이 안 되고 당일
+# 만료되는 매수가 남는다(지정가만 지원). 체결은 시장가 근처 — 이 값은 상한일 뿐 비용이 아니다.
+LIMIT_BUFFER = _float_env("US_MOCK_LIMIT_BUFFER", 0.005)
 # 이 밑으로 남은 현금이면 매수 자체를 시도 안 함(어차피 실패할 소액 주문 API 낭비 방지)
 MIN_CASH_USD = _float_env("US_MOCK_MIN_CASH_USD", 500.0)
 REBAL_BAND = _float_env("US_MOCK_REBAL_BAND", 0.25)   # 무거래 밴드(목표比 ±25% 벗어날 때만 조정·회전율↓)
@@ -165,7 +164,8 @@ LEV_ETF_MAX_POS = _int_env("US_MOCK_LEVERAGE_MAX_POS", 2)
 LEV_ETF_MAX_WEIGHT = _float_env("US_MOCK_LEVERAGE_MAX_WEIGHT", 0.35)
 # 잔고 조회가 일시 장애(KIS '모의투자 서비스가 지연되고 있습니다'·NAV 미확인·응답 없음)면 이 간격으로
 # 다시 조회한다. 하루 1회 실행이라 한 번 실패하면 그날 리밸런스가 통째로 빠졌다(2026-11-19 00:00 KST
-# 실패 — 체결기준현재잔고만 ≥1시간 '지연'). 기본 10분×6회 = 최대 1시간(겨울 10~11시 ET, 장중).
+# 실패 — 당시 NAV 를 주던 체결기준현재잔고만 ≥1시간 '지연'. 지금은 잔고+매수가능금액으로 NAV 를 만들어
+# 그 TR 을 쓰지 않지만 두 TR 도 같은 장애를 낼 수 있다). 기본 10분×6회 = 최대 1시간(겨울 10~11시 ET, 장중).
 BALANCE_RETRIES = _int_env("US_MOCK_BALANCE_RETRIES", 6)
 BALANCE_RETRY_S = _float_env("US_MOCK_BALANCE_RETRY_S", 600.0)
 _TRANSIENT_BROKER_SIGNS = ("지연", "잠시후", "잠시 후")
@@ -288,6 +288,20 @@ def _rt_best(sym: str, side: str):
     except Exception:
         pass
     return None
+
+
+def _limit_price(sym: str, side: str, fallback: float | None = None) -> float:
+    """주문 지정가. 실시간 우호가(ask/bid)면 그대로, 아니면 KIS 현재가(없으면 신호가)에
+    LIMIT_BUFFER 를 얹는다(매수 위·매도 아래, 센트 단위로 체결 쪽 올림/내림). 가격 없으면 0."""
+    best = _rt_best(sym, side)
+    if best:
+        return float(best)
+    last = kis_mock.get_price(sym) or fallback or 0
+    if not last:
+        return 0.0
+    if side == "buy":
+        return math.ceil(float(last) * (1.0 + LIMIT_BUFFER) * 100) / 100
+    return max(0.01, math.floor(float(last) * (1.0 - LIMIT_BUFFER) * 100) / 100)
 
 
 def _overlay_regime() -> tuple[str | None, float]:
@@ -575,7 +589,7 @@ def plan_rebalance(signals: list[dict], positions: dict, budget_usd: float,
     """목표 바스켓(policy_score 상위 N 균등) vs 보유 → 정수주 지정가 주문계획.
 
     반환: [{symbol, side('buy'|'sell'), qty, reason}]. 매도 먼저(현금확보)·예산0/음수면 매수생략·현금 러닝캡.
-    cash_buffer<1 이면 주문가능금액의 그 비율만 매수에 사용(수수료·통합증거금 FX·틱업 여유).
+    cash_buffer<1 이면 주문가능금액의 그 비율만 매수에 사용(수수료·지정가 여유).
     rebal_band>0: 보유종목 조정을 |현재가치−목표가치|/목표가치 > band 일 때만(잔챙이 skip·회전율↓).
     exit_buffer>0: 보유종목이 top-(N+buffer) 안이면 유지(경계 flip-flop 방지·회전율↓).
     min_cash_usd: 매수 가용현금(cash_usd*cash_buffer)이 이 밑이면 매수 자체를 생성 안 함
@@ -661,7 +675,6 @@ def main(argv: list[str] | None = None) -> int:
         logger.info("KOREA_MOCK_ENABLED 아님 — US 모의 페이퍼트레이딩 생략")
         return 0
 
-    cash_derived = False
     if not dry:
         bal, balance_issue = _fetch_balance()
         # 잔고를 모르면(조회 실패·브로커 거부·NAV 미확인) 빈 보유로 오인하거나 시드/보유평가액
@@ -671,9 +684,7 @@ def main(argv: list[str] | None = None) -> int:
             _record_snapshot(bal, balance_issue)
             return 1
         positions, cash, nav = bal["positions"], bal["cash_usd"], float(bal["nav"])
-        cash_derived = bool(bal.get("cash_derived"))
-        logger.info("잔고: cash=$%s(%s) nav=$%s pos_value=$%s", f"{cash or 0:,.0f}",
-                    "역산추정" if cash_derived else "실측", f"{nav:,.0f}",
+        logger.info("잔고: cash=$%s nav=$%s pos_value=$%s", f"{cash or 0:,.0f}", f"{nav:,.0f}",
                     f"{bal.get('pos_value') or 0:,.0f}")
     else:
         positions, cash, nav = {}, SEED_USD, SEED_USD    # dry-run: 시드 가정 미리보기
@@ -693,9 +704,7 @@ def main(argv: list[str] | None = None) -> int:
         weights = state.get("weights", {})
         prices = {t: float(s.dropna().iloc[-1]) for t, s in closes.items() if t in weights and len(s.dropna())}
         if weights:
-            # 매수는 주식 경로와 같은 현금 상한 — 역산 현금(cash_derived)이면 더 보수적인 버퍼
-            buffer = CASH_BUFFER_DERIVED if cash_derived else CASH_BUFFER
-            buy_cash = (cash * buffer) if cash is not None else None
+            buy_cash = (cash * CASH_BUFFER) if cash is not None else None   # 주식 경로와 같은 현금 상한
             sweet_orders = etf_orders(weights, positions, nav * INVEST, prices, band=REBAL_BAND,
                                       cash=buy_cash, min_cash=MIN_CASH_USD)
             sweet_basis = us_n_basis(state)
@@ -729,13 +738,12 @@ def main(argv: list[str] | None = None) -> int:
             s for s in signals
             if not (sleeve_mode == "paper" and s.get("ticker") == LEV_SLEEVE_SYMBOL)
         ]
-        effective_cash_buffer = CASH_BUFFER_DERIVED if cash_derived else CASH_BUFFER
         target_multipliers = {
             s["ticker"]: float(s.get("momentum_multiplier", 1.0) or 1.0)
             for s in trade_signals if s.get("ticker")
         }
         plan = plan_rebalance(trade_signals, positions_stock, budget, MAX_POS, cash_usd=cash,
-                              slippage=SLIPPAGE, quote_fn=_rt_best, cash_buffer=effective_cash_buffer,
+                              slippage=SLIPPAGE, quote_fn=_rt_best, cash_buffer=CASH_BUFFER,
                               rebal_band=REBAL_BAND, exit_buffer=EXIT_BUFFER,
                               leverage_symbols=leverage_symbols,
                               leverage_max_positions=LEV_ETF_MAX_POS,
@@ -822,7 +830,7 @@ def main(argv: list[str] | None = None) -> int:
         kind = "레버슬리브" if o.get("sleeve") else _classify_kind(o["side"], o["qty"], cur)
         s = sig_by.get(o["symbol"], {}) if not o.get("sleeve") else {
             "price": None, "rationale": {"one_line_reason": o.get("reason", "")}}
-        px = _rt_best(o["symbol"], o["side"]) or s.get("price") or kis_mock.get_price(o["symbol"]) or 0
+        px = _limit_price(o["symbol"], o["side"], s.get("price"))
         r = kis_mock.place_order(o["symbol"], o["qty"], o["side"], price=px)
         results.append({**o, "kind": kind, **r})
         if r.get("ok"):                          # 체결분 거래비용 적립 (수수료+스프레드 — 정직 계기)

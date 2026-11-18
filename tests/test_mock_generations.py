@@ -430,8 +430,7 @@ def test_a_exec_fix2_kis_balance_problems_are_classified():
         == "broker_rejected: 모의투자 미신청"
     assert bp({"ok": True, "nav": None, "raw": {"rt_cd": "0"}}) == "nav_missing"
     assert bp({"ok": True, "nav": float("nan"), "raw": {"rt_cd": "0"}}) == "nav_missing"
-    assert bp({"ok": True, "nav": 262_224.57, "cash_usd": 130_000.0, "cash_derived": True,
-               "krw_asset": 360_000_000.0, "fx": 1372.9, "raw": {"rt_cd": "0"}}) is None
+    assert bp({"ok": True, "nav": 262_224.57, "cash_usd": 130_000.0, "raw": {"rt_cd": "0"}}) is None
     assert bp({"ok": True, "nav": 11_000_000, "cash_krw": 1_000_000, "raw": {"return_code": 0}}) is None
 
 

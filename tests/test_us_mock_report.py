@@ -257,7 +257,7 @@ def test_build_report_defaults_to_compact(monkeypatch):
     assert "123.58→110.24" not in txt
 
 
-_REJECTED = {"ok": True, "positions": {}, "pos_value": 0.0, "cash_usd": None, "cash_derived": False,
+_REJECTED = {"ok": True, "positions": {}, "pos_value": 0.0, "cash_usd": None,
              "nav": None, "raw": {"rt_cd": "1", "msg1": "모의투자 신청내역을 확인하세요"}}
 
 

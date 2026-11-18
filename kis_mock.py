@@ -36,30 +36,32 @@ _TOKEN_URL = "/oauth2/tokenP"
 _HASHKEY_URL = "/uapi/hashkey"
 _ORDER_URL = "/uapi/overseas-stock/v1/trading/order"
 _BALANCE_URL = "/uapi/overseas-stock/v1/trading/inquire-balance"
-_PRESENT_BALANCE_URL = "/uapi/overseas-stock/v1/trading/inquire-present-balance"
+_PSAMOUNT_URL = "/uapi/overseas-stock/v1/trading/inquire-psamount"
 _PRICE_URL = "/uapi/overseas-price/v1/quotations/price"
 
 # 모의 해외 TR_ID — ★S6 라이브 스모크서 잔고·현재가·present-balance 확정(2026-06-27). 주문은 미확정.
 _TR_BUY = "VTTT1002U"     # 미국 매수(모의) — 라이브 미확정
 _TR_SELL = "VTTT1001U"    # 미국 매도(모의) — 라이브 미확정
 _TR_BALANCE = "VTTS3012R"  # 해외 잔고(모의) — ✅ 라이브 확정 (포지션·P&L)
-_TR_PRESENT = "VTRP6504R"  # 해외 체결기준현재잔고(모의) — ✅ 라이브 확정 (예수금·NAV·환율)
+_TR_PSAMOUNT = "VTTS3007R"  # 해외 매수가능금액(모의) — ✅ 2026-11-19 라이브 확인 (USD 현금·환율)
 _TR_PRICE = "HHDFS00000300"  # 해외 현재가(모의/실전 공용) — ✅ 라이브 확정 (레이트리밋 有→재시도)
 
 _TOKEN_FILE = os.path.expanduser("~/.cache/kis_mock_token.json")
 _token_cache: dict = {"token": None, "exp": 0.0}
 
-# 종목 → 해외거래소코드(주문 OVRS_EXCG_CD). 미상은 NASD 기본. (스모크서 보강)
+# 종목 → 해외거래소코드(주문 OVRS_EXCG_CD). 미상은 NASD 기본 — get_price 가 다른 거래소에서 찾으면
+# _EXCH_FOUND 에 기억해 덮는다. 2026-11-19 KIS 모의 현재가로 전수 확인(US 유니버스·레버리지 ETF).
 _TICKER_EXCH = {
-    "ORCL": "NYSE", "UNH": "NYSE", "SAP": "NYSE",
-    "SGOV": "AMEX", "SPMO": "AMEX",
+    "ORCL": "NYSE", "UNH": "NYSE", "SAP": "NYSE", "CRM": "NYSE",
+    "SGOV": "NYSE", "SPMO": "AMEX", "GLD": "AMEX",
     # Leveraged ETFs. NASDAQ listed funds use NASD; NYSE Arca funds use KIS AMEX code.
     "QLD": "AMEX", "TQQQ": "NASD", "SQQQ": "NASD",
     "SOXL": "AMEX", "SSO": "AMEX", "SOXS": "AMEX",
     "NVDL": "NASD", "NVD": "NASD", "TSLL": "NASD", "AAPU": "NASD",
     "AMZU": "NASD", "GGLL": "NASD", "MSFU": "NASD", "METU": "NASD",
-    "CONL": "NASD", "PLTU": "NASD", "MSTU": "NASD",
+    "CONL": "NASD", "PLTU": "NASD", "MSTU": "AMEX",
 }
+_EXCH_FOUND: dict[str, str] = {}
 _PRICE_EXCD = {"NASD": "NAS", "NYSE": "NYS", "AMEX": "AMS"}   # 주문코드 → 현재가 EXCD
 
 
@@ -94,7 +96,8 @@ def account() -> tuple[str | None, str | None]:
 
 def exchange_of(ticker: str) -> str:
     """종목 → 주문 OVRS_EXCG_CD (기본 NASD)."""
-    return _TICKER_EXCH.get(ticker.upper().replace(".", ""), "NASD")
+    key = ticker.upper().replace(".", "")
+    return _EXCH_FOUND.get(key) or _TICKER_EXCH.get(key, "NASD")
 
 
 # ── 안전 가드 ─────────────────────────────────────────────────────────────────
@@ -224,9 +227,7 @@ def _http_get(url: str, headers: dict, params: dict, *, retries: int = 2) -> dic
 
 # ── 현재가 ────────────────────────────────────────────────────────────────────
 
-def get_price(symbol: str, excd: str | None = None, *, retries: int = 2) -> float | None:
-    """해외 현재가. ★S6 확정: 모의 quote 엔드포인트는 간헐 500(레이트리밋) → _http_get 재시도."""
-    excd = excd or _PRICE_EXCD.get(exchange_of(symbol), "NAS")
+def _quote_last(symbol: str, excd: str, retries: int) -> float | None:
     h = _headers(_TR_PRICE)
     if not h:
         return None
@@ -238,59 +239,75 @@ def get_price(symbol: str, excd: str | None = None, *, retries: int = 2) -> floa
     return float(last) if last not in (None, "", "0") else None
 
 
+def get_price(symbol: str, excd: str | None = None, *, retries: int = 2) -> float | None:
+    """해외 현재가. ★S6 확정: 모의 quote 엔드포인트는 간헐 500(레이트리밋) → _http_get 재시도.
+
+    다른 거래소 코드로 물으면 KIS 는 rt_cd 0 + 빈 last 를 준다. excd 를 지정하지 않았고 매핑
+    거래소에서 빈 값이면 나머지 거래소를 찾아보고, 찾은 거래소를 기억해 주문에도 쓴다
+    (2026-11-19: SGOV·GLD 매핑 오류로 현재가 None·주문 거래소 오류).
+    """
+    if excd:
+        return _quote_last(symbol, excd, retries)
+    mapped = exchange_of(symbol)
+    price = _quote_last(symbol, _PRICE_EXCD.get(mapped, "NAS"), retries)
+    if price is not None:
+        _EXCH_FOUND.setdefault(symbol.upper().replace(".", ""), mapped)
+        return price
+    for order_code, quote_code in _PRICE_EXCD.items():
+        if order_code == mapped:
+            continue
+        price = _quote_last(symbol, quote_code, retries)
+        if price is not None:
+            logger.warning("KIS 거래소 매핑 보정: %s %s → %s", symbol.upper(), mapped, order_code)
+            _EXCH_FOUND[symbol.upper().replace(".", "")] = order_code
+            return price
+    return None
+
+
 # ── 잔고 ──────────────────────────────────────────────────────────────────────
 
-def present_balance() -> dict:
-    """해외 체결기준현재잔고(VTRP6504R) — 외화 주문가능액·NAV·환율. ★S6 라이브 확정 필드.
+def usd_cash() -> dict:
+    """해외 매수가능금액(VTTS3007R) — USD 현금 실측. ✅ 2026-11-19 라이브 확인.
 
-    반환 {ok, cash_usd, nav_usd, krw_asset, fx, pnl, raw}:
-      cash_usd  외화 주문가능금액(output3.frcr_use_psbl_amt) — 환전/통합증거금-USD 전이면 0
-      krw_asset 총자산(output3.tot_asst_amt) — 모의계좌 KRW 시드
-      nav_usd   tot_asst_amt / fx (USD 환산 총자산) — fx 있을 때만
-      fx        USD 환율(output2 USD행.frst_bltn_exrt)
+    반환 {ok, cash_usd, integrated_usd, fx, msg}:
+      cash_usd        USD 주문가능금액 + 매도재사용가능금액 — NAV·매수 상한의 현금
+      integrated_usd  원화 통합증거금까지 포함한 주문가능 USD(frcr_ord_psbl_amt1) — 참고용
+      fx              환율(exrt)
+    체결기준현재잔고(VTRP6504R)는 00시대에 '모의투자 서비스가 지연'·환율 미고시로 자주 실패해
+    더 쓰지 않는다. 원화는 NAV·매수에 넣지 않는다(USD 기준 NAV — KOREA_MOCK_SEED 와 같은 통화).
     """
-    blank = {"ok": False, "cash_usd": None, "nav_usd": None, "krw_asset": None,
-             "fx": None, "pnl": None, "raw": None}
+    blank = {"ok": False, "cash_usd": None, "integrated_usd": None, "fx": None, "msg": None}
     cano, prdt = account()
     if not cano:
-        logger.error("KOREA_MOCK_ACCOUNT_NO 미설정 — present-balance 차단(fail-closed)")
         return blank
-    h = _headers(_TR_PRESENT)
+    h = _headers(_TR_PSAMOUNT)
     if not h:
         return blank
-    params = {"CANO": cano, "ACNT_PRDT_CD": prdt, "WCRC_FRCR_DVSN_CD": "02",
-              "NATN_CD": "000", "TR_MKET_CD": "00", "INQR_DVSN_CD": "00"}
-    res = _http_get(_MOCK_BASE + _PRESENT_BALANCE_URL, h, params)
+    # 종목·단가는 조회 형식상 필수 — 금액 필드는 종목과 무관(USD 계좌 단위)
+    params = {"CANO": cano, "ACNT_PRDT_CD": prdt, "OVRS_EXCG_CD": "NASD",
+              "OVRS_ORD_UNPR": "1", "ITEM_CD": "QQQ"}
+    res = _http_get(_MOCK_BASE + _PSAMOUNT_URL, h, params)
     if res is None:
         return blank
-    o3 = res.get("output3") or {}
-    cash_usd = _f(o3, "frcr_use_psbl_amt")
-    krw_asset = _f(o3, "tot_asst_amt")
-    pnl = _f(o3, "tot_evlu_pfls_amt")
-    fx = None
-    usd_deposit = None
-    for row in res.get("output2") or []:
-        if (row.get("crcy_cd") or "").upper() == "USD":
-            fx = _f(row, "frst_bltn_exrt") or None
-            usd_deposit = _f(row, "frcr_dncl_amt_2")    # USD 실예수금 (통합증거금 계좌면 0 — 라이브 실증)
-            if not cash_usd:
-                cash_usd = usd_deposit                  # 주문가능액 폴백
-            break
-    nav_usd = (krw_asset / fx) if (krw_asset and fx) else None
-    return {"ok": str(res.get("rt_cd", "")) == "0", "cash_usd": cash_usd or None,
-            "nav_usd": nav_usd, "krw_asset": krw_asset or None, "fx": fx,
-            "usd_deposit": usd_deposit, "pnl": pnl, "raw": res}
+    if str(res.get("rt_cd", "")) != "0":
+        return {**blank, "msg": str(res.get("msg1") or "").strip()}
+    o = res.get("output") or {}
+    # ovrs_ord_psbl_amt 가 매도재사용분을 포함하는지 문서상 불명 → 둘 중 큰 값(중복 합산 없음)
+    cash = max(_f(o, "ovrs_ord_psbl_amt"), _f(o, "ord_psbl_frcr_amt") + _f(o, "sll_ruse_psbl_amt"))
+    return {"ok": True, "cash_usd": cash, "integrated_usd": _f(o, "frcr_ord_psbl_amt1") or None,
+            "fx": _f(o, "exrt") or None, "msg": None}
 
 
 def get_balance() -> dict:
-    """해외 모의계좌 잔고. 필드명은 라이브 스모크 전 미확정 → graceful(None+키 로깅).
+    """해외 모의계좌 잔고 — USD 기준.
 
-    반환: {ok, positions{sym:{shares,avg_price,cur_price,value,pnl}}, pos_value, cash_usd, nav, raw}
+    반환: {ok, positions{sym:{shares,avg_price,cur_price,value,pnl}}, pos_value, cash_usd, nav,
+           integrated_usd, fx, raw}
     - KIS 는 업무 오류(예: '모의투자 신청내역을 확인하세요')를 HTTP 200 + rt_cd≠0 으로 돌려준다
       → ok=False(msg 포함). 빈 output1 을 '보유 없음'으로 오인하지 않는다.
-    - NAV 는 present-balance 총자산(원화)/환율, 또는 보유평가액 + 실측 현금일 때만 채운다. 둘 다
-      없으면(예: 00시대 최초고시 환율 미고시) nav=None — 보유평가액만으로 NAV 를 채우면 현금이
-      빠진 반쪽 NAV 가 된다.
+    - NAV = 보유평가액 + USD 현금(usd_cash). 현금 조회가 실패하면 nav=None — 보유평가액만으로
+      NAV 를 채우면 현금이 빠진 반쪽 NAV 가 된다.
+    - 잔고 조회의 OVRS_EXCG_CD=NASD 는 모의에서 미국 전체(NYSE·AMEX 보유 포함 — 라이브 확인).
     """
     cano, prdt = account()
     if not cano:
@@ -320,23 +337,18 @@ def get_balance() -> dict:
             "pnl": _f(it, "frcr_evlu_pfls_amt"),
         }
     pos_value = sum(p["value"] for p in positions.values())
-    # NAV·현금은 present-balance(VTRP6504R)에서 — ★S6 확정. VTTS3012R output2 는 P&L 위주라 부정확.
-    pb = present_balance()
-    cash = pb.get("cash_usd")
-    nav = pb.get("nav_usd")
-    if nav is None and cash is not None:
-        nav = pos_value + cash
-    cash_derived = False
-    if cash is None and nav is not None:
-        cash = max(0.0, nav - pos_value)
-        cash_derived = True     # 파생값 — USD 실예수금 아님(원화 여유증거금의 달러 환산)
+    uc = usd_cash()
+    cash = uc.get("cash_usd")
+    nav = (pos_value + cash) if cash is not None else None
     if nav is None:
-        logger.warning("KIS 모의 NAV 미확인 — 총자산/환율·현금 없음(보유평가액 $%s 만으로 채우지 않음)",
-                       f"{pos_value:,.0f}")
+        logger.warning("KIS 모의 USD 현금 미확인(%s) — NAV 결측(보유평가액 $%s 만으로 채우지 않음)",
+                       uc.get("msg") or "응답 없음", f"{pos_value:,.0f}")
+    elif not cash and (uc.get("integrated_usd") or 0) > 1000:
+        logger.warning("KIS 모의 USD 예수금 0 — 원화 통합증거금($%s)은 NAV·매수에 쓰지 않는다",
+                       f"{uc['integrated_usd']:,.0f}")
     return {"ok": True, "positions": positions, "pos_value": pos_value,
-            "cash_usd": cash, "cash_derived": cash_derived, "nav": nav,
-            "krw_asset": pb.get("krw_asset"), "fx": pb.get("fx"),
-            "usd_deposit": pb.get("usd_deposit"), "raw": res}
+            "cash_usd": cash, "nav": nav, "integrated_usd": uc.get("integrated_usd"),
+            "fx": uc.get("fx"), "raw": res}
 
 
 def _f(d: dict, key: str) -> float:
@@ -388,7 +400,11 @@ def place_order(symbol: str, qty: int, side: str, price: float,
     if not price or price <= 0:
         return {"ok": False, "ord_no": None, "msg": "지정가 필요(해외 정수주)", "raw": None}
 
-    excd = excd or exchange_of(symbol)
+    if not excd:
+        key = symbol.upper().replace(".", "")
+        if key not in _TICKER_EXCH and key not in _EXCH_FOUND:
+            get_price(symbol)          # 미매핑 종목 — 현재가로 거래소를 찾아 _EXCH_FOUND 에 기억
+        excd = exchange_of(symbol)
     body = build_order_body(cano, prdt, excd, symbol, qty, price)
     h = _headers(_order_tr_id(side), extra={"hashkey": _hashkey(body) or ""})
     if not h:

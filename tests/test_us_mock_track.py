@@ -405,7 +405,7 @@ def test_a_exec_fix2_broker_rejected_balance_holds_orders_and_records_failure(mo
     rows = _fake_history(monkeypatch)
     monkeypatch.setattr(T.kis_mock, "is_enabled", lambda: True)
     monkeypatch.setattr(T.kis_mock, "get_balance", lambda: {
-        "ok": True, "positions": {}, "pos_value": 0.0, "cash_usd": None, "cash_derived": False,
+        "ok": True, "positions": {}, "pos_value": 0.0, "cash_usd": None,
         "nav": None, "raw": {"rt_cd": "1", "msg1": "모의투자 신청내역을 확인하세요"}})
 
     def _no_signals():
@@ -434,8 +434,7 @@ def test_a_exec_fix2_unknown_nav_with_holdings_holds_orders(monkeypatch):
     def _balance():
         calls.append(1)
         return {"ok": True, "positions": {"AAPL": {"shares": 10, "value": 128_000.0}},
-                "pos_value": 128_000.0, "cash_usd": None, "cash_derived": False, "nav": None,
-                "krw_asset": 360_000_000.0, "fx": None, "raw": {"rt_cd": "0"}}
+                "pos_value": 128_000.0, "cash_usd": None, "nav": None, "raw": {"rt_cd": "0"}}
 
     monkeypatch.setattr(T.kis_mock, "get_balance", _balance)
     sleeps = []
@@ -455,7 +454,7 @@ def test_a_exec_fix2_unknown_nav_with_holdings_holds_orders(monkeypatch):
 
 def _ok_balance(nav=250_000.0, cash=250_000.0, positions=None):
     return {"ok": True, "positions": positions or {}, "pos_value": nav - cash, "cash_usd": cash,
-            "cash_derived": True, "nav": nav, "fx": 1400.0, "raw": {"rt_cd": "0"}}
+            "nav": nav, "fx": 1400.0, "raw": {"rt_cd": "0"}}
 
 
 def test_fetch_balance_retries_kis_delay_then_succeeds(monkeypatch):
@@ -500,7 +499,8 @@ class _FakeLedger:
 
 
 def test_sweet_spot_etf_path_places_cash_capped_orders_with_real_basis(monkeypatch):
-    """스위트스팟 ETF 경로가 budget 미정의로 주문 전에 죽던 버그 회귀 + 현금 상한 + 실제 근거 기록."""
+    """스위트스팟 ETF 경로가 budget 미정의로 주문 전에 죽던 버그 회귀 + 현금 상한 + 지정가 여유 +
+    실제 근거 기록. 바구니 밖 보유(QQQ)는 팔고, 매도 대금은 매수 현금에 세지 않는다."""
     import pandas as pd
     import ml.adaptive
     import ml.data_pipeline
@@ -509,10 +509,11 @@ def test_sweet_spot_etf_path_places_cash_capped_orders_with_real_basis(monkeypat
     monkeypatch.setenv("MOCK_SWEET_SPOT", "1")
     monkeypatch.setenv("MOCK_ORDER_LLM_ENABLED", "0")
     monkeypatch.setattr(T.kis_mock, "is_enabled", lambda: True)
-    monkeypatch.setattr(T.kis_mock, "get_balance", lambda: _ok_balance())
+    held = {"QQQ": {"shares": 250, "value": 150_000.0}}
+    monkeypatch.setattr(T.kis_mock, "get_balance", lambda: _ok_balance(cash=100_000.0, positions=held))
     monkeypatch.setattr(T, "compute_us_signals", lambda: [])
     monkeypatch.setattr(T, "_rt_best", lambda sym, side: None)
-    monkeypatch.setattr(T.kis_mock, "get_price", lambda sym: {"SGOV": 100.0, "GLD": 400.0}.get(sym))
+    monkeypatch.setattr(T.kis_mock, "get_price", lambda sym: {"SGOV": 100.0, "GLD": 400.0, "QQQ": 600.0}.get(sym))
     placed = []
     monkeypatch.setattr(T.kis_mock, "place_order",
                         lambda sym, qty, side, price=None: placed.append((sym, side, qty, price)) or {"ok": True})
@@ -535,9 +536,11 @@ def test_sweet_spot_etf_path_places_cash_capped_orders_with_real_basis(monkeypat
 
     buys = {sym: qty * px for sym, side, qty, px in placed if side == "buy"}
     assert set(buys) == {"SGOV", "GLD"}
-    assert sum(buys.values()) <= 250_000 * T.CASH_BUFFER_DERIVED     # 역산 현금 버퍼 상한
+    assert sum(buys.values()) <= 100_000                                # 매수는 USD 현금 안에서
+    assert ("QQQ", "sell", 250, 597.0) in placed                        # 매도 지정가 = 현재가 −0.5%
+    assert {px for sym, side, qty, px in placed if sym == "SGOV"} == {100.5}   # 매수 지정가 +0.5%
     assert notes["basis"] and "SGOV" in notes["basis"]
     us = [row for surface, row in _FakeLedger.decisions if surface == "us_mock"]
-    assert len(us) == 2
+    assert len(us) == 3
     assert all((r.get("selection_basis") or "").startswith(notes["basis"]) for r in us)
     assert rows["us_mock_history"][-1]["kind"] == "snapshot"

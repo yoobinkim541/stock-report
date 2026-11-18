@@ -49,13 +49,31 @@ def test_build_order_body_whole_share_limit():
 
 def test_exchange_of():
     assert kis_mock.exchange_of("ORCL") == "NYSE"
-    assert kis_mock.exchange_of("SGOV") == "AMEX"
+    assert kis_mock.exchange_of("SGOV") == "NYSE"              # NYSE Arca 상장이지만 KIS 는 NYS
+    assert kis_mock.exchange_of("GLD") == "AMEX"
     assert kis_mock.exchange_of("TQQQ") == "NASD"
     assert kis_mock.exchange_of("SOXL") == "AMEX"
     assert kis_mock.exchange_of("SSO") == "AMEX"
     assert kis_mock.exchange_of("NVDL") == "NASD"
     assert kis_mock.exchange_of("TSLL") == "NASD"
     assert kis_mock.exchange_of("MSFT") == "NASD"               # 기본
+
+
+def test_get_price_finds_unmapped_exchange_and_orders_use_it(monkeypatch):
+    """매핑에 없는 NYSE 종목: 기본 NASD 시세는 빈 값(rt_cd 0) → 다른 거래소에서 찾아 주문에도 쓴다."""
+    monkeypatch.setattr(kis_mock, "_EXCH_FOUND", {})
+    monkeypatch.setattr(kis_mock, "_headers", lambda tr_id, extra=None: {"tr_id": tr_id})
+    asked = []
+
+    def fake_get(url, headers=None, params=None, timeout=None, allow_redirects=True):
+        asked.append(params["EXCD"])
+        return _FakeResponse({"rt_cd": "0", "output": {"last": "51.25" if params["EXCD"] == "NYS" else ""}})
+
+    monkeypatch.setattr(kis_mock.requests, "get", fake_get)
+
+    assert kis_mock.get_price("KO") == 51.25
+    assert asked == ["NAS", "NYS"]
+    assert kis_mock.exchange_of("KO") == "NYSE"
 
 
 # ── fail-closed (계좌#·수량·가격) — HTTP 0 ────────────────────────────
@@ -122,6 +140,7 @@ def _prep_order_env(monkeypatch, fake_requests):
     monkeypatch.setenv("KOREA_MOCK_ACCOUNT_NO", "50012345-01")
     monkeypatch.setattr(kis_mock, "_get_token", lambda: "faketoken")
     monkeypatch.setattr(kis_mock, "requests", fake_requests)
+    monkeypatch.setattr(kis_mock, "_EXCH_FOUND", {"MSFT": "NASD"})   # 거래소 탐색 GET 생략
 
 
 def test_place_order_confirms_fill_after_lost_response(monkeypatch):
@@ -170,8 +189,8 @@ def test_is_enabled(monkeypatch):
 class _BalanceHTTP:
     """URL 별 고정 응답. 모든 GET 이 모의 도메인·리다이렉트 금지로 나가는지 기록."""
 
-    def __init__(self, balance: dict, present: dict):
-        self.routes = {kis_mock._BALANCE_URL: balance, kis_mock._PRESENT_BALANCE_URL: present}
+    def __init__(self, balance: dict, cash: dict):
+        self.routes = {kis_mock._BALANCE_URL: balance, kis_mock._PSAMOUNT_URL: cash}
         self.calls = []
 
     def get(self, url, headers=None, params=None, timeout=None, allow_redirects=True):
@@ -202,20 +221,29 @@ def test_a_exec_fix2_balance_rejected_by_broker_is_failure(monkeypatch):
     assert all(url.startswith(kis_mock._MOCK_BASE) and redirects is False for url, redirects in fake.calls)
 
 
-def test_a_exec_fix2_balance_without_fx_does_not_fill_nav_with_holdings(monkeypatch):
-    """00시대 최초고시 환율 미고시(0) → 총자산 환산 불가. 보유평가액만으로 NAV 를 채우지 않는다."""
-    present = {"rt_cd": "0", "output3": {"frcr_use_psbl_amt": "0", "tot_asst_amt": "360000000"},
-               "output2": [{"crcy_cd": "USD", "frst_bltn_exrt": "0", "frcr_dncl_amt_2": "0"}]}
-    _prep_balance(monkeypatch, _BalanceHTTP({"rt_cd": "0", "output1": [_HOLDING]}, present))
+def test_balance_without_usd_cash_does_not_fill_nav_with_holdings(monkeypatch):
+    """USD 현금 조회가 실패하면 NAV 결측 — 보유평가액만으로 NAV 를 채우지 않는다."""
+    cash = {"rt_cd": "1", "msg1": "모의투자 서비스가 지연되고 있습니다."}
+    _prep_balance(monkeypatch, _BalanceHTTP({"rt_cd": "0", "output1": [_HOLDING]}, cash))
 
     bal = kis_mock.get_balance()
 
     assert bal["ok"] is True and bal["positions"]["MSFT"]["shares"] == 10
     assert bal["nav"] is None and bal["cash_usd"] is None
 
-    present["output2"][0]["frst_bltn_exrt"] = "1440"        # 환율 고시 후: 총자산/환율 = NAV
+
+def test_balance_nav_is_holdings_plus_usd_cash_excluding_krw_margin(monkeypatch):
+    """NAV = 보유평가액 + USD 현금(주문가능 + 매도재사용). 원화 통합증거금은 NAV 에 넣지 않는다."""
+    cash = {"rt_cd": "0", "output": {"ord_psbl_frcr_amt": "95000.00", "sll_ruse_psbl_amt": "800.00",
+                                     "ovrs_ord_psbl_amt": "95000.00", "frcr_ord_psbl_amt1": "209000.0",
+                                     "exrt": "1331.1"}}
+    _prep_balance(monkeypatch, _BalanceHTTP({"rt_cd": "0", "output1": [_HOLDING]}, cash))
+
     bal = kis_mock.get_balance()
-    assert bal["nav"] == 250_000.0 and bal["cash_usd"] == 250_000.0 - 4200.0 and bal["cash_derived"] is True
+
+    assert bal["cash_usd"] == 95_800.0
+    assert bal["nav"] == 4200.0 + 95_800.0
+    assert bal["integrated_usd"] == 209_000.0 and bal["fx"] == 1331.1
 
 
 if __name__ == "__main__":

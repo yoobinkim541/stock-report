@@ -73,15 +73,11 @@ def _decision_payload(d):
     }
 
 
-def _cash_line(cash: float | None, nav: float, bal: dict) -> str | None:
+def _cash_line(cash: float | None, nav: float) -> str | None:
     if cash is None:
         return None
     cash_w = cash / nav * 100.0 if nav else 0.0
-    weight = f" · 현금비중 {cash_w:.1f}%"
-    if bal.get("cash_derived") and bal.get("fx"):
-        return (f"여유 증거금 {fmt.money(cash)}{weight} (원화 환산·USD 예수금 "
-                f"{fmt.money(bal.get('usd_deposit') or 0.0)}·환율 ₩{bal['fx']:,.0f})")
-    return f"현금 {fmt.money(cash)}{weight}"
+    return f"현금 {fmt.money(cash)} · 현금비중 {cash_w:.1f}%"
 
 
 def _state_interpretation(
@@ -462,8 +458,7 @@ def build_report(html: bool = False, detail: bool | None = None) -> str:
                 lines.append(f"전체 MDD {life_mdd_pct:.1f}%")
         if cash is not None:
             cash_w = cash / nav * 100.0 if nav else 0.0
-            label = "여유증거금" if bal.get("cash_derived") else "현금"
-            lines.append(f"{label} {fmt.money(cash, abbrev=True)} · {cash_w:.1f}%")
+            lines.append(f"현금 {fmt.money(cash, abbrev=True)} · {cash_w:.1f}%")
 
         state_lines = _state_interpretation(cum_ret, q_ret, strat_mdd, q_mdd_pct, cash, nav)
         watch_lines: list[str] = []
@@ -528,7 +523,7 @@ def build_report(html: bool = False, detail: bool | None = None) -> str:
             lines.append(f"전체 MDD {life_mdd_pct:.1f}% vs QQQ {q_life_mdd_pct:.1f}% {ok_life}")
         else:
             lines.append(f"전체 MDD {life_mdd_pct:.1f}%")
-    cash_summary = _cash_line(cash, nav, bal)
+    cash_summary = _cash_line(cash, nav)
     if cash_summary:
         lines.append(cash_summary)
 
