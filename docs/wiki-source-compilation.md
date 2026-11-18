@@ -90,6 +90,24 @@ contract and existing raw retention remain unchanged.
   none. Existing pages keep their summaries: any field change takes a page out of
   the public targets (`_matches_receipt_page` allows only relinks and deletions of
   at most 10% of the body).
+- Routing creates at most `MAX_NEW_PAGE_SPECS` (2) new pages per source, each
+  for a durable subject that no candidate covers. `route_pass` drops a spec whose
+  title carries a date (`dated_title`: `11월 10일`, `11/16`, `18 October`, `11월 3주`)
+  or a sell-side publisher's name (`publisher_title`), whose kind is not allowed
+  (`kind_invalid`), whose normalized title an active page already has
+  (`title_exists`; when that page is a candidate it is selected instead), or that
+  exceeds the cap (`spec_cap`). Drops are kept in the routing state as
+  `dropped_new_page_specs` with the reason. The source's own note page
+  (`compiled_source`) still holds all of its claims, so a dropped spec loses no
+  knowledge. Through 2026-11-18 the router had proposed 179 specs for 137 routed
+  sources, many of them one broker's view on one date; since 2026-11-16 72 of 82
+  sources with specs had created only new pages. Routing also reads `selected`
+  and `rejected` answered as `[{"ref", "reason"}]` lists; a repeated ref still
+  fails the pass.
+- A routed existing page or new spec that the proposal leaves with
+  `additions: []` (and no relations) is skipped and left unchanged. Before, every
+  routed page needed an addition, so the model had to write something even
+  where no claim belonged.
 - 2026-11-18 one-off tidy (backup `/home/ubuntu/backups/stockbot-wiki-tidy-20261118T054630Z`,
   revisions under `<wiki artifacts>/revisions/`, `body_tidy` log entries): 442
   pages lost `unknown | ` from 798 headings, 70 local-path bullet lines and 9
@@ -97,6 +115,18 @@ contract and existing raw retention remain unchanged.
   the public targets were left alone (targets 605 before and after). Repeated
   sentences inside a line were kept, because removing one also removed the
   citation that ended the line.
+- 2026-11-18 off-topic cleanup (backup with the judgments in
+  `/home/ubuntu/backups/stockbot-offtopic-20261118T061707Z/plan.json`,
+  `off_topic_removed` log entries): Codex read the 200 active market pages with
+  3 or more paragraphs (compiled source notes excluded) and flagged 20
+  paragraphs; Hive agreed on 11. After review, 4 paragraphs came out of 3 pages:
+  the Russia–Ukraine ceasefire passages on the Hormuz and Riyadh topic pages
+  (Codex flagged them, Hive did not) and a redistribution notice. Not removed:
+  the paragraphs of the 2026-10-12 briefing pages, whose titles carry only their
+  first section's name while the body holds the whole briefing (the passages
+  exist on no other page); an author line and a sector-policy passage in a
+  market close; and 2 notices on public pages that would have left the public
+  targets (605 before and after).
 - The autonomous curator spends `WIKI_AUTONOMOUS_MAX_JUDGMENTS` (default 12)
   per run before each LLM call, including failures and skips, and remembers
   unapplied outcomes in `<wiki artifacts>/autonomous-curator-state.json`

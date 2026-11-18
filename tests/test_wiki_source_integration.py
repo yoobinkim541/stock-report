@@ -118,6 +118,43 @@ def test_router_answers_by_short_ref_but_naming_one_candidate_twice_is_rejected(
             "new_page_specs": []}))
 
 
+def test_router_keeps_durable_new_pages_and_drops_recaps_duplicates_and_excess(monkeypatch):
+    install(monkeypatch, [record("entity"), record("topic"), record("note", title="Demand outlook",
+        tags=["wiki", "surface:market", "kind:note", "status:draft", "compiled_source"], kind="note")])
+    state = module().discover_targets(compiled(), surface="market")
+    def spec(title):
+        return {"title": title, "kind": "concept", "surface": "market", "purpose": "Track " + title}
+    result = module().route_pass(compiled(), state, llm_fn=lambda _: json.dumps({
+        "selected": [], "rejected": {"entity": "Other scope", "topic": "Other scope"}, "new_page_specs": [
+            spec("유안타증권의 반도체 이익 전망"), spec("국내 증시 마감 시황 - 11월 10일"),
+            spec("Global news briefing for 18 October 2026"), spec("Capacity topic"),
+            spec("Demand outlook"), {**spec("Fab maker"), "kind": "entity"}, spec("Memory pricing"),
+            spec("HBM supply"), spec("ESS demand")]}))
+    assert result["selected"] == ["topic"] and "topic" not in result["rejected"]
+    assert [item["title"] for item in result["new_page_specs"]] == ["Memory pricing", "HBM supply"]
+    assert [item["reason"] for item in result["dropped_new_page_specs"]] == [
+        "kind_invalid", "publisher_title", "dated_title", "dated_title", "title_exists", "spec_cap"]
+    later = module().route_pass(compiled(), {**result, "unexamined": [], "cursor": 0, "candidate_ids": []},
+        llm_fn=lambda _: json.dumps({"selected": [], "rejected": {}, "new_page_specs": [spec("Fab capex")]}))
+    assert len(later["new_page_specs"]) == 2 and later["dropped_new_page_specs"][-1]["reason"] == "spec_cap"
+
+
+def test_routed_page_that_no_claim_is_about_is_left_unchanged(monkeypatch):
+    install(monkeypatch, [record("entity"), record("topic")])
+    targets = [module().hydrate_target(page_id) for page_id in ("entity", "topic")]
+    addition = {"claim_ids": ["new-claim"], "as_of": "2026-10-09", "scope": "capacity", "body": "Capacity rose [S1]."}
+    def plan(topic_relations):
+        return json.dumps({"targets": [
+            {"page_id": "entity", "before_hash": targets[0]["revision_hash"], "additions": [addition], "relations": []},
+            {"page_id": "topic", "before_hash": targets[1]["revision_hash"], "additions": [],
+             "relations": topic_relations}]})
+    result = module().propose_integration(compiled(), source(), targets, new_page_specs=[], llm_fn=lambda _: plan([]))
+    assert [target["page_id"] for target in result["targets"]] == ["entity"]
+    with pytest.raises(ValueError, match="proposal_additions_invalid"):
+        module().propose_integration(compiled(), source(), targets, new_page_specs=[],
+                                     llm_fn=lambda _: plan([{"type": "support"}]))
+
+
 def test_router_prompt_explicitly_supplies_allowed_new_page_kinds(monkeypatch):
     install(monkeypatch, [])
     state = module().discover_targets(compiled(), surface='market')
@@ -180,6 +217,7 @@ def test_archived_cross_surface_digest_and_generic_tags_are_not_candidates(monke
     {"selected": ["c2"], "rejected": {}, "new_page_specs": []},
     {"selected": ["a"], "rejected": {}, "new_page_specs": [{"title": "New", "kind": "concept", "surface": "market", "purpose": ""}]},
     {"selected": ["a"], "rejected": {}, "new_page_specs": [{"title": "New", "kind": "concept", "surface": "portfolio", "purpose": "Elsewhere"}]},
+    {"selected": [], "rejected": [{"ref": "c1", "reason": "Other"}, {"ref": "c1", "reason": "Again"}], "new_page_specs": []},
 ])
 def test_forged_or_incomplete_routing_is_rejected_without_cursor_change(monkeypatch, payload):
     install(monkeypatch, [record("a")])
@@ -187,6 +225,15 @@ def test_forged_or_incomplete_routing_is_rejected_without_cursor_change(monkeypa
     with pytest.raises(ValueError):
         module().route_pass(compiled(), state, llm_fn=lambda _: json.dumps(payload))
     assert state["cursor"] == 0
+
+
+def test_routing_reads_ref_and_reason_object_lists(monkeypatch):
+    install(monkeypatch, [record("a"), record("b")])
+    state = module().discover_targets(compiled(), surface="market")
+    result = module().route_pass(compiled(), state, llm_fn=lambda _: json.dumps({
+        "selected": [{"ref": "c1", "reason": "Updates it"}], "rejected": [{"ref": "c2", "reason": "Other scope"}],
+        "new_page_specs": []}))
+    assert result["selected"] == ["a"] and result["rejected"] == {"b": "Other scope"}
 
 
 def proposal(snapshot):
