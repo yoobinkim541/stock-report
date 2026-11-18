@@ -11,7 +11,6 @@ from pathlib import Path
 # 어긋나도 drift 로 잡히지 않는다. crontab 에 위키 작업을 추가하면 여기도 추가한다.
 RELEVANT_MARKERS = (
     "reports.source_pipeline",
-    "reports.article_crawler",
     "reports/source_collector.py",
     "reports.source_wiki_curator",
     "wiki_archive.log",
@@ -64,3 +63,4 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
