@@ -634,19 +634,22 @@ def test_process_marks_a_compile_no_provider_answered_and_records_each_model_cal
     assert saved['model_calls'][0]['seconds'] >= 0
 
 
-@pytest.mark.parametrize('order, busy, expected', [
-    ('codex,hive,hermes', None, {'Compile': 'hive,codex,hermes', 'Route': None}),
-    ('codex,hermes', None, {'Compile': None, 'Route': None}),
-    ('codex,hive,hermes', 'hive', {'Compile': 'hive', 'Route': 'hive'}),
+@pytest.mark.parametrize('order, busy, retried, expected', [
+    ('codex,hive,hermes', None, '', {'Compile': 'hive,codex,hermes', 'Route': None}),
+    ('codex,hive,hermes', None, '2026-11-17T15:04:00+00:00', {'Compile': None, 'Route': None}),
+    ('codex,hermes', None, '', {'Compile': None, 'Route': None}),
+    ('codex,hive,hermes', 'hive', '', {'Compile': 'hive', 'Route': 'hive'}),
 ])
-def test_compile_asks_hive_first_and_other_phases_keep_the_order(tmp_path, monkeypatch, order, busy, expected):
+def test_compile_asks_hive_first_and_other_phases_keep_the_order(tmp_path, monkeypatch, order, busy, retried,
+                                                                 expected):
     from reports.wiki_source_journal import Journal
     runner = module()
     monkeypatch.setenv('WIKI_STRUCTURED_PROVIDERS', order)
     monkeypatch.delenv('AGENT_CONSOLE_PUBLIC_TOPIC_BOOTSTRAP_ENABLED', raising=False)
     identity = 'a' * 64
     source = {'revision_id': identity, 'role': 'evidence', 'provider': 'telegram:public_channel',
-              'scope': 'public_message', 'canonical_url': 'https://t.me/public_channel/1'}
+              'scope': 'public_message', 'canonical_url': 'https://t.me/public_channel/1',
+              'last_attempt_at': retried}
     compile_prompt = 'Compile one source.\n' + json.dumps({'revision_id': identity}) + \
         '\nBEGIN UNTRUSTED SOURCE TEXT\nbody'
     route_prompt = 'Route one source.\n' + json.dumps({'compiled': {'revision_id': identity}, 'candidates': []})

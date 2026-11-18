@@ -103,6 +103,21 @@ def test_source_routes_to_two_pages_and_justified_new_page(monkeypatch):
     assert state["cursor"] == 0
 
 
+def test_router_answers_by_short_ref_but_naming_one_candidate_twice_is_rejected(monkeypatch):
+    install(monkeypatch, [record("entity"), record("topic")])
+    state = module().discover_targets(compiled(), surface="market")
+    def llm(prompt):
+        refs = {item["page_id"]: item["ref"] for item in json.loads(prompt.rsplit("\n", 1)[1])["candidates"]}
+        return json.dumps({"selected": [refs["entity"]], "rejected": {refs["topic"]: "Different scope"},
+                           "new_page_specs": []})
+    result = module().route_pass(compiled(), state, llm_fn=llm)
+    assert result["selected"] == ["entity"] and result["rejected"] == {"topic": "Different scope"}
+    with pytest.raises(ValueError, match="routing_candidates_invalid"):
+        module().route_pass(compiled(), state, llm_fn=lambda _: json.dumps({
+            "selected": ["c1"], "rejected": {"entity": "Same page under its ID", "c2": "Different scope"},
+            "new_page_specs": []}))
+
+
 def test_router_prompt_explicitly_supplies_allowed_new_page_kinds(monkeypatch):
     install(monkeypatch, [])
     state = module().discover_targets(compiled(), surface='market')
@@ -162,6 +177,7 @@ def test_archived_cross_surface_digest_and_generic_tags_are_not_candidates(monke
     {"selected": ["forged"], "rejected": {}, "new_page_specs": []},
     {"selected": ["a"], "rejected": {}, "new_page_specs": [], "status": "stable"},
     {"selected": [], "rejected": {}, "new_page_specs": []},
+    {"selected": ["c2"], "rejected": {}, "new_page_specs": []},
     {"selected": ["a"], "rejected": {}, "new_page_specs": [{"title": "New", "kind": "concept", "surface": "market", "purpose": ""}]},
     {"selected": ["a"], "rejected": {}, "new_page_specs": [{"title": "New", "kind": "concept", "surface": "portfolio", "purpose": "Elsewhere"}]},
 ])

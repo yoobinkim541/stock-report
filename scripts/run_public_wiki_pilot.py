@@ -223,7 +223,9 @@ def validate_public_targets(targets, journal, allowed_revisions=None):
             raise ValueError('public_target_changed')
         current = wiki.semantic_snapshot(target['page_id'], records=rows)
         current.update(title=current['page']['title'], summary=current['page'].get('summary', ''))
-        if target.get('revision_hash') != current['revision_hash'] or not matches(target, current):
+        # 'ref' is the router's short label for the candidate, not page content.
+        supplied = {key: value for key, value in target.items() if key != 'ref'}
+        if target.get('revision_hash') != current['revision_hash'] or not matches(supplied, current):
             raise ValueError('public_target_changed')
 
 
