@@ -1,14 +1,18 @@
-"""Wiki candidate reranking with TypeSafe Jev through OpenRouter's Decisions API.
+"""Chat judgments made by TypeSafe Jev through OpenRouter's Decisions API.
 
-Jev answers typed judgments with probabilities and writes no text. Each candidate page
-gets one yes/no question, "does this page directly help answer the question?", and
-the candidates are ordered by that probability. On 16 real chat questions
-(2026-11-18) the top 4 chosen this way scored 100 against 81 for the retrieval order
-and 108 for the best possible 4, at about $0.0007 and 0.4 s per question.
+Jev answers typed judgments with probabilities and writes no text. Two chat steps use it:
 
-Enabled when OPENROUTER_API_KEY is set; AGENT_CONSOLE_WIKI_RERANK=0 turns it off.
-Any failed or malformed answer keeps the retrieval order: ranking is a relevance
-hint, never a fact check.
+- Wiki candidate reranking. Each candidate page gets one yes/no question, "does this
+  page directly help answer the question?", and the candidates are ordered by that
+  probability. On 16 real chat questions (2026-11-18) the top 4 chosen this way scored
+  100 against 81 for the retrieval order and 108 for the best possible 4, at about
+  $0.0007 and 0.4 s per question.
+- Question intent when the keyword rules find none (``choose_intent``). On 208 real
+  chat questions labelled by Codex the rules matched 59; taking Jev's choice where the
+  rules said "general" matched 154, at about $0.00003 and 0.4 s per question.
+
+Enabled when OPENROUTER_API_KEY is set; AGENT_CONSOLE_JEV=0 turns both off. Any failed
+or malformed answer keeps the result without Jev. Neither step checks facts.
 """
 from __future__ import annotations
 
@@ -29,7 +33,7 @@ _CITATION = re.compile(r"\[S\d+\]\([^)]*\)|https?://\S+")
 
 
 def enabled() -> bool:
-    return bool(os.getenv("OPENROUTER_API_KEY", "").strip()) and os.getenv("AGENT_CONSOLE_WIKI_RERANK", "1").strip() != "0"
+    return bool(os.getenv("OPENROUTER_API_KEY", "").strip()) and os.getenv("AGENT_CONSOLE_JEV", "1").strip() != "0"
 
 
 def _post(payload: dict) -> dict:
@@ -77,3 +81,17 @@ def rank_wiki_pages(question: str, pages: list[dict]) -> tuple[list[dict], dict]
     return [head[index] for index in order] + tail, {
         "method": "jev", "model": MODEL,
         "scores": {str(head[index].get("id")): round(scores[index], 3) for index in order}}
+
+
+def choose_intent(message: str, surface: str, intents: dict[str, str]) -> str | None:
+    """The key of ``intents`` (key → definition) Jev picks for a chat message, or None."""
+    if not enabled():
+        return None
+    try:
+        answer = _post({"model": MODEL, "state": {"user_message": message, "screen_surface": surface}, "questions": {
+            "intent": {"type": "choice", "instructions": "Which intent does this message to a stock-research assistant have?",
+                       "criteria": intents}}})
+    except (OSError, ValueError, KeyError):
+        return None
+    value = (answer.get("answers") or {}).get("intent") or {}
+    return value["choice"] if value.get("type") == "choice" and value.get("choice") in intents else None

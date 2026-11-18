@@ -1555,20 +1555,85 @@ def _looks_like_market_brief(ql: str) -> bool:
     return any(word in ql for word in ("오늘 시장", "시장 어때", "시장 분위기", "시황", "증시는", "증시 어땠"))
 
 
+# Jev 가 고르는 의도 정의. 2026-11-18 평가에서 쓴 문구 그대로다 (실제 질문 208개 중 규칙이 general 로 둔 142개에서
+# Codex 라벨과 101개 일치).
+_JEV_INTENTS = {
+    "meta_debug": "Asks why the assistant answered the way it did, complains about its behaviour, or asks to fix the assistant itself.",
+    "technical_analysis": "Chart analysis: price trend, moving averages, RSI/MACD, support/resistance, volume patterns.",
+    "live_market_check": "Right-now intraday state: current quotes, flows, futures, breadth, what is moving at this moment.",
+    "stock_compare": "Compares two or more companies or tickers against each other.",
+    "strategy_review": "Reviews the user's trading strategy, paper-trading log, signal outcomes or backtest.",
+    "wiki_lookup": "Asks about the knowledge wiki itself: its pages, evidence cards, what it knows or its verification state.",
+    "portfolio_review": "The user's own holdings: weights, losses, concentration, cash, rebalancing, risk of the portfolio.",
+    "market_analysis": "Overall market, today's news, macro factors, sectors, or market-wide risks.",
+    "ticker_research": "Research on one specific company, ETF or ticker.",
+    "general": "Anything else: small talk, general knowledge, instructions unrelated to the categories above.",
+}
+# 한 답변이 의도를 여러 번 묻는다. 같은 질문은 Jev 를 한 번만 부른다 (실패는 저장하지 않는다).
+_JEV_INTENT_CACHE: dict[tuple[str, str], str] = {}
+_JEV_INTENT_CACHE_LIMIT = 256
+_JEV_INTENT_LOCK = threading.Lock()
+
+
+def _jev_intent(question: str, surface: str) -> str | None:
+    key = (question, surface)
+    with _JEV_INTENT_LOCK:
+        if key in _JEV_INTENT_CACHE:
+            return _JEV_INTENT_CACHE[key]
+    name = decision_model.choose_intent(question, surface, _JEV_INTENTS)
+    if name:
+        with _JEV_INTENT_LOCK:
+            if len(_JEV_INTENT_CACHE) >= _JEV_INTENT_CACHE_LIMIT:
+                _JEV_INTENT_CACHE.pop(next(iter(_JEV_INTENT_CACHE)))
+            _JEV_INTENT_CACHE[key] = name
+    return name
+
+
+def _rule_intent(q: str, ql: str, surface: str) -> tuple[str, tuple[str, str] | None]:
+    if _looks_like_meta_question(ql):
+        return "meta_debug", None
+    if _looks_like_technical_analysis(ql):
+        return "technical_analysis", None
+    if _looks_like_live_market_check(ql):
+        return "live_market_check", None
+    if _looks_like_peer_compare(ql):
+        return "stock_compare", None
+    if _looks_like_strategy_review(ql):
+        return "strategy_review", None
+    if _looks_like_wiki_lookup(ql):
+        return "wiki_lookup", None
+    if _looks_like_portfolio_review(ql, surface):
+        return "portfolio_review", None
+    if _looks_like_market_brief(ql):
+        return "market_analysis", None
+    try:
+        asset = _extract_asset_symbol(q)
+    except Exception:
+        asset = None
+    return ("ticker_research", asset) if asset else ("general", None)
+
+
 def _classify_question_intent(question: str, pack: dict | None = None,
                               history: list[dict] | None = None) -> dict:
+    """키워드 규칙이 먼저 정한다. 규칙이 general 로 둔 질문만 Jev 가 의도를 고른다 (잡담 제외)."""
     q = str(question or "").strip()
     ql = q.lower()
     surface = str((pack or {}).get("surface") or "market")
+    name, asset = _rule_intent(q, ql, surface)
+    if name == "general" and q and not _looks_like_chitchat(q):
+        name = _jev_intent(q, surface) or "general"
+    return _intent_contract_for(name, q, asset)
 
-    if _looks_like_meta_question(ql):
+
+def _intent_contract_for(name: str, q: str, asset: tuple[str, str] | None) -> dict:
+    if name == "meta_debug":
         return _intent_contract(
             "meta_debug",
             answer_style="왜 그렇게 답했는지, 무엇을 고치면 되는지 설명",
             required_steps=["직전 답변의 라우팅/컨텍스트/도구 사용 문제를 먼저 설명", "투자 시장 템플릿으로 전환하지 않음"],
             forbidden_templates=["현재 시장 상황 인식", "MIXED", "RISK-ON", "시장 신호 점수"],
         )
-    if _looks_like_technical_analysis(ql):
+    if name == "technical_analysis":
         return _intent_contract(
             "technical_analysis",
             answer_style="가격·추세·거래량·지표만 사용한 기술적 분석",
@@ -1576,7 +1641,7 @@ def _classify_question_intent(question: str, pack: dict | None = None,
             retrieval_plan=["가격 히스토리", "거래량", "이동평균/RSI/MACD 등 차트 지표"],
             forbidden_templates=["현재 시장 상황 인식", "RISK-ON", "시장 신호 점수"],
         )
-    if _looks_like_live_market_check(ql):
+    if name == "live_market_check":
         return _intent_contract(
             "live_market_check",
             answer_style="장중 시세·수급·선물·시장폭 freshness를 먼저 확인",
@@ -1584,7 +1649,7 @@ def _classify_question_intent(question: str, pack: dict | None = None,
             retrieval_plan=["market_snapshot", "broker/KRX 수급", "KOSPI200 선물", "상승/하락 종목 수", "USD/KRW"],
             forbidden_templates=["현재 시장 상황 인식", "시장 신호 점수"],
         )
-    if _looks_like_peer_compare(ql):
+    if name == "stock_compare":
         subject, peers = _peer_compare_subject_and_peers(q)
         return _intent_contract(
             "stock_compare",
@@ -1604,7 +1669,7 @@ def _classify_question_intent(question: str, pack: dict | None = None,
             ],
             forbidden_templates=["현재 시장 상황 인식", "MIXED", "RISK-ON", "시장 신호 점수"],
         )
-    if _looks_like_strategy_review(ql):
+    if name == "strategy_review":
         return _intent_contract(
             "strategy_review",
             answer_style="모의투자 로그, signal decision, outcome label, 비용/슬리피지 기반 개선 분석",
@@ -1612,7 +1677,7 @@ def _classify_question_intent(question: str, pack: dict | None = None,
             retrieval_plan=["kr/us mock ledger", "DecisionSnapshot", "OutcomeLabel", "RiskGovernor 경고"],
             forbidden_templates=["현재 시장 상황 인식", "MIXED", "시장 신호 점수"],
         )
-    if _looks_like_wiki_lookup(ql):
+    if name == "wiki_lookup":
         return _intent_contract(
             "wiki_lookup",
             answer_style="위키/근거 카드 현황과 검증 상태를 요약",
@@ -1620,7 +1685,7 @@ def _classify_question_intent(question: str, pack: dict | None = None,
             retrieval_plan=["LLM wiki", "source wiki", "QMD local search"],
             forbidden_templates=["현재 시장 상황 인식", "시장 신호 점수"],
         )
-    if _looks_like_portfolio_review(ql, surface):
+    if name == "portfolio_review":
         return _intent_contract(
             "portfolio_review",
             answer_style="시장 총평보다 보유 비중, 손실, 집중도, 현금, 리스크 예산 우선",
@@ -1628,24 +1693,21 @@ def _classify_question_intent(question: str, pack: dict | None = None,
             retrieval_plan=["로컬 포트폴리오 스냅샷", "보유 종목별 최신 시세가 필요하면 검색/quote 보강"],
             forbidden_templates=["현재 시장 상황 인식", "MIXED", "시장 신호 점수"],
         )
-    if _looks_like_market_brief(ql):
+    if name == "market_analysis":
         return _intent_contract(
             "market_analysis",
             answer_style="오늘 시장 흐름, 뉴스, 지표, 섹터, 리스크를 종합",
             required_steps=["최신 뉴스/지수/금리/유가/달러 흐름 확인", "시장 신호와 리스크 요약", "포트폴리오 영향은 별도 분리"],
             retrieval_plan=["웹 검색 최신 시장 뉴스", "주요 지수/금리/유가/달러", "최근 수집 이벤트와 리포트"],
         )
-    try:
-        asset = _extract_asset_symbol(q)
-    except Exception:
-        asset = None
-    if asset:
-        symbol, name = asset
+    if name == "ticker_research":
+        symbol, label = asset or ("", "")
         return _intent_contract(
             "ticker_research",
             answer_style="개별 종목 리서치: 사업/재무/실적/뉴스/밸류에이션/차트 분리",
             subject=symbol,
-            required_steps=[f"{name}({symbol}) 기준으로 해석", "최신 데이터가 필요하면 검색", "로컬 컨텍스트 부족만으로 중단하지 않음"],
+            required_steps=[f"{label}({symbol}) 기준으로 해석" if asset else "질문이 가리키는 종목을 먼저 특정",
+                            "최신 데이터가 필요하면 검색", "로컬 컨텍스트 부족만으로 중단하지 않음"],
             retrieval_plan=["Yahoo Finance 시세·재무 요약", "최근 실적자료/IR", "웹 검색 최신 뉴스", "동종사 비교가 필요하면 피어 자동 선정"],
             forbidden_templates=["현재 시장 상황 인식", "MIXED", "시장 신호 점수"],
         )

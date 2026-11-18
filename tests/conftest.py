@@ -98,8 +98,8 @@ def _isolate_wiki_rollout_from_account_and_clock(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _isolate_chat_from_decision_api(monkeypatch):
-    """Chat answers rerank wiki pages through OpenRouter when a key is present; tests never call it."""
-    monkeypatch.setenv("AGENT_CONSOLE_WIKI_RERANK", "0")
+    """Chat answers ask Jev (wiki rerank, intent) through OpenRouter when a key is present; tests never call it."""
+    monkeypatch.setenv("AGENT_CONSOLE_JEV", "0")
 
 
 @pytest.fixture(autouse=True)

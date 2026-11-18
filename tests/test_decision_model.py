@@ -9,7 +9,7 @@ def _pages(count):
 
 def _enable(monkeypatch, answers):
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
-    monkeypatch.setenv("AGENT_CONSOLE_WIKI_RERANK", "1")
+    monkeypatch.setenv("AGENT_CONSOLE_JEV", "1")
 
     def post(payload):
         page = payload["state"]["wiki_page"]
@@ -48,8 +48,57 @@ def test_a_failed_or_malformed_decision_keeps_the_retrieval_order(monkeypatch):
 def test_without_a_key_or_when_switched_off_nothing_is_called(monkeypatch):
     monkeypatch.setattr(decision_model, "_post", lambda payload: (_ for _ in ()).throw(AssertionError("called")))
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
-    monkeypatch.setenv("AGENT_CONSOLE_WIKI_RERANK", "1")
+    monkeypatch.setenv("AGENT_CONSOLE_JEV", "1")
     assert decision_model.rank_wiki_pages("q", _pages(3))[1]["reason"] == "disabled"
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
-    monkeypatch.setenv("AGENT_CONSOLE_WIKI_RERANK", "0")
+    monkeypatch.setenv("AGENT_CONSOLE_JEV", "0")
     assert decision_model.rank_wiki_pages("q", _pages(3))[1]["reason"] == "disabled"
+
+
+def test_intent_falls_back_to_jev_only_where_the_rules_find_none(monkeypatch):
+    from agent_console import agent
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setenv("AGENT_CONSOLE_JEV", "1")
+    monkeypatch.setattr(agent, "_JEV_INTENT_CACHE", {})
+    monkeypatch.setattr(agent, "_extract_asset_symbol", lambda question: None)
+    calls = []
+
+    def post(payload):
+        calls.append(payload["state"]["user_message"])
+        assert set(payload["questions"]["intent"]["criteria"]) == set(agent._JEV_INTENTS)
+        return {"answers": {"intent": {"type": "choice", "choice": "market_analysis", "confidence": 0.8}}}
+    monkeypatch.setattr(decision_model, "_post", post)
+
+    assert agent._classify_question_intent("오늘 시장 어때?")["name"] == "market_analysis"
+    assert agent._classify_question_intent("왜 같은 답을 반복해?")["name"] == "meta_debug"
+    assert calls == []  # a keyword rule matched: Jev is not asked
+    assert agent._classify_question_intent("그럼 코스피는 어때")["name"] == "market_analysis"
+    assert agent._classify_question_intent("그럼 코스피는 어때")["name"] == "market_analysis"
+    assert calls == ["그럼 코스피는 어때"]  # one call per question
+    agent._classify_question_intent("안녕")
+    assert calls == ["그럼 코스피는 어때"]  # small talk stays general without a call
+
+
+def test_intent_stays_general_when_jev_fails_or_answers_outside_the_menu(monkeypatch):
+    from agent_console import agent
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setenv("AGENT_CONSOLE_JEV", "1")
+    monkeypatch.setattr(agent, "_extract_asset_symbol", lambda question: None)
+    for answer in (urllib.error.URLError("down"), {"answers": {"intent": {"type": "choice", "choice": "weather"}}}):
+        monkeypatch.setattr(agent, "_JEV_INTENT_CACHE", {})
+
+        def post(payload, answer=answer):
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
+        monkeypatch.setattr(decision_model, "_post", post)
+
+        intent = agent._classify_question_intent("그럼 코스피는 어때")
+
+        assert intent["name"] == "general" and agent._JEV_INTENT_CACHE == {}
+
+
+def test_ticker_research_chosen_without_a_resolved_symbol_asks_to_identify_it(monkeypatch):
+    from agent_console import agent
+    contract = agent._intent_contract_for("ticker_research", "아니아니 국내 etf", None)
+    assert contract["subject"] == "" and contract["required_steps"][0] == "질문이 가리키는 종목을 먼저 특정"

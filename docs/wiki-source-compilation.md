@@ -80,13 +80,24 @@ contract and existing raw retention remain unchanged.
   real questions graded blind by Codex (0-2 per page) the top 4 scored 81 in
   retrieval order, 100 with Jev and 108 at best, at $0.0113 for 320 calls and
   0.4 s per call (run in parallel). It runs when `OPENROUTER_API_KEY` is set
-  (`AGENT_CONSOLE_WIKI_RERANK=0` turns it off); any failed or malformed answer
+  (`AGENT_CONSOLE_JEV=0` turns it off); any failed or malformed answer
   keeps the retrieval order. Two first-stage changes measured worse and were not
   made: at most two `compiled_source` notes in the top 4 (78; 72 of 114
   directly useful pages were such notes) and per-term QMD search fused by
   reciprocal rank (73). QMD itself returns nothing for most chat questions,
   because its lexical search requires every term, so the order comes from
   `_fallback_ranked_pages`.
+- The question intent (`agent._classify_question_intent`) still comes from the
+  keyword rules first; only when they say `general` (and the message is not
+  small talk) does Jev pick one of the ten intents from `agent._JEV_INTENTS`,
+  cached per question because one answer asks several times. On 208 unique real
+  chat messages labelled by Codex, the rules matched 59 and sent 142 to `general`;
+  with the Jev fallback 154 matched. Intent changed for 115 messages and the
+  composer path for 8 (mostly market context to general chat). Real answers
+  with only the intent differing, judged blind by Codex: 5 to 5 on 10 messages
+  without history, 18 to 10 (2 ties) on 30 others with their conversation
+  history. Wins came from ticker research and the rarer intents; market
+  analysis split 7 to 7. A failed or off-menu choice keeps `general`.
 - Jev was also measured where it would replace a model judgment, and is not
   used there: on 180 extracted relations it agreed with the stored keep/view/reject
   reviews on 102 and would have admitted 38 of 60 rejected relations; on 114
