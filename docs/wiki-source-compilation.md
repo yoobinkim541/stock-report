@@ -71,6 +71,27 @@ contract and existing raw retention remain unchanged.
   `- 본문(미검증 모델 합성): …` plus a `주의` line (`wiki.MODEL_SYNTHESIS_WARNING`):
   the deterministic grounding rules cannot verify meaning, so this text must not
   be cited as established fact.
+- Chat answers (`agent._answer_impl`) take 20 knowledge-view candidates and
+  reorder them with TypeSafe Jev (`decision_model.rank_wiki_pages`, OpenRouter
+  Decisions API, pinned `typesafe/jev-1.14`): one yes/no question per page, "does
+  it directly help answer the question", sorted by probability, before the first
+  8 go to the Laya step and the first 4 into the prompt. Laya is not configured
+  on the server, so without the rerank the prompt got the retrieval order. On 16
+  real questions graded blind by Codex (0-2 per page) the top 4 scored 81 in
+  retrieval order, 100 with Jev and 108 at best, at $0.0113 for 320 calls and
+  0.4 s per call (run in parallel). It runs when `OPENROUTER_API_KEY` is set
+  (`AGENT_CONSOLE_WIKI_RERANK=0` turns it off); any failed or malformed answer
+  keeps the retrieval order. Two first-stage changes measured worse and were not
+  made: at most two `compiled_source` notes in the top 4 (78; 72 of 114
+  directly useful pages were such notes) and per-term QMD search fused by
+  reciprocal rank (73). QMD itself returns nothing for most chat questions,
+  because its lexical search requires every term, so the order comes from
+  `_fallback_ranked_pages`.
+- Jev was also measured where it would replace a model judgment, and is not
+  used there: on 180 extracted relations it agreed with the stored keep/view/reject
+  reviews on 102 and would have admitted 38 of 60 rejected relations; on 114
+  compiled claims checked against their source text, Codex found none unsupported
+  and 4 partly supported, so a support gate would have little to catch.
 - The ontology block in chat context (`wiki_ontology.context_section`) lists an
   entity's relations backed by two or more publishers or sources first
   (corroborated, then publisher count, source count, reported before view), up

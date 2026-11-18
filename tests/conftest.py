@@ -97,6 +97,12 @@ def _isolate_wiki_rollout_from_account_and_clock(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_chat_from_decision_api(monkeypatch):
+    """Chat answers rerank wiki pages through OpenRouter when a key is present; tests never call it."""
+    monkeypatch.setenv("AGENT_CONSOLE_WIKI_RERANK", "0")
+
+
+@pytest.fixture(autouse=True)
 def _isolate_ohlc_cache():
     """매 테스트 전에 OHLC 디스크 캐시를 비운다.
 

@@ -16,7 +16,7 @@ from contextvars import ContextVar, copy_context
 
 from lib import llm_cli
 
-from . import context, evidence_context, evidence_usage, laya_bridge, realtime_market, shared_memory, storage, wiki
+from . import context, decision_model, evidence_context, evidence_usage, laya_bridge, realtime_market, shared_memory, storage, wiki
 
 _KST = timezone(timedelta(hours=9))
 
@@ -171,9 +171,16 @@ def _answer_impl(question: str, surface: str, async_postprocess: bool,
     _emit_progress_event("tools_started", tool="wiki_search")
     try:
         # archived 는 이력이지 현재 지식이 아니다 — laya 검토·사용량 추적·evidence 슬롯을 차지하지 않게 제외.
-        wiki_pages = wiki.list_pages(query=question, surface=surface, limit=8, include_archived=False)
+        # Jev 재정렬이 켜져 있으면 후보 20개를 받아 질문에 답이 되는 순서로 다시 세운다.
+        wiki_pages = wiki.list_pages(query=question, surface=surface, include_archived=False,
+                                     limit=decision_model.MAX_PAGES if decision_model.enabled() else 8)
     except Exception:
         wiki_pages = []
+    try:
+        wiki_pages, wiki_rerank = decision_model.rank_wiki_pages(question, wiki_pages)
+    except Exception:
+        wiki_rerank = {"method": "retrieval", "reason": "rerank_failure"}
+    pack["_wiki_rerank"] = wiki_rerank
     try:
         retrieved_ids = {page.get("id") for page in wiki_pages if isinstance(page, dict)}
         explicit_pages = []
