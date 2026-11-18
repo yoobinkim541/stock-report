@@ -61,11 +61,24 @@ contract and existing raw retention remain unchanged.
   lock; a page changed after planning is `skipped_stale`.
 - `build_context_section` drops archived pages from retrieved and injected
   pages unless `include_archived=True`; `list_pages` keeps the full history view
-  by default for the browser and batch jobs. A page carrying draft
+  by default for the browser and batch jobs. The knowledge view
+  (`include_archived=False`) also keeps one page per normalized title, the
+  higher-ranked one, and ranks twice the limit to refill the slots. On
+  2026-11-18, 170 title groups among active market pages were mostly a source's
+  note page plus a spec page named like it; on 16 real chat questions 7 of the 64
+  top-4 slots were such repeats. A page carrying draft
   `source_knowledge` claims (compiled or topic synthesis) is rendered as
   `- 본문(미검증 모델 합성): …` plus a `주의` line (`wiki.MODEL_SYNTHESIS_WARNING`):
   the deterministic grounding rules cannot verify meaning, so this text must not
   be cited as established fact.
+- The ontology block in chat context (`wiki_ontology.context_section`) lists an
+  entity's relations backed by two or more publishers or sources first
+  (corroborated, then publisher count, source count, reported before view), up
+  to `CONTEXT_RELATIONS` (4). Single-source relations fill at most
+  `CONTEXT_SINGLE_SOURCE_RELATIONS` (2) of the remaining slots; the rest are
+  counted as omitted, and a reading line says they are one source's statement.
+  On 2026-11-18, 427 of 480 relations had one publisher and one source, and the
+  block took the first four in file order.
 - The grounding rules gate fresh model output per claim
   (`wiki_source_compiler.usable_parts`). A claim that fails is dropped and the
   claims that pass are kept; the source is rejected only when no claim survives,
@@ -94,7 +107,9 @@ contract and existing raw retention remain unchanged.
   for a durable subject that no candidate covers. `route_pass` drops a spec whose
   title carries a date (`dated_title`: `11월 10일`, `11/16`, `18 October`, `11월 3주`)
   or a sell-side publisher's name (`publisher_title`), whose kind is not allowed
-  (`kind_invalid`), whose normalized title an active page already has
+  (`kind_invalid`), whose normalized title equals the compiled title of the
+  source's own note page (`source_note_title`; 168 of the 170 title groups above),
+  whose normalized title an active page already has
   (`title_exists`; when that page is a candidate it is selected instead), or that
   exceeds the cap (`spec_cap`). Drops are kept in the routing state as
   `dropped_new_page_specs` with the reason. The source's own note page

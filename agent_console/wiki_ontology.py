@@ -821,6 +821,27 @@ def insight_entity_id(page: dict) -> str:
     return ""
 
 
+# 2026-11-18 운영 그래프 관계 480건 중 427건이 발행자 1곳·출처 1개였다. 프롬프트에는 여러 출처가 받친 관계를 먼저
+# 넣고, 출처 1개 관계는 개체마다 이만큼만 채운다.
+CONTEXT_RELATIONS = 4
+CONTEXT_SINGLE_SOURCE_RELATIONS = 2
+
+
+def _single_source(relation: dict) -> bool:
+    return (relation.get("publisher_count") or 0) <= 1 and (relation.get("source_count") or 0) <= 1
+
+
+def context_relations(ontology: dict, entity_id: str) -> tuple[list[dict], int]:
+    """프롬프트에 넣을 관계와 빠진 출처 1개 관계 수. 복수 발행자 일치 → 발행자 수 → 출처 수 → 보도(견해는 뒤) 순."""
+    ranked = sorted(entity_relations(ontology, entity_id), key=lambda relation: (
+        relation.get("state") != "corroborated", -(relation.get("publisher_count") or 0),
+        -(relation.get("source_count") or 0), relation.get("modality") == "view"))
+    backed = [relation for relation in ranked if not _single_source(relation)][:CONTEXT_RELATIONS]
+    single = [relation for relation in ranked if _single_source(relation)]
+    shown = single[:min(CONTEXT_SINGLE_SOURCE_RELATIONS, CONTEXT_RELATIONS - len(backed))]
+    return backed + shown, len(single) - len(shown)
+
+
 def context_section(query: object, *, insights: Iterable[dict] = (), limit: int = 3, root: Path | None = None) -> str:
     """LLM 프롬프트에 넣을 온톨로지 블록. 질문에 나온 개체의 관계와 연결된 인사이트만."""
     entities = find_entities(query, limit=limit, root=root)
@@ -829,15 +850,22 @@ def context_section(query: object, *, insights: Iterable[dict] = (), limit: int 
     ontology = load_ontology(root) or {}
     by_entity = {insight_entity_id(page).casefold(): page for page in insights or [] if page.get("status") != "archived"}
     lines = ["[위키 온톨로지]"]
+    single_shown = False
     for entity in entities:
         lines.append(f"- {entity['name']} ({ENTITY_TYPES.get(entity['type'], entity['type'])} · {entity['id']}): "
                      f"claim {entity.get('claim_count', 0)}건 · 출처 {entity.get('source_count', 0)}개")
-        for relation in entity_relations(ontology, entity["id"])[:4]:
+        relations, omitted = context_relations(ontology, entity["id"])
+        for relation in relations:
+            single_shown = single_shown or _single_source(relation)
             lines.append(f"  · {relation_phrase(ontology, relation)} — {relation_label(relation)}")
+        if omitted:
+            lines.append(f"  · 출처 1개 관계 {omitted}건 생략")
         insight = by_entity.get(entity["id"].casefold())
         if insight:
             thesis = " ".join(str(insight.get("summary") or "").split())[:300]
             lines.append(f"  · 인사이트(모델 추론, 미검증): {thesis} [[{insight.get('id')}]]")
+    if single_shown:
+        lines.insert(1, "- 읽는 법: 출처 1개 관계는 한 자료의 서술이다. 가설로만 쓰고 사실로 단정하지 않는다.")
     return "\n".join(lines) if len(lines) > 1 else ""
 
 

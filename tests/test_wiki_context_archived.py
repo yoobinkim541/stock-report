@@ -108,3 +108,18 @@ def test_agent_answer_keeps_archived_pages_out_of_review_usage_and_evidence(monk
     assert "old" not in seen["usage"]
     assert "old" not in seen["provided"]
     assert "old" not in seen["retrieved"]
+
+
+def test_knowledge_view_gives_one_slot_per_title():
+    for page_id, title, kind in (("note", "Memory  Cycle recap", "note"), ("spec", "memory cycle recap", "concept"),
+                                 ("other", "Fab capacity", "concept")):
+        wiki.upsert_page({"id": page_id, "title": title, "body": f"DUPKEY memory {page_id}", "surface": "market",
+                          "kind": kind, "status": "draft"})
+    wiki._CACHE.clear()
+
+    pages = wiki.list_pages(query="DUPKEY memory", surface="market", limit=2, include_archived=False)
+
+    assert len(pages) == 2 and "other" in {page["id"] for page in pages}
+    assert len({page["id"] for page in pages} & {"note", "spec"}) == 1
+    every = wiki.list_pages(query="DUPKEY memory", surface="market", limit=3, include_archived=True)
+    assert {page["id"] for page in every} == {"note", "spec", "other"}

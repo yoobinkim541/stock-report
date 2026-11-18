@@ -124,16 +124,16 @@ def test_router_keeps_durable_new_pages_and_drops_recaps_duplicates_and_excess(m
     state = module().discover_targets(compiled(), surface="market")
     def spec(title):
         return {"title": title, "kind": "concept", "surface": "market", "purpose": "Track " + title}
-    result = module().route_pass(compiled(), state, llm_fn=lambda _: json.dumps({
+    result = module().route_pass({**compiled(), "title": "Fab capacity recap"}, state, llm_fn=lambda _: json.dumps({
         "selected": [], "rejected": {"entity": "Other scope", "topic": "Other scope"}, "new_page_specs": [
             spec("유안타증권의 반도체 이익 전망"), spec("국내 증시 마감 시황 - 11월 10일"),
             spec("Global news briefing for 18 October 2026"), spec("Capacity topic"),
-            spec("Demand outlook"), {**spec("Fab maker"), "kind": "entity"}, spec("Memory pricing"),
-            spec("HBM supply"), spec("ESS demand")]}))
+            spec("Demand outlook"), {**spec("Fab maker"), "kind": "entity"}, spec("Fab  Capacity recap"),
+            spec("Memory pricing"), spec("HBM supply"), spec("ESS demand")]}))
     assert result["selected"] == ["topic"] and "topic" not in result["rejected"]
     assert [item["title"] for item in result["new_page_specs"]] == ["Memory pricing", "HBM supply"]
     assert [item["reason"] for item in result["dropped_new_page_specs"]] == [
-        "kind_invalid", "publisher_title", "dated_title", "dated_title", "title_exists", "spec_cap"]
+        "kind_invalid", "publisher_title", "dated_title", "dated_title", "title_exists", "source_note_title", "spec_cap"]
     later = module().route_pass(compiled(), {**result, "unexamined": [], "cursor": 0, "candidate_ids": []},
         llm_fn=lambda _: json.dumps({"selected": [], "rejected": {}, "new_page_specs": [spec("Fab capex")]}))
     assert len(later["new_page_specs"]) == 2 and later["dropped_new_page_specs"][-1]["reason"] == "spec_cap"

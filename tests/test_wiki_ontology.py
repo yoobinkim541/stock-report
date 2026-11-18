@@ -306,3 +306,16 @@ def test_seed_config_is_a_valid_lexicon_without_alias_collisions():
         # 한 글자 이름(금·은)은 오탐이 커서 별칭으로만 잡는다.
         names = [name for name in [entity["name"], *entity.get("aliases", [])] if len(name) >= 2]
         assert names and all(lexicon.resolve(name) == entity["id"] for name in names), entity["id"]
+
+
+def test_context_puts_backed_relations_first_and_caps_single_source_ones():
+    def relation(name, state="asserted", publishers=1, sources=1, modality="reported"):
+        return {"id": name, "from": "asset:crude-oil", "to": name, "type": "positive_for", "state": state,
+                "publisher_count": publishers, "source_count": sources, "modality": modality}
+    ontology = {"relations": [relation("view", modality="view"), relation("single-a"), relation("multi-source", sources=3),
+                              relation("corroborated", "corroborated", 2, 2), relation("single-b"), relation("single-c")]}
+
+    shown, omitted = wo.context_relations(ontology, "asset:crude-oil")
+
+    assert [item["id"] for item in shown] == ["corroborated", "multi-source", "single-a", "single-b"]
+    assert omitted == 2

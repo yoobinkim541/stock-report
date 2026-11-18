@@ -9,6 +9,7 @@ import math
 import re
 import threading
 import time
+import unicodedata
 from copy import deepcopy
 from collections import Counter, defaultdict
 from collections.abc import Callable
@@ -930,25 +931,27 @@ def list_pages(*, query: str = "", surface: str = "all", status: str = "all", li
         records = [row for row in records if not _record_is_archived(row)]
     if not records:
         return []
-    fallback = _fallback_ranked_pages(records, query=query, surface=surface, status=status, limit=limit)
-    qmd_pages = _qmd_ranked_pages(records, query=query, surface=surface, status=status, limit=limit)
-    if not qmd_pages:
-        pages = _apply_backlinks(fallback, records)
-        _record_retrieval_usage(query, surface, status, pages, provider="fallback")
-        return pages
+    # The knowledge view drops a page whose title repeats a higher-ranked one: on 2026-11-18, 170 title groups among
+    # active market pages were mostly a source's note page plus a page named like it, and both took context slots.
+    fetch = limit if include_archived else limit * 2
+    fallback = _fallback_ranked_pages(records, query=query, surface=surface, status=status, limit=fetch)
+    qmd_pages = _qmd_ranked_pages(records, query=query, surface=surface, status=status, limit=fetch)
     merged: list[dict] = []
     seen: set[str] = set()
+    titles: set[str] = set()
     for page in [*qmd_pages, *fallback]:
         page_id = _clean(page.get("id"), 120)
-        if page_id and page_id in seen:
+        title = " ".join(unicodedata.normalize("NFKC", str(page.get("title") or "")).casefold().split())
+        if (page_id and page_id in seen) or (not include_archived and title and title in titles):
             continue
         if page_id:
             seen.add(page_id)
+        titles.add(title)
         merged.append(page)
         if len(merged) >= limit:
             break
     pages = _apply_backlinks(merged, records)
-    _record_retrieval_usage(query, surface, status, pages, provider="qmd")
+    _record_retrieval_usage(query, surface, status, pages, provider="qmd" if qmd_pages else "fallback")
     return pages
 
 

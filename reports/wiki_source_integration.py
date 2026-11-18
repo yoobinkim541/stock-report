@@ -206,6 +206,9 @@ def route_pass(compiled: CompiledSource, state: RoutingState, *, llm_fn: Callabl
     known_specs = {spec["page_id"] for spec in state["new_page_specs"]}
     for spec in state["new_page_specs"]:
         titles.setdefault(normalized_term(spec["title"]), []).append(spec["page_id"])
+    # The note page the server builds for this source carries the compiled title; on 2026-11-18, 168 of 170 same-title
+    # groups among active market pages were such a note plus a spec page named like it.
+    note_title = normalized_term(str(compiled.get("title") or ""))
     for spec in normalized:
         same_title = [page_id for page_id in titles.get(normalized_term(spec["title"]), [])
                       if page_id != spec["page_id"]]
@@ -215,7 +218,9 @@ def route_pass(compiled: CompiledSource, state: RoutingState, *, llm_fn: Callabl
             selected.append(candidate)
             rejected.pop(candidate, None)
             continue
-        reason = _spec_drop_reason(spec["title"]) or ("title_exists" if same_title else None)
+        reason = (_spec_drop_reason(spec["title"])
+                  or ("source_note_title" if normalized_term(spec["title"]) == note_title else None)
+                  or ("title_exists" if same_title else None))
         if not reason and spec["page_id"] not in known_specs and len(known_specs) >= MAX_NEW_PAGE_SPECS:
             reason = "spec_cap"
         if reason:
