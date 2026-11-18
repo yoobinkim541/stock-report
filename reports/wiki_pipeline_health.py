@@ -351,6 +351,16 @@ def _build_source_rows(
     return rows
 
 
+def _missing_success(row: dict[str, Any]) -> bool:
+    """관측됐는데 한 번도 성공하지 못한 소스. 운영자가 끈(disabled) 소스와, 조회는 성공했지만
+    받을 것이 없었던 on-demand 소스(예: PDF 를 올리지 않는 증권사 채널)는 공백이 아니다."""
+    return bool(
+        row.get("observed") and not row.get("has_success")
+        and row.get("availability") != "disabled"
+        and not (row.get("collection_mode") == "on_demand" and row.get("fetch_success"))
+    )
+
+
 def _summarize_source_health(
     source_health: dict[str, dict[str, Any]],
     stale_rows: list[dict[str, Any]],
@@ -358,7 +368,7 @@ def _summarize_source_health(
 ) -> dict[str, Any]:
     rows = _build_source_rows(source_health, stale_rows, recent_events)
     stale_sources = [row for row in rows if row["is_stale"]]
-    missing_success = [row for row in rows if row["observed"] and not row["has_success"]]
+    missing_success = [row for row in rows if _missing_success(row)]
     zero_event = [row for row in rows if row["observed"] and row["last_count"] == 0]
     blocked = [row for row in rows if row["availability"] in {"blocked", "disabled"}]
     failed = [row for row in rows if row["availability"] == "error"]
@@ -626,17 +636,18 @@ def _recommendations(
             "action": "Codex/Hermes 인증·runner 오류를 확인하고 휴리스틱 폴백 원인을 복구하세요.",
         })
     stale_rows = list(source_section.get("stale_sources") or [])
-    missing_success = [row for row in source_section.get("sources") or [] if row.get("observed") and not row.get("has_success")]
+    missing_success = [row for row in source_section.get("sources") or [] if _missing_success(row)]
+    # 운영자가 끈(disabled) 소스는 대체 사유가 기록된 결정이라 공백 점검 대상이 아니다 (gap_rows 와 같은 기준).
     blocked_sources = [
         row for row in source_section.get("sources") or []
-        if row.get("availability") in {"blocked", "disabled", "error"}
+        if row.get("availability") in {"blocked", "error"}
     ]
     if stale_rows or missing_success or blocked_sources:
         top_sources = stale_rows or blocked_sources or missing_success
         detail_bits = []
         for row in top_sources[:3]:
             source = row.get("source", "unknown")
-            if row.get("availability") in {"blocked", "disabled", "error"} and row.get("availability_reason"):
+            if row.get("availability") in {"blocked", "error"} and row.get("availability_reason"):
                 detail_bits.append(f"{source}: {row['availability_reason']}")
             elif row.get("stale_hours") is not None:
                 detail_bits.append(f"{source} {row['stale_hours']}h/{row.get('stale_threshold')}h")

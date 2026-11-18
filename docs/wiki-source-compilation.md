@@ -299,5 +299,10 @@ Set `HERMES_SOURCE_COLLECTION_MODE=scheduled` only after a recurring authorized
 sender is working; delivery gaps then alert normally. This policy does not hide
 other sources' failures or receiver downtime. On 2026-10-10 the receiver was
 restarted and the actual bot gap checker returned no Hermes delivery warning.
-Authorized SaveTicker login and unattended collection remain unverified. A
-healthy webhook endpoint is not evidence of fresh articles.
+A healthy webhook endpoint is not evidence of fresh articles. SaveTicker has
+ended: news returns only the sunset notice, the calendar API returns 426 since
+2026-11-17 (the economic calendar now reads the ForexFactory weekly feed and a
+failed feed raises `SourceProviderUnavailable` instead of an empty week) and
+`saveticker.com` answers with a Cloudflare 403, so its collector, CDP browser
+path, API helper and report PDF cron were removed on 2026-11-18. Archived
+`saveticker_article` records keep their retention and source mapping.

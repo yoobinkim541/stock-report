@@ -364,6 +364,31 @@ def test_gap_count_includes_blocked_sources_that_stale_check_skips():
     assert sorted(overall["gap_source_names"]) == ["economic_calendar", "saveticker"]
 
 
+def test_collection_recommendation_skips_retired_and_empty_on_demand_sources():
+    """끈 소스(대체 사유 기록)와 조회는 됐지만 받을 PDF 가 없던 on-demand 채널로는 경고하지 않는다."""
+    from reports.wiki_pipeline_health import _recommendations, _summarize_source_health
+
+    health = {
+        "saveticker": {"last_run": "2026-11-15T00:00:00+00:00", "last_count": 0,
+                       "last_success": "2026-11-11T00:00:00+00:00", "availability": "disabled",
+                       "availability_reason": "legacy-news-sunset-notice; replaced by Investing.com"},
+        "broker_report:Samsung_Global_AI_SW": {"collection_mode": "on_demand", "last_run": "2026-11-18T00:00:00+00:00",
+                                               "last_count": 0, "fetch_success": True},
+        "kalshi": {"last_run": "2026-11-18T00:00:00+00:00", "last_count": 60,
+                   "last_success": "2026-11-18T00:00:00+00:00"},
+    }
+    section = _summarize_source_health(health, [], [])
+    recs = _recommendations(section, {}, {})
+
+    assert section["overall"]["missing_success_sources"] == 0
+    assert not any(rec["category"] == "collection" for rec in recs)
+
+    health["kalshi"] = {"last_run": "2026-11-18T00:00:00+00:00", "last_count": 0,
+                        "availability": "blocked", "availability_reason": "HTTP 403"}
+    recs = _recommendations(_summarize_source_health(health, [], []), {}, {})
+    assert [rec["detail"] for rec in recs if rec["category"] == "collection"] == ["kalshi: HTTP 403"]
+
+
 
 def test_source_health_summary_exposes_explicit_integrity_metrics():
     from reports.wiki_pipeline_health import _summarize_source_health
