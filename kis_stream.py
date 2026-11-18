@@ -641,19 +641,23 @@ async def _session(approval_key: str) -> None:
                 raw = await asyncio.wait_for(ws.recv(), timeout=FLUSH_SECS)
             except asyncio.TimeoutError:
                 raw = None
-            if raw is not None:
-                pong = handle_pingpong(raw)
-                if pong is not None:
-                    await ws.send(pong)
-                elif raw.lstrip().startswith("{"):          # 구독 ACK — 체결통보 복호화 키 수집
-                    ack = parse_subscribe_ack(raw)
-                    if ack and ack.get("tr_id") in _FILL_TRS:
-                        aes_keys[ack["tr_id"]] = (ack["key"], ack["iv"])
-                elif raw[0] == "1":                          # 암호화 = 체결통보
-                    _handle_fill_frame(raw, aes_keys)
-                else:                                        # 평문 = 시세(체결/호가)
-                    for rec in parse_realtime_frame(raw):
-                        _apply(latest, rec, delayed=False)   # KR·美 모두 무료 실시간(美 0분지연)
+            if raw:                                          # 빈 프레임 → raw[0] IndexError 로 세션이 끊기던 것 방지
+                try:
+                    pong = handle_pingpong(raw)
+                    if pong is not None:
+                        await ws.send(pong)
+                    elif raw.lstrip().startswith("{"):          # 구독 ACK — 체결통보 복호화 키 수집
+                        ack = parse_subscribe_ack(raw)
+                        if ack and ack.get("tr_id") in _FILL_TRS:
+                            aes_keys[ack["tr_id"]] = (ack["key"], ack["iv"])
+                    elif raw[0] == "1":                          # 암호화 = 체결통보
+                        _handle_fill_frame(raw, aes_keys)
+                    else:                                        # 평문 = 시세(체결/호가)
+                        for rec in parse_realtime_frame(raw):
+                            _apply(latest, rec, delayed=False)   # KR·美 모두 무료 실시간(美 0분지연)
+                except (ValueError, KeyError, IndexError, TypeError) as e:
+                    # 프레임 1건 파싱 실패는 그 프레임만 버린다 — 세션 예외로 번지면 재접속·백오프
+                    logger.warning("프레임 파싱 실패(무시): %s — %.80r", e, raw)
             now = time.time()
             if now - last_flush >= FLUSH_SECS:
                 _flush(latest, market="KR/US" if us_enabled() else "KR", connected=True)
@@ -672,12 +676,20 @@ class _Resubscribe(Exception):
     pass
 
 
+STABLE_SESSION_SECS = 60.0     # 이 이상 유지된 세션이 끊기면 백오프를 1초부터 다시 (일시 장애 취급)
+
+
 async def main_async() -> None:
+    backoff = 1.0
     approval = _get_approval_key()
-    if not approval:
-        return
+    while not approval:            # 최초 발급 실패(토큰 서버 일시 장애)도 재시도 — 종전엔 즉시 종료
+        logger.warning("approval key 발급 실패 — %.0fs 후 재시도", backoff)
+        await asyncio.sleep(backoff)
+        backoff = min(60.0, backoff * 2)
+        approval = _get_approval_key()
     backoff = 1.0
     while True:
+        started = time.time()
         try:
             await _session(approval)
         except _Resubscribe:
@@ -685,6 +697,8 @@ async def main_async() -> None:
             backoff = 1.0
             continue
         except Exception as e:
+            if time.time() - started >= STABLE_SESSION_SECS:
+                backoff = 1.0          # 오래 잘 돌던 세션의 끊김 — 누적 백오프 리셋
             logger.warning("WS 세션 종료(%s) — %.0fs 후 재접속", e, backoff)
             await asyncio.sleep(backoff)
             backoff = min(60.0, backoff * 2)

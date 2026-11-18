@@ -83,7 +83,7 @@ const chart = {
 global.LightweightCharts = {
   CandlestickSeries:"candlestick", BarSeries:"bar", LineSeries:"line",
   AreaSeries:"area", BaselineSeries:"baseline", HistogramSeries:"histogram",
-  createChart(){return chart;},
+  createChart(el, opts){chartState.created=opts; return chart;},
   createSeriesMarkers(series, markers){series.state.markers=markers;},
 };
 __SCRIPT__
@@ -100,6 +100,15 @@ check(JSON.parse(storage[rangeKey]).from === 2, "range not published");
 storageHandlers[0]({key:rangeKey,newValue:JSON.stringify({from:4,to:12,src:"other",ts:1})});
 check(chartState.range.from === 4 && chartState.range.to === 12, "remote range not applied");
 check(element("readout").textContent.includes("AAPL"), "readout missing");
+// 시간대 — 2025-01-01 00:00 UTC 봉은 문서 TZ(America/New_York) 로 2024-12-31 19:00 이어야 한다
+const loc = chartState.created.localization;
+check(typeof loc.timeFormatter === "function", "timeFormatter missing");
+check(loc.timeFormatter(Date.UTC(2025,0,1,0,0,0)/1000) === "2024-12-31 19:00", "tz formatter wrong: " + loc.timeFormatter(Date.UTC(2025,0,1,0,0,0)/1000));
+const tick = chartState.created.timeScale.tickMarkFormatter;
+check(tick(Date.UTC(2025,0,1,0,0,0)/1000, 3) === "19:00", "tick time wrong");
+check(tick(Date.UTC(2025,0,1,0,0,0)/1000, 2) === "12-31", "tick day wrong");
+check(chartState.created.timeScale.timeVisible === true, "intraday should show time");
+check(element("readout").textContent.includes("2025-01-02 00:00"), "readout lacks tz time: " + element("readout").textContent);   // 마지막 봉 = 01-02 05:00 UTC = 00:00 ET
 console.log("OK canvas-runtime");
 """
 

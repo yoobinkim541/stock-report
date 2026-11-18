@@ -339,6 +339,17 @@ def test_etf_score_html_gauge():
     assert "데이터 부족" in none_h and "<svg" not in none_h
     assert "그룹 최상위" in theme.etf_score_html(90) and "그룹 최하위" in theme.etf_score_html(5)
 
+def test_etf_return_strip_and_holdings():
+    """수익률 칩은 상승 초록·하락 빨강, 비중 바는 최대 비중이 트랙을 채운다."""
+    chips = theme.etf_return_strip_html([("1년", 12.4), ("MDD", -8.2), ("분배율", None)])
+    assert "tn-etf-chip" in chips and "+12.4%" in chips and "-8.2%" in chips
+    assert "분배율" in chips and ">—</b>" in chips
+    assert theme.etf_return_strip_html([]) == ""
+    bars = theme.etf_holdings_html(
+        [{"name": "삼성전자", "pct": 28.0}, {"name": "", "pct": 10}, {"symbol": "SK하이닉스", "pct": 14}])
+    assert "삼성전자" in bars and "28.00%" in bars and "SK하이닉스" in bars
+    assert 'width:100.0%' in bars and 'width:50.0%' in bars
+    assert theme.etf_holdings_html([]) == ""
 
 def test_valuation_gauge_html():
     """가치평가 게이지 — 라벨 체계(고평가/저평가)·타이틀·verdict 존."""
@@ -375,12 +386,12 @@ def test_analysis_card_html():
     assert "다음 확인" not in good
 
 
-def test_css_render_progress_animations():
-    """렌더링 진행감 — 스켈레톤 shimmer·stale 숨쉬기 keyframes 계약."""
+def test_css_keeps_stale_frame_stable():
+    """rerun 중 opacity 펄스가 없어야 한다 — 화면 떨림의 원인이었다."""
     css = theme._CSS
     assert "stSkeleton" in css and "tn-shimmer" in css
-    assert 'data-stale="true"' in css and "tn-breathe" in css
-    assert css.count("@keyframes tn-shimmer") == 1 and css.count("@keyframes tn-breathe") == 1
+    assert 'data-stale="true"' in css and "tn-breathe" not in css
+    assert "opacity: 1" in css
 
 
 def test_market_temp_and_valuation_strip():

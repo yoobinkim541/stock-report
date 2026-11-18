@@ -15,7 +15,7 @@ Cloudflare로 접속 중인 기존 Streamlit 대시보드에서는 사이드바�
 - Portfolio Lab: 실제 자산 연동 없이 전략 가설, 비중, 손실한도, 운용 규칙을 저장한다.
 - Strategy Canvas: FinanceAgentGUI의 `portfolio-matrix-dsl` 방식으로 RSI 현금화 규칙을 실행하고, Sortino/Calmar/Ulcer/UPI/Beta까지 표준 평가 지표를 표시한다.
 - Local Install Prompt: 노트북에서 같은 콘솔을 설치하도록 붙여넣을 프롬프트를 제공한다.
-- Arca proxy ingest: 서버에 이미 열려 있는 SOCKS 터널(`socks5://127.0.0.1:1080`)을 이용해 아카라이브 주식채널 공개 글 조회를 시도하고, 성공한 글만 `source-cache`와 World Memory에 저장한다.
+- Arca 수집은 종료했다. 2026-11-14부터 arca.live가 Cloudflare challenge(403)만 반환하고 `r.jina.ai` 미러도 채널 헤더만 준다. 접근 통제를 우회하지 않으므로 수동 수집 버튼도 없다.
 
 ## 의도적으로 뺀 것
 
@@ -60,7 +60,6 @@ AGENT_CONSOLE_PORT=8798 bash scripts/run_agent_console.sh
 - `AGENT_CONSOLE_SHARED_MEMORY_ENABLED`: `0`이면 공유 메모리 기록을 비활성화한다.
 - `AGENT_CONSOLE_HOST`: 바인드 주소. 기본값은 `127.0.0.1`.
 - `AGENT_CONSOLE_PORT`: 포트. 기본값은 `8797`.
-- `STOCK_COLLECTOR_ARCA_PROXY`: Arca 조회에 사용할 프록시. 서버 기본 수동 버튼은 `socks5://127.0.0.1:1080`을 사용한다.
 - `STOCK_COLLECTOR_POLYMARKET_LIMIT`: Polymarket 이벤트 조회 개수. 기본값은 `80`.
 - `STOCK_COLLECTOR_POLYMARKET_MIN_VOLUME`: Polymarket market 최소 거래량 필터. 기본값은 `10000`.
 - `STOCK_COLLECTOR_POLYMARKET_KEYWORDS`: 쉼표로 구분한 Polymarket 필터 키워드. 기본값은 Fed, CPI, election, oil, Nvidia, AI, geopolitical 키워드 묶음이다.
@@ -80,6 +79,26 @@ AGENT_CONSOLE_PORT=8798 bash scripts/run_agent_console.sh
 - `GET /api/portfolio-lab/scenarios`
 - `POST /api/portfolio-lab/scenarios`
 - `GET /api/local-install-prompt`
+
+## 답변 파이프라인 (실제 구조)
+
+`agent.answer()` 는 도구 호출 루프(tool-calling agent)가 **아니다**. 한 요청은 다음 고정 경로를 지난다.
+
+1. `context.build_context_pack()` — 리포트·원장·공유 메모리·실시간 시세를 모아 팩 구성 (대시보드가 만든 팩을 재사용 가능).
+2. `wiki.list_pages(query=질문)` — 위키 검색(QMD·로컬 랭킹)으로 근거 페이지 선별, 사용 기록(`track_page_usage`).
+3. 의도 분류(`_classify_question_intent`) → 규칙 기반 답변 또는 `_try_llm_prompt` 단일 프롬프트 호출.
+4. LLM 호출은 codex·hermes 를 **동시에 경합**시켜 먼저 성공한 응답을 쓰고, 실패 시 gemini → agy 순 폴백. 전체는 하나의 요청 예산(deadline) 안에서 돈다. 어느 엔진이 답했는지는 요청(스레드) 범위로 기록돼 `context.engine` 으로 노출된다.
+5. 후처리 — 증거 사용 기록, 대화 저장, 자동 큐레이션(`wiki.auto_curate_from_chat`).
+
+즉 retrieval + generation 구조이며, LLM 이 임의 도구를 호출하지 않는다.
+
+### 자동 큐레이션 승인 대기열
+
+`auto_curate_from_chat` 의 LLM 계획 중 **삭제·병합·분할**은 기본적으로 실행되지 않고 `data/shared-memory/pending_curation.jsonl` 에 제안으로 쌓인다. 사용자가 AI 위키 페이지의 "승인 대기 큐레이션 제안" 패널(또는 아래 API)에서 적용/거부한다. 생성·갱신은 종전처럼 즉시 반영. `WIKI_CURATION_AUTO_APPLY=1` 이면 승인 없이 즉시 적용(종전 동작).
+
+- `GET /api/wiki/curation/pending`
+- `POST /api/wiki/curation/<id>/apply`
+- `POST /api/wiki/curation/<id>/reject`
 
 ## 운영 메모
 

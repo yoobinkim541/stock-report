@@ -84,6 +84,20 @@ def test_earnings_history_drops_future_and_orders():
     assert h[1]["eps_actual"] == 2.65
 
 
+def test_known_etf_skips_earnings_calendar():
+    """QLD/SGOV 같은 ETF 는 yfinance 실적 캘린더를 호출하지 않는다."""
+    from providers import earnings_data as ed
+    class _Boom:
+        def get_earnings_dates(self, limit=12):
+            raise AssertionError("ETF 는 earnings dates 를 치면 안 된다")
+        @property
+        def calendar(self):
+            raise AssertionError("ETF 는 calendar 를 치면 안 된다")
+    assert ed.earnings_history("QLD", _t=_Boom()) == []
+    assert ed.next_earnings("SGOV", _t=_Boom(), today="2026-03-01") == {"date": None, "days_until": None}
+    assert ed.earnings_history("MSFT", _t=_us_ticker())  # 개별주는 그대로
+
+
 def test_consensus_and_revision_momentum():
     from providers import earnings_data as ed
     c = ed.consensus("MSFT", _t=_us_ticker())

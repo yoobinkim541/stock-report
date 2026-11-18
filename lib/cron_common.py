@@ -14,14 +14,14 @@ import os
 def send_cron_telegram(text: str, *, timeout: int = 15) -> bool:
     """env(STOCK_BOT_TOKEN/CHAT_ID) 텔레그램 발송 — 통일 안전 발송기.
 
-    키 없으면 False, 실패해도 조용히 False(크론 중단 방지), 성공 True. (기존 11 _send 변종 통합.)
+    키 없으면 False, 발송 실패(HTTP 오류·예외)도 조용히 False(크론 중단 방지), 성공 True.
+    (기존 11 _send 변종 통합.)
     """
     token, chat = os.getenv("STOCK_BOT_TOKEN"), os.getenv("STOCK_BOT_CHAT_ID")
     if not token or not chat:
         return False
     try:
         import notify
-        notify.send_telegram(text, token=token, chat_id=chat, timeout=timeout)
-        return True
+        return bool(notify.send_telegram(text, token=token, chat_id=chat, timeout=timeout))
     except Exception:
         return False

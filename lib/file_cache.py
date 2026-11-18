@@ -7,9 +7,10 @@ pickle 캐시는 is_fresh 만 공유(get/put 은 각자) — data_pipeline 의 s
 from __future__ import annotations
 
 import json
-import os
 import time
 from pathlib import Path
+
+import safe_io
 
 
 def is_fresh(path, ttl_h: float) -> bool:
@@ -43,9 +44,9 @@ def write_json_atomic(path, obj) -> bool:
     try:
         path = Path(path)
         harden_dir(path.parent)
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(json.dumps(obj, ensure_ascii=False), encoding="utf-8")
-        os.replace(tmp, path)
+        # 고유 임시파일(mkstemp) — 고정 '<name>.tmp' 는 같은 대상에 대한 동시 쓰기가 서로의
+        # 임시파일을 덮어/지워 빈 파일이 rename 되는 경쟁이 있었다.
+        safe_io.atomic_write_text(str(path), json.dumps(obj, ensure_ascii=False))
         return True
     except Exception:
         return False

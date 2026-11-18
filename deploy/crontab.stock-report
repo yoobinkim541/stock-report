@@ -1,13 +1,17 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# stock-report 크론 단일 진실원 (single source of truth)
+# stock-report 작업 목록 (테스트·드리프트 점검의 기준)
 #
-#   적용:  crontab deploy/crontab.stock-report
-#   확인:  crontab -l
+#   ⚠️ 이 파일을 `crontab deploy/crontab.stock-report` 로 직접 적용하지 말 것.
+#      Hermes 서버 crontab에는 다른 프로젝트 작업(휴대폰 감시, myWiki, eclass 등)도 함께 있어
+#      이 파일로 덮어쓰면 그 작업들이 사라진다.
+#   서버 전체 crontab 원본: tailscale-home-infrastructure 저장소 hermes/crontab/crontab.tmpl
+#      적용: 서버의 ~/projects/tailscale-home-infrastructure 에서 hermes/crontab/apply.sh
+#   stock-report 작업을 추가·변경하면 이 파일과 위 템플릿을 함께 고친다.
+#   점검: python scripts/check_crontab_drift.py (소스·위키 작업이 서버와 일치하는지)
 #
 # 모든 시각은 UTC. KST = UTC + 9h (참고용 주석 병기).
 # 패턴: cd <repo> && uv run python <스크립트> >> /tmp/<name>.log 2>&1
 #   - 리포트 발송만 쉘 래퍼(scripts/deliver_investment_report.sh) 사용 (.env 로드·텔레그램 발송 포함)
-# 이 파일이 운영 크론의 유일한 출처다 — 직접 `crontab -e` 로 편집 금지, 항상 이 파일을 고쳐 재적용.
 # ─────────────────────────────────────────────────────────────────────────────
 
 # 환경 (cron 은 로그인 셸이 아니므로 uv·QMD 위치 보장)

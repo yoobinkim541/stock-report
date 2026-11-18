@@ -1193,3 +1193,28 @@ def test_legacy_single_pass_run_exposes_preview_validation_without_behavior_chan
     assert run.promotion["preview"] is True
     assert report["validation"]["promotion_eligible"] is False
     json.dumps(report)
+
+
+def test_configuration_matrix_aligns_columns_by_label_and_rejects_mismatch():
+    """fold 마다 열 순서가 달라도 라벨로 정렬해 같은 설정끼리 합친다. 라벨 없는 배열은 폭이
+    다르면 None(PBO 산출 불가) — 종전엔 최소 폭으로 잘라 이어 붙여 설정이 뒤섞였다."""
+    from ml.strategy_studio.validation import _configuration_matrix
+
+    f1 = pd.DataFrame({"a": [0.01, 0.02], "b": [0.1, 0.2], "c": [1.0, 2.0]})
+    f2 = pd.DataFrame({"c": [3.0], "b": [0.3], "a": [0.03]})           # 순서 뒤집힘
+    m = _configuration_matrix([{"metrics": {"configuration_returns": f1}},
+                               {"metrics": {"configuration_returns": f2}}])
+    assert m.shape == (3, 3)
+    assert list(m[:, 0]) == [0.01, 0.02, 0.03]                          # 'a' 열이 그대로 'a'
+    assert list(m[:, 2]) == [1.0, 2.0, 3.0]
+
+    f3 = pd.DataFrame({"a": [0.04], "z": [9.0]})                        # 공통 열 'a' 하나뿐
+    assert _configuration_matrix([{"metrics": {"configuration_returns": f1}},
+                                  {"metrics": {"configuration_returns": f3}}]) is None
+
+    arr1, arr2 = np.zeros((4, 3)), np.zeros((4, 2))
+    assert _configuration_matrix([{"metrics": {"configuration_returns": arr1}},
+                                  {"metrics": {"configuration_returns": arr2}}]) is None
+    same = _configuration_matrix([{"metrics": {"configuration_returns": arr1}},
+                                  {"metrics": {"configuration_returns": np.ones((2, 3))}}])
+    assert same.shape == (6, 3)

@@ -784,6 +784,58 @@ def test_offset_persists_to_disk_and_survives_restart(monkeypatch, tmp_path):
     tb._persist_offset(12399)                        # 다음 업데이트 처리 후 갱신
     assert tb._load_persisted_offset() == 12399
 
+def test_load_persisted_offset_logs_corrupt_file(monkeypatch, tmp_path, caplog):
+    """손상된 offset 파일은 최초 실행(None)과 구분해 경고 로그를 남겨야 운영자가 알 수 있다."""
+    import logging
+    import telegram_bot as tb
+
+    offset_file = tmp_path / "telegram_offset.txt"
+    offset_file.write_text("garbage")
+    monkeypatch.setattr(tb, "_offset_file_path", lambda: str(offset_file))
+
+    with caplog.at_level(logging.WARNING):
+        assert tb._load_persisted_offset() is None
+    assert any("offset 파일 복원 실패" in r.message for r in caplog.records)
+
+
+def test_ingest_update_enqueues_command_and_blocks_unknown_chat(monkeypatch):
+    """_ingest_update: 허용 chat 의 명령은 dispatch 큐로, 미허용 chat 은 차단 응답만.
+    (offset 영속화는 호출자가 큐잉 뒤에 수행 — 큐잉 전 크래시로 명령이 유실되지 않게)"""
+    import queue
+    import telegram_bot as tb
+
+    q, slow = queue.Queue(), queue.Queue()
+    monkeypatch.setattr(tb, "_DISPATCH_Q", q)
+    monkeypatch.setattr(tb, "_SLOW_Q", slow)
+    monkeypatch.setattr(tb, "_role_for", lambda cid: "owner" if cid == "1" else None)
+    api_calls = []
+    monkeypatch.setattr(tb, "_api", lambda method, **kw: api_calls.append((method, kw)))
+
+    tb._ingest_update({"update_id": 7, "message": {"chat": {"id": 1}, "text": "/status"}})
+    assert q.get_nowait() == ("/status", "1", "owner")
+
+    tb._ingest_update({"update_id": 8, "message": {"chat": {"id": 99}, "text": "/status"}})
+    assert q.empty()
+    assert api_calls and api_calls[-1][1]["chat_id"] == "99"
+
+    # 느린 명령(/signals·/ask·오타 alias 포함)은 slow 레인으로 — /status 가 뒤에서 안 막히게
+    tb._ingest_update({"update_id": 9, "message": {"chat": {"id": 1}, "text": "/signals entry"}})
+    tb._ingest_update({"update_id": 10, "message": {"chat": {"id": 1}, "text": "/portpolio"}})
+    assert q.empty() and slow.qsize() == 2
+
+
+def test_enqueue_command_full_queue_replies_instead_of_blocking(monkeypatch):
+    import queue
+    import telegram_bot as tb
+    q = queue.Queue(maxsize=1)
+    q.put(("/status", "1", "owner"))
+    monkeypatch.setattr(tb, "_DISPATCH_Q", q)
+    replies = []
+    monkeypatch.setattr(tb, "_api", lambda method, **kw: replies.append(kw))
+    tb._enqueue_command("/status", "1", "owner")          # 포화 → 블로킹 없이 안내
+    assert q.qsize() == 1 and "잠시 후" in replies[-1]["text"]
+
+
 
 def test_attachment_worker_offloads_and_survives_errors(monkeypatch):
     """OCR/PDF 첨부 처리도 dispatch 워커와 동일하게 전용 큐로 오프로드돼야 메인
@@ -809,3 +861,52 @@ def test_attachment_worker_offloads_and_survives_errors(monkeypatch):
     assert ({"document": {"file_id": "d1"}}, "c1") in seen
     assert ({"document": {"file_id": "d2"}}, "c3") in seen   # 예외 후에도 계속 처리(워커 생존)
     assert any("오류" in m for _, m in errs)
+
+
+def test_download_uses_unique_name_and_prunes_old_attachments(monkeypatch, tmp_path):
+    """같은 파일명 재전송이 이전 첨부를 덮어쓰지 않고, 7일 지난 첨부는 정리된다."""
+    import os
+    import time as _time
+    import telegram_bot as tb
+
+    monkeypatch.setattr(tb, "ATTACH_DIR", tmp_path)
+    old = tmp_path / "old.jpg"
+    old.write_bytes(b"x")
+    os.utime(old, (0, _time.time() - 8 * 86400))
+
+    class _R:
+        ok = True
+        headers = {"Content-Length": "3"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def iter_content(self, chunk_size):
+            yield b"abc"
+    monkeypatch.setattr(tb, "_file_url", lambda fid: "http://x", raising=False)
+    monkeypatch.setattr(tb, "_api", lambda method, **kw: {"result": {"file_path": "p"}})
+    monkeypatch.setattr(tb.requests, "get", lambda *a, **k: _R())
+
+    p1 = tb.download_telegram_file("fid", "snap.jpg")
+    p2 = tb.download_telegram_file("fid", "snap.jpg")
+    assert p1 and p2 and p1 != p2 and p1.endswith("_snap.jpg")
+    assert not old.exists()
+    assert open(p1, "rb").read() == b"abc"
+
+
+def test_command_registries_are_consistent():
+    """4개 레지스트리(_COMMAND_HANDLERS·BOT_COMMAND_ALIASES·메뉴·게스트 허용)의 정합성 —
+    alias 대상·메뉴 항목·게스트 허용 명령이 전부 실제 핸들러를 가진다."""
+    import telegram_bot as tb
+    handlers = set(tb._COMMAND_HANDLERS)
+    for alias, target in tb.BOT_COMMAND_ALIASES.items():
+        head = target.split()[0]
+        assert head in handlers, f"alias {alias} → {target}: 핸들러 없음"
+    for menu in (tb._OWNER_MENU, tb._GUEST_MENU):
+        for item in menu:
+            assert "/" + item["command"] in handlers, f"메뉴 {item['command']}: 핸들러 없음"
+    assert tb._GUEST_COMMANDS <= handlers
+    assert tb._SLOW_COMMANDS <= handlers

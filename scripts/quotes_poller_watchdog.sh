@@ -42,7 +42,7 @@ fi
 
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] quotes_poller 미실행 감지 — 재시작"
 
-UV="/home/ubuntu/.local/bin/uv"
+UV="${UV_BIN:-$(command -v uv 2>/dev/null || echo /home/ubuntu/.local/bin/uv)}"
 cd "$PROJECT_DIR" || exit 1
 flock -u 9
 exec 9>&-

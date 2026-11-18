@@ -35,3 +35,15 @@ def test_atomic_write_text_leaves_original_on_failure(tmp_path, monkeypatch):
 
     assert target.read_text(encoding="utf-8") == "original\n"
     assert list(tmp_path.glob("*.tmp")) == []
+
+
+def test_file_cache_write_uses_unique_tmp_and_no_leftover(tmp_path):
+    """lib.file_cache.write_json_atomic — 고정 '<name>.tmp' 가 아닌 고유 임시파일로 쓰고
+    잔여 임시파일을 남기지 않는다 (동시 writer 가 서로의 tmp 를 덮던 경쟁 제거)."""
+    import json
+    from lib import file_cache
+    target = tmp_path / "c.json"
+    assert file_cache.write_json_atomic(target, {"a": 1}) is True
+    assert json.loads(target.read_text(encoding="utf-8")) == {"a": 1}
+    assert not (tmp_path / "c.json.tmp").exists()
+    assert [p.name for p in tmp_path.iterdir()] == ["c.json"]

@@ -25,7 +25,7 @@ _run_locked() {
     fi
     echo "$$" >&9
 
-    timeout "$TIMEOUT" bash deliver_investment_report.sh 2>&1
+    timeout "$TIMEOUT" bash scripts/deliver_investment_report.sh 2>&1
     local rc=$?
     echo "[run_investment_report] finished exit=$rc at $(date)"
     return $rc

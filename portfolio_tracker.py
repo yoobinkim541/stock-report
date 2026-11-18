@@ -57,7 +57,18 @@ def load_history() -> list:
 
 
 def save_history(records: list):
+    """전체 교체 — 백필·테스트 시딩용. 일일 기록은 upsert_history_entry 를 쓴다."""
     store.replace_all(_HISTORY_COLLECTION, records)
+
+
+def upsert_history_entry(entry: dict, keep: int = 730) -> list:
+    """오늘 항목 upsert — 같은 날짜 제거 후 append, 최근 keep 개 유지. 읽기→쓰기가 한
+    트랜잭션(store.update_all)이라 봇·크론이 동시에 기록해도 서로의 변경을 덮지 않는다."""
+    day = entry.get("date")
+    return store.update_all(
+        _HISTORY_COLLECTION,
+        lambda items: ([r for r in items if r.get("date") != day] + [entry])[-keep:],
+    )
 
 
 def _suspicious_jump_pct(prev_usd: float | None, new_usd: float | None,
@@ -116,10 +127,7 @@ def record_daily(dry_run: bool = False) -> dict:
             logger.warning("급변 알림 텔레그램 발송 실패 (기록은 계속 진행)")
 
     if not dry_run:
-        records.append(entry)
-        # 최대 2년치(730일) 유지
-        records = records[-730:]
-        save_history(records)
+        upsert_history_entry(entry)          # 최대 2년치(730일) 유지
         logger.info(f"히스토리 기록: {today}  ${port['total_usd']:,.2f}")
 
     return entry

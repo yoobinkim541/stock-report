@@ -3,15 +3,15 @@
 > 감정 없이, 규칙대로. QQQ Phase 기반 개인 투자 자동화 시스템.
 
 미국·한국 주식 포트폴리오를 위한 **안전 우선(safety-first) 개인 투자 자동화 시스템**입니다.
-매일 아침 리포트 자동 생성·텔레그램 발송, 시장 국면 변화 즉시 알림, **React/Next.js 기반 프론트엔드**,
+매일 아침 리포트 자동 생성·텔레그램 발송, 시장 국면 변화 즉시 알림, **Streamlit 퀀트 터미널**(공개 랜딩은 Next.js),
 그리고 워크포워드 OOS 게이트로 검증하는 적응 학습 기반 모의투자 전략을 포함합니다.
 
 > **TL;DR (EN).** A personal, **safety-first** automation platform for a US/KR equity portfolio:
-> daily research reports pushed to Telegram, real-time market-regime alerts, a React/Next.js frontend,
-> and paper-trading strategies driven by **walk-forward (OOS) validated** adaptive learning. Core design rule — the system only *advises*; there is **zero real-money auto-execution**
-> (enforced by source `grep` tests). ~360 Python modules · 100k+ LOC · 1,500+ tests.
+> daily research reports pushed to Telegram, real-time market-regime alerts, a Streamlit quant terminal
+> (public landing page in Next.js), and paper-trading strategies driven by **walk-forward (OOS) validated** adaptive learning. Core design rule — the system only *advises*; there is **zero real-money auto-execution**
+> (enforced by source `grep` tests). ~340 Python modules · 130k+ LOC · 3,200+ tests.
 
-**Stack** · React / Next.js · TypeScript · Python 3.11 · pandas / NumPy · scikit-learn · LightGBM · Optuna · Streamlit · Plotly · Flask · yfinance · SQLite (WAL) · Telegram Bot
+**Stack** · Python 3.12 · Streamlit · Next.js(랜딩) · TypeScript · pandas / NumPy · scikit-learn · LightGBM · Optuna · Streamlit · Plotly · Flask · yfinance · SQLite (WAL) · Telegram Bot
 
 <!-- 스크린샷 자리: 퀀트 터미널(대시보드) 캡처/GIF 를 여기에 넣으면 첫인상이 크게 좋아집니다.
      예: ![Quant Terminal](docs/assets/terminal.png) -->
@@ -24,16 +24,16 @@
 - **6계층 단방향 아키텍처** — 트리거 → 상시 프로세스 → 기능 → 데이터·ML → 공용 인프라 → 저장소.
 - **적응 학습 + OOS 게이트** — 집행 결과를 불변 원장에 기록 → ★목적함수(아웃퍼폼 + MDD ≤ 지수)로 채점 → **백테스트 워크포워드 게이트 통과분만** 라이브 반영, 미입증은 shadow(기본 OFF).
 - **정직한 결론** — 6-Tier 퀀트 프로그램 중 **구조적 레버리지 1개만 GO**, 나머지(팩터·인컴·집중)는 엣지 부재로 NO-GO 명시.
-- **실시간 데이터 + 퀀트 터미널** — KIS 실시간 시세(read-only) 오버레이 + Streamlit 8페이지(Plotly 캔들·드로잉 도구·백테스트·모의투자 원장).
+- **실시간 데이터 + 퀀트 터미널** — KIS 실시간 시세(read-only) 오버레이 + Streamlit 11페이지(Plotly/Canvas 캔들·드로잉 도구·백테스트·모의투자 원장·AI 콘솔/위키).
 - **운영 신뢰성** — 프로세스 워치독(생존 + 코드 신선도 감시)·30분 헬스체크·단일 진실원 크론.
 
 | 규모 | 값 |
 |------|-----|
-| Python 모듈 | ~360개 (`ml` 49 · `crons` 39 · `providers` 25 · `dashboard` 20 · `bot` 13 · `reports` 11 · `lib` 17 …) |
-| 코드 규모 | 100,000+ LOC (Python) |
-| 테스트 | 1,500+ 테스트 함수 · 137개 파일 (무네트워크 합성 데이터 위주) |
-| 자동화 크론 | 50+ 스케줄 (`deploy/crontab.stock-report` 단일 진실원) |
-| 대시보드 | Streamlit 8페이지 |
+| Python 모듈 | ~340개 (`ml` 68 · `dashboard` 50 · `crons` 45 · `reports` 37 · `providers` 30 · `lib` 22 · `agent_console` 19 · `backtest` 17 · `bot` 14) |
+| 코드 규모 | 130,000+ LOC (Python, 테스트 제외) |
+| 테스트 | 3,200+ 테스트 함수 · 275개 파일 (무네트워크 합성 데이터 위주 · CI: `.github/workflows/ci.yml`) |
+| 자동화 크론 | 70 스케줄 (`deploy/crontab.stock-report` 단일 진실원) |
+| 대시보드 | Streamlit 11페이지 + Next.js 공개 랜딩(Vercel, 워크스페이스로 리다이렉트) |
 
 ---
 

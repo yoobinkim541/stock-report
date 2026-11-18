@@ -17,18 +17,26 @@ def independent_blocks(n_samples: int, horizon: int) -> int:
 
 
 def evaluate(champion_eval: dict | None, challenger_eval: dict, index_mdd: float,
-             *, min_samples: int = 40, horizon: int = 20) -> dict:
+             *, min_samples: int = 40, horizon: int = 20, min_independent_blocks: int = 2) -> dict:
     """승격 판정.
 
     *_eval = {"excess": float, "mdd": float(양수), "n": int}.
     반환: {"promote": bool, "reason": str, "indep_blocks": int}.
+
+    min_independent_blocks — 겹치는 전방수익률(horizon)을 보정한 유효 표본 하한. 종전엔
+    독립 블록 수를 사유 문자열에만 적고 게이트엔 원표본 n 만 썼다(n=40·horizon=20 이면
+    사실상 2개 독립 관측으로 승격). 이제 블록 수도 게이트에 들어간다.
     """
     n = challenger_eval.get("n", 0)
     indep = independent_blocks(n, horizon)
     promote = _reward.should_adopt(challenger_eval, champion_eval, index_mdd, min_samples=min_samples)
+    if indep < min_independent_blocks:
+        promote = False
 
     if n < min_samples:
         reason = f"표본 부족 {n}/{min_samples} — 챔피언 유지"
+    elif indep < min_independent_blocks:
+        reason = f"독립 블록 부족 {indep}/{min_independent_blocks} (n={n}·horizon={horizon}) — 챔피언 유지"
     elif not promote:
         ce = challenger_eval.get("excess", 0.0)
         mdd = challenger_eval.get("mdd", 0.0)

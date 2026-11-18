@@ -55,7 +55,7 @@ def test_star_button_click_adds_ticker(monkeypatch):
     monkeypatch.setattr(ticker_names, "display_name", lambda t, allow_net=False: "Apple Inc")
     calls = []
     monkeypatch.setattr(data, "toggle_watchlist_star",
-                        lambda ticker, name=None: calls.append((ticker, name)) or True)
+                        lambda tk, name=None: calls.append((tk, name)) or True)
 
     at = AppTest.from_string(_RUN_SCRIPT, default_timeout=30)
     at.run()
@@ -72,7 +72,7 @@ def test_star_button_click_removes_ticker(monkeypatch):
     monkeypatch.setattr(ticker_names, "display_name", lambda t, allow_net=False: "Apple Inc")
     calls = []
     monkeypatch.setattr(data, "toggle_watchlist_star",
-                        lambda ticker, name=None: calls.append((ticker, name)) or False)
+                        lambda tk, name=None: calls.append((tk, name)) or False)
 
     at = AppTest.from_string(_RUN_SCRIPT, default_timeout=30)
     at.run()
