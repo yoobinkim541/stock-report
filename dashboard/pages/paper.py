@@ -333,7 +333,8 @@ def _intraday_section(surface: str):
     bar_count = ch.get("bar_count")
     bar_span = ""
     if ch.get("bar_first") and ch.get("bar_last"):
-        bar_span = f" · {str(ch.get('bar_first'))[:16]}~{str(ch.get('bar_last'))[:16]}"
+        bar_span = (f" · {str(ch.get('bar_first'))[:16].replace('T', ' ')}"
+                    f"~{str(ch.get('bar_last'))[:16].replace('T', ' ')}")
     sess = ch.get("session_count")
     sess_note = f" · {sess}세션" if sess else ""
     st.caption(f"▲매수 ▼매도 마커 클릭 → 판단근거 · VWAP 점선 · 파란 박스=시가범위(OR 15분) · "

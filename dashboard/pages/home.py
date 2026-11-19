@@ -289,6 +289,18 @@ def _map_status_label(value, fallback: str = "미상") -> str:
     return _MAP_STATUS.get(raw, raw or fallback)
 
 
+def _kst_label(value) -> str:
+    """ISO 시각("2026-11-19T06:40:42.716615+00:00") → "11/19 15:40 KST". 못 읽으면 원문."""
+    if not value:
+        return ""
+    try:
+        ts = pd.Timestamp(value)
+        ts = ts.tz_localize("UTC") if ts.tzinfo is None else ts
+        return ts.tz_convert("Asia/Seoul").strftime("%m/%d %H:%M KST")
+    except (ValueError, TypeError):
+        return str(value)
+
+
 @st.fragment
 def _market_map():
     """시장 맵 3종(S&P500·코스피200·러셀2000) — 시총 크기·등락 색 + 타일 클릭→종목분석."""
@@ -301,7 +313,7 @@ def _market_map():
     status = cached.heatmap_status(which)
     freshness = _map_status_label(status.get("freshness"), "없음")
     source = _map_status_label(status.get("source"))
-    asof = status.get("asof") or "기준 시각 미상"
+    asof = _kst_label(status.get("asof")) or "기준 시각 미상"
     st.caption("타일 크기 = 시가총액 · 색 = 당일 등락(🟩상승 / 🟥하락) · "
                f"**타일 클릭 → 종목 분석** · {note} · 출처 {source} · "
                f"신선도 {freshness} · {asof}")
