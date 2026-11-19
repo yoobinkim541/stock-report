@@ -295,6 +295,25 @@ _TEMPLATE = r"""
       });
     } catch (e) {}
   }
+  // category 축 눈금은 원본 타임스탬프 문자열("2025-11-25T00:00-05:00")이 그대로 찍혀 세로로
+  // 130px 넘게 차트를 잡아먹었다(실측 풀뷰) — 자동 눈금 선택은 그대로 두고 표시만 짧게 별칭.
+  if (categoryX) {
+    for (const k of Object.keys(fig.layout)) {
+      const ax = fig.layout[k];
+      if (!k.startsWith("xaxis") || !ax || ax.type !== "category" || !Array.isArray(ax.categoryarray)) continue;
+      const cats = ax.categoryarray.map(String);
+      const intraday = cats.some(s => s.length > 15 && s.slice(11, 16) !== "00:00");
+      const step = cats.length > 1 ? Math.abs(Date.parse(cats[1]) - Date.parse(cats[0])) : 0;
+      const monthly = !intraday && step >= 25 * 86400000;
+      const alias = {};
+      for (const s of cats) {
+        if (s.length < 10) continue;
+        alias[s] = intraday ? s.slice(5, 10) + " " + s.slice(11, 16) : (monthly ? s.slice(0, 7) : s.slice(0, 10));
+      }
+      ax.labelalias = alias;
+      ax.nticks = Math.max(4, Math.min(12, Math.round(window.innerWidth / 130)));   // 기본은 거의 봉마다 눈금 → 세로 회전
+    }
+  }
   // y축은 전부 프로그램 제어(자동 맞춤) — 사용자 팬이 y를 끌지 않게 고정해
   // '드래그 중 y 싸움 → 종료 시 스냅' 흔들림의 근원을 제거 (TradingView 방식)
   for (const k of Object.keys(fig.layout)) {
