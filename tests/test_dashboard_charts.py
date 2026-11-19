@@ -488,6 +488,46 @@ def test_intraday_candle_smooth_mode_uses_even_bar_spacing():
     assert any(getattr(tr, "type", "") == "candlestick" for tr in fig.data)
 
 
+def _flat_bars(idx):
+    n = len(idx)
+    return pd.DataFrame({"Open": [100.0] * n, "High": [101.0] * n, "Low": [99.0] * n,
+                         "Close": [100.5] * n, "Volume": [1e3] * n}, index=idx)
+
+
+def _rendered_ticks(fig):
+    """st.plotly_chart 가 보내는 JSON 기준 — 트레이스 x 문자열마다 별칭이 있어야 눈금이 짧아진다."""
+    import json
+    d = json.loads(fig.to_json())
+    alias = d["layout"]["xaxis"]["labelalias"]
+    xs = next(tr["x"] for tr in d["data"] if tr.get("type") == "candlestick")
+    return [alias.get(x) for x in xs]
+
+
+def test_intraday_category_ticks_show_clock_time_not_iso():
+    """모의투자 단기 차트 — category 눈금이 ISO 타임스탬프 원문으로 세로 회전되던 회귀."""
+    idx = pd.date_range("2026-11-18 09:30", periods=30, freq="1min", tz="America/New_York")
+    ticks = _rendered_ticks(charts.intraday_candle(_flat_bars(idx), "AAPL"))
+    assert ticks[0] == "09:30" and ticks[-1] == "09:59"
+
+
+def test_daily_category_ticks_stay_dates_across_dst():
+    """tz-aware 일봉의 투영 봉이 서머타임 경계(01:00)를 넘어도 분봉 형식으로 바뀌지 않는다."""
+    idx = pd.date_range("2026-10-01", "2026-10-30", freq="B", tz="America/New_York")
+    fig = charts.intraday_candle(_flat_bars(idx), "AAPL")
+    ticks = _rendered_ticks(fig)
+    assert ticks[0] == "2026-10-01" and ticks[-1] == "2026-10-30"
+    assert all(len(v) == 10 for v in fig.layout.xaxis.labelalias.values())
+
+
+def test_embed_json_drops_stale_server_labelalias():
+    """자체 임베드는 날짜 문자열을 다시 쓰므로 서버 별칭은 키가 안 맞는 죽은 페이로드 — 버린다."""
+    import json
+    from dashboard import plotly_embed
+    idx = pd.date_range("2026-11-18 09:30", periods=30, freq="1min", tz="America/New_York")
+    d = json.loads(plotly_embed.fig_json(charts.intraday_candle(_flat_bars(idx), "AAPL")))
+    assert "labelalias" not in d["layout"]["xaxis"]
+
+
 # ── M2 S&P500 시장 맵 트리맵 ──────────────────────────────────────────
 _HEAT_ROWS = [
     {"ticker": "AAPL", "name": "Apple", "sector_kr": "기술", "market_cap": 4e12, "pct": 1.96},

@@ -109,12 +109,37 @@ def _use_even_candle_axis(fig, index):
     from dashboard.trendlines import PROJ_BARS
 
     cats = list(index)
+    step = None
     if len(index) >= 2:
         step = pd.Series(index).diff().median()
         cats = cats + [index[-1] + step * i for i in range(1, PROJ_BARS + 1)]
     fig.update_xaxes(type="category", categoryorder="array",
-                     categoryarray=cats, rangebreaks=[])
+                     categoryarray=cats, rangebreaks=[],
+                     labelalias=_category_tick_alias(cats, step), nticks=8, tickangle=0)
     return fig
+
+
+def _category_tick_alias(cats, step) -> dict:
+    """category 눈금 별칭 — 원본 타임스탬프("2025-11-25T00:00:00-05:00")가 그대로 세로로 찍혀
+    x축이 차트보다 높아지던 문제. 키는 Plotly 기본 인코더가 쓰는 문자열과 같아야 매칭된다
+    (st.plotly_chart 경로. 자체 임베드는 fig_json 이 날짜를 다시 쓰므로 JS 가 따로 만든다).
+    봉 간격(step)으로 고른다 — 하루치 분봉 HH:MM, 여러 날 분봉 MM-DD HH:MM, 일봉 YYYY-MM-DD, 월봉 YYYY-MM.
+    시각으로 판정하면 tz-aware 일봉의 투영 봉이 서머타임 경계에서 01:00 이 되어 분봉으로 오인한다."""
+    import json
+
+    import pandas as pd
+    from plotly.io.json import to_json_plotly
+    keys = [k for k in json.loads(to_json_plotly(list(cats))) if isinstance(k, str) and len(k) >= 10]
+    if not keys or step is None or pd.isna(step):
+        return {}
+    if step < pd.Timedelta(hours=20):
+        one_day = len({k[:10] for k in keys}) == 1
+        fmt = (lambda k: k[11:16]) if one_day else (lambda k: f"{k[5:10]} {k[11:16]}")
+    elif step >= pd.Timedelta(days=25):
+        fmt = lambda k: k[:7]  # noqa: E731
+    else:
+        fmt = lambda k: k[:10]  # noqa: E731
+    return {k: fmt(k) for k in keys}
 
 
 def _category_view_range(hist, view_days):

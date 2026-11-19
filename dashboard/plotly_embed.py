@@ -297,18 +297,22 @@ _TEMPLATE = r"""
   }
   // category 축 눈금은 원본 타임스탬프 문자열("2025-11-25T00:00-05:00")이 그대로 찍혀 세로로
   // 130px 넘게 차트를 잡아먹었다(실측 풀뷰) — 자동 눈금 선택은 그대로 두고 표시만 짧게 별칭.
+  // 규칙은 charts._category_tick_alias 와 같다(fig_json 이 날짜를 다시 써서 서버 별칭은 키가 안 맞음).
   if (categoryX) {
     for (const k of Object.keys(fig.layout)) {
       const ax = fig.layout[k];
       if (!k.startsWith("xaxis") || !ax || ax.type !== "category" || !Array.isArray(ax.categoryarray)) continue;
       const cats = ax.categoryarray.map(String);
-      const intraday = cats.some(s => s.length > 15 && s.slice(11, 16) !== "00:00");
       const step = cats.length > 1 ? Math.abs(Date.parse(cats[1]) - Date.parse(cats[0])) : 0;
-      const monthly = !intraday && step >= 25 * 86400000;
+      // 봉 간격으로 판정 — 시각으로 보면 tz-aware 일봉의 투영 봉이 서머타임 경계에서 01:00 이 된다.
+      const intraday = step > 0 && step < 20 * 3600000;
+      const oneDay = intraday && new Set(cats.map(s => s.slice(0, 10))).size === 1;
+      const monthly = step >= 25 * 86400000;
       const alias = {};
       for (const s of cats) {
         if (s.length < 10) continue;
-        alias[s] = intraday ? s.slice(5, 10) + " " + s.slice(11, 16) : (monthly ? s.slice(0, 7) : s.slice(0, 10));
+        alias[s] = intraday ? (oneDay ? s.slice(11, 16) : s.slice(5, 10) + " " + s.slice(11, 16))
+          : (monthly ? s.slice(0, 7) : s.slice(0, 10));
       }
       ax.labelalias = alias;
       ax.nticks = Math.max(4, Math.min(12, Math.round(window.innerWidth / 130)));   // 기본은 거의 봉마다 눈금 → 세로 회전
@@ -1959,6 +1963,7 @@ _TEMPLATE = r"""
   Plotly.newPlot(gd, fig.data, fig.layout, @@CONFIG@@).then(() => {
     gd.style.position = "relative";                    // 크로스헤어 오버레이 부착 (newPlot 후)
     try { Plotly.Plots.resize(gd); } catch (e) {}       // dock/grid 폭 확정 후 1회 보정
+    if (!fitVH) tnFitContent(document.getElementById("wrap"));   // 접힌 도구 패널 몫 빈 띠 제거
     gd.appendChild(xhV); gd.appendChild(xhH); gd.appendChild(xhY);
     // 저장된 드로잉 복원 — 서버 도형 뒤에 append (지우기·보호 가드와 정합).
     // 하단 지표 구성이 바뀌어 사라진 서브패널 축(y3 등)을 참조하는 도형은 제외(고아 방지)
@@ -2123,6 +2128,11 @@ def fig_json(fig) -> str:
     import pandas as pd
     from plotly.io.json import to_json_plotly
     d = fig.to_plotly_json()
+    # 아래에서 날짜 문자열을 다시 쓰므로 charts 의 labelalias 키(기본 인코더 문자열)는 더 이상
+    # 맞지 않는다 — 봉 수만큼 커지는 죽은 페이로드라 버리고, 템플릿 JS 가 새 문자열로 다시 만든다.
+    for k, ax in (d.get("layout") or {}).items():
+        if k.startswith("xaxis") and isinstance(ax, dict):
+            ax.pop("labelalias", None)
     found: list[tuple] = []          # (container, key, DatetimeIndex|Timestamp)
 
     def _scalar(v):
