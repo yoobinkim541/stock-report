@@ -159,26 +159,30 @@ def test_cached_unvalidated_ranker_never_reaches_production_features(monkeypatch
     assert ranker.rank_today().empty
 
 
-def test_weekly_runs_wf_before_adoption_and_reports_missing_metrics(monkeypatch):
+def test_stale_champion_does_not_block_validated_challenger(tmp_path):
+    import pickle
+
+    path = tmp_path / "ranker.pkl"
+    path.write_bytes(pickle.dumps(candidate(train_end_date="2025-04-14", oos_ic=.50)))
+    assert ranker.adopt_if_better(candidate(), path) == (True, .50)
+    assert ranker.load_ranker(path).train_end_date != "2025-04-14"
+
+
+def test_weekly_adopts_only_through_gate_and_reports_evidence(monkeypatch):
     from crons import weekly_ranker_retrain as weekly
     from ml import data_pipeline
-    calls, messages = [], []
-    result = candidate(meta={})
+    messages, adopted = [], []
+    result = candidate(meta={"validation_metrics": {"n_folds": 3, "purged": True,
+                                                    "fold_ics": [.05] * 3, "mean_ic": .05}})
     monkeypatch.setattr(data_pipeline, "build_ml_dataset", lambda **kw: {})
-    monkeypatch.setattr(ranker, "train_ranker", lambda ds: result)
-    def wf(ds, **kw):
-        calls.append("wf")
-        return {"n_folds": 3, "purged": True, "fold_ics": [.05]*3,
-                "mean_ic": .05, "icir": 1.}
+    monkeypatch.setattr(ranker, "train_ranker", lambda ds, **kw: result)
     def adopt(r, **kw):
-        calls.append("adopt")
-        assert r.meta["validation_metrics"]["n_folds"] == 3
+        adopted.append(r)
         return False, None
-    monkeypatch.setattr(ranker, "walk_forward_backtest", wf)
     monkeypatch.setattr(ranker, "adopt_if_better", adopt)
     monkeypatch.setattr(weekly, "send_cron_telegram", messages.append)
     monkeypatch.setenv("RANKER_XGB_CHALLENGER_ENABLED", "0")
     assert weekly.main() == 0
-    assert calls == ["wf", "adopt"]
+    assert adopted == [result]
     assert "Brier" in messages[0] and "coverage" in messages[0]
-    assert "shadow" in messages[0]
+    assert "shadow" in messages[0] and "finite:mdd" in messages[0]

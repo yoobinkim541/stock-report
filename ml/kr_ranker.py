@@ -33,8 +33,8 @@ def train_kr_ranker(days: int = 1260, forward_days: int = 20):
         logger.warning("KR 데이터셋 비어있음 — 학습 생략")
         return None
     result = _ranker.train_ranker(ds)
-    _ranker.save_ranker(result, KR_MODEL_CACHE)
-    logger.info("KR ranker 학습 완료: OOS IC=%.3f ICIR=%.2f", result.oos_ic, result.oos_icir)
+    _ranker.adopt_if_better(result, KR_MODEL_CACHE)
+    logger.info("KR ranker 학습 완료: WF IC=%.3f ICIR=%.2f", result.oos_ic, result.oos_icir)
     return result
 
 

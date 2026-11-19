@@ -2,7 +2,8 @@
 """weekly_ranker_retrain.py — 랭커 주간 재학습 (Purged WF 검증 포함)
 
 daily_ranking은 캐시 모델만 로드하므로 정기 재학습 경로가 없으면 모델이 노화된다.
-매주 재학습 + purged walk-forward로 정직한 OOS IC를 측정해 텔레그램 보고.
+매주 purged walk-forward 로 게이트 증거(IC·비용 차감 상위10%·MDD·보정·clean·기준선)를 만들고
+라벨이 확정된 전 구간으로 실전 모델을 적합한다. 게이트를 통과할 때만 채택, 결과는 텔레그램 보고.
 
 크론 (토요일 03:00 UTC = 12:00 KST — 주말, 시장 휴장):
     0 3 * * 6 uv run python crons/weekly_ranker_retrain.py >> /tmp/weekly_ranker.log 2>&1
@@ -35,24 +36,14 @@ def main() -> int:
             adopt_if_better,
             evaluate_ranker_backend,
             format_backend_evaluation,
+            format_validation_lines,
             train_ranker,
-            walk_forward_backtest,
-            ranker_gate,
         )
 
         ds = build_ml_dataset(mode="nasdaq100", days=756, forward_days=20)
-        result = train_ranker(ds)
-        wf = walk_forward_backtest(ds, n_folds=4)
-        result.meta["validation_metrics"] = {
-            **result.meta.get("validation_metrics", {}), **wf,
-        }
-        gate = ranker_gate(result)
-        adopted, champ_ic = adopt_if_better(result, dataset=ds)
-        freshness = gate["freshness"]
-        metrics = result.meta["validation_metrics"]
-        mean_ic = wf.get("mean_ic")
-        icir    = wf.get("icir")
-        fold_str = " / ".join(f"{x:+.3f}" for x in wf.get("fold_ics", []))
+        result = train_ranker(ds, n_folds=4)
+        adopted, champ_ic = adopt_if_better(result)
+        mean_ic = result.meta["validation_metrics"].get("mean_ic")
         xgb_line = ""
         if os.getenv("RANKER_XGB_CHALLENGER_ENABLED", "1").lower() not in {"0", "false", "no", "off"}:
             xgb_eval = evaluate_ranker_backend(ds, backend="xgboost", use_ranker=False, n_folds=3)
@@ -70,16 +61,10 @@ def main() -> int:
         msg = "\n".join(x for x in [
             "🔄 랭커 주간 재학습 (Purged WF · 챔피언/챌린저)",
             "━━━━━━━━━━━━━━",
-            f"분할 OOS IC: {result.oos_ic:+.3f}  ICIR: {result.oos_icir:.2f}  → {adopt_str}",
-            f"WF 평균 IC: {mean_ic:+.4f}  ICIR: {icir:.2f}" if mean_ic is not None else "WF: 데이터 부족",
+            f"→ {adopt_str}",
+            *format_validation_lines(result),
             xgb_line,
             recommendation_health,
-            f"Gate: {gate['passed']} · reasons: {', '.join(gate['reasons']) or 'none'}",
-            f"Freshness: train_end={freshness['train_end_date']} · age_days={freshness['model_age_days']} · stale={freshness['stale']}",
-            f"Calibration: Brier={metrics.get('brier')} · ECE={metrics.get('ece')}",
-            f"Source-quality coverage: {metrics.get('source_quality_coverage')} · data coverage: {freshness['data_coverage']}",
-            f"폴드별 IC: {fold_str}" if fold_str else "",
-            f"상위10% 초과수익: {result.oos_top_decile_ret*100:+.1f}%",
             "⚠️ WF IC < 0.02 지속 시 DCA 틸트 비중 축소 검토",
         ] if x)
         send_cron_telegram(msg)

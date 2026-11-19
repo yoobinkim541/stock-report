@@ -32,7 +32,7 @@ def _dataset(n_days: int = 90, n_tickers: int = 8) -> dict:
 def test_train_ranker_records_backend_metadata(monkeypatch):
     monkeypatch.setattr(rk.gbdt, "make_regressor", lambda **kwargs: _FakeRegressor())
 
-    result = rk.train_ranker(_dataset(), use_ranker=False, backend="lightgbm")
+    result = rk.train_ranker(_dataset(n_days=360), use_ranker=False, backend="lightgbm")
 
     assert result.meta["backend"] == "lightgbm"
     assert result.meta["backend_label"] == "LightGBM"
@@ -75,12 +75,63 @@ def test_walk_forward_uses_ranker_and_reports_purge(monkeypatch):
     assert all(rows == labels == groups for rows, labels, groups, _ in fits)
     assert out["use_ranker"] is True
     assert out["purged"] is True and out["embargo"] == 5
-    assert out["top_decile_excess"] == np.mean(out["fold_top10_rets"])
+    assert out["clean_mean_ic"] is None and out["clean_top_decile_excess"] is None  # 스냅샷 없음 → 증거 없음
 
     unpurged = rk.walk_forward_backtest(
         _dataset(n_days=360), n_folds=3, min_train_months=3, embargo=0,
     )
     assert unpurged["purged"] is False
+
+
+def _gate_dataset(stale_ticker: str | None = None) -> dict:
+    ds = _dataset(n_days=360)
+    features, excess = ds["features"], ds["excess"]
+    features["mom_126d"] = features["f1"]
+    dates = features.index.get_level_values("date").unique()
+    excess.loc[excess.index.get_level_values("date") >= dates[-5]] = np.nan   # 미확정 라벨
+    features.attrs["data_snapshots"] = {
+        t: {"quality": "stale" if t == stale_ticker else "complete",
+            "data_stamps": [{"timestamp": d.isoformat(), "quality": "complete"} for d in dates]}
+        for t in features.index.get_level_values("ticker").unique()
+    }
+    return ds
+
+
+def test_train_ranker_fits_through_last_label_and_records_gate_evidence(monkeypatch):
+    from ml.recommendation_validation import recommendation_gate
+
+    monkeypatch.setattr(rk.gbdt, "make_regressor", lambda **kwargs: _FakeRegressor())
+    ds = _gate_dataset()
+    result = rk.train_ranker(ds, use_ranker=False)
+
+    labeled = ds["excess"].dropna().index.get_level_values("date")
+    assert result.train_end_date == str(labeled.max().date())
+    metrics, baseline = result.meta["validation_metrics"], result.meta["validation_baseline"]
+    gate = recommendation_gate(metrics, baseline)
+    assert not [r for r in gate["reasons"] if r.startswith("finite:")], gate["reasons"]
+    assert baseline["feature"] == "mom_126d"
+    assert result.oos_ic == metrics["mean_ic"]
+    assert result.oos_top_decile_ret == metrics["top_decile_excess"]
+
+    stale = rk.train_ranker(_gate_dataset(stale_ticker="T00"), use_ranker=False)
+    assert stale.meta["validation_metrics"]["clean_rows"] == metrics["clean_rows"] * 7 // 8
+
+
+def test_decile_book_charges_turnover_and_measures_net_drawdown():
+    rows = []
+    for day, (top, y_top) in enumerate([("T9", .10), ("T8", -.20), ("T8", .05)]):
+        for i in range(10):
+            ticker = f"T{i}"
+            rows.append({"fold": 0, "date": pd.Timestamp("2026-01-01") + pd.Timedelta(days=day),
+                         "ticker": ticker, "pred": 1.0 if ticker == top else -i / 100,
+                         "y": y_top if ticker == top else 0.0})
+    book = rk._decile_book(pd.DataFrame(rows), "pred", horizon=1)
+
+    cost = 2 * rk.RANKER_COST_ONE_WAY
+    assert book["transaction_cost"] == np.mean([cost, cost, 0.0])          # 유지 종목은 무비용
+    equity = np.cumprod([1 + .10 - cost, 1 - .20 - cost, 1 + .05])
+    assert np.isclose(book["mdd"], 1 - equity[1] / equity[0])
+    assert np.isclose(book["top_decile_excess"], np.mean([.10, -.20, .05]))
 
 
 def test_compare_ranker_backends_marks_better_challenger(monkeypatch):

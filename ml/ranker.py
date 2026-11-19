@@ -3,7 +3,7 @@
 목표: QQQ 대비 초과수익률(excess return) 예측 → 종목 랭킹 생성
 
 공개 API:
-  train_ranker(dataset, train_frac)   → RankerResult
+  train_ranker(dataset, n_folds)      → RankerResult (WF 검증 증거 + 전 구간 실전 적합)
   rank_today(mode, top_n)             → pd.DataFrame (랭킹 + 점수)
   RankerResult                        → 모델 + OOS 성능 + feature importance
 """
@@ -28,6 +28,10 @@ from ml.recommendation_validation import recommendation_gate, _finite
 logger = logging.getLogger(__name__)
 
 MODEL_CACHE = Path.home() / "reports" / "ml-cache" / "ranker_model.pkl"
+# 게이트 기준선 — 6개월 가격 모멘텀 단일 팩터. 같은 WF 행·같은 북·같은 보정으로 채점한다.
+RANKER_BASELINE_FEATURE = "mom_126d"
+# 편도 수수료+슬리피지. 리밸런스마다 교체 비율 × 2 × 이 값을 비용으로 차감한다.
+RANKER_COST_ONE_WAY = 0.001
 
 
 # ── 생존편향 페널티 ────────────────────────────────────────────────────────────
@@ -119,6 +123,34 @@ def ranker_gate(result: RankerResult) -> dict:
     return gate
 
 
+def format_validation_lines(result: RankerResult) -> list[str]:
+    """주간 재학습 보고용 — 게이트 증거·같은 행 기준선·미통과 사유."""
+    gate = ranker_gate(result)
+    metrics = result.meta.get("validation_metrics") or {}
+    base = result.meta.get("validation_baseline") or {}
+    fresh = gate["freshness"]
+
+    def num(value, digits: int = 4) -> str:
+        return f"{float(value):+.{digits}f}" if _finite(value) else "n/a"
+
+    def pct(value) -> str:
+        return f"{float(value) * 100:+.2f}%" if _finite(value) else "n/a"
+
+    folds = " / ".join(f"{x:+.3f}" for x in metrics.get("fold_ics", [])) or "n/a"
+    return [
+        f"WF IC {num(metrics.get('mean_ic'))} (폴드 {folds}) · 기준선 {base.get('feature', 'n/a')} {num(base.get('mean_ic'))}",
+        f"상위10% 북(20일): 초과 {pct(metrics.get('top_decile_excess'))} · 비용 {pct(metrics.get('transaction_cost'))}"
+        f" · MDD {num(metrics.get('mdd'), 3)} (기준선 {num(base.get('mdd'), 3)})",
+        f"Calibration: Brier {num(metrics.get('brier'))} / 기준선 {num(base.get('brier'))}"
+        f" · ECE {num(metrics.get('ece'))} / 기준선 {num(base.get('ece'))}",
+        f"Clean: IC {num(metrics.get('clean_mean_ic'))} · 순초과 {pct(metrics.get('clean_top_decile_excess'))}"
+        f" · {metrics.get('clean_rows', 'n/a')}행",
+        f"Freshness: train_end={fresh['train_end_date']} · age_days={fresh['model_age_days']}"
+        f" · data coverage: {fresh['data_coverage']}",
+        f"Gate: {'통과' if gate['passed'] else 'shadow'} · reasons: {', '.join(gate['reasons']) or 'none'}",
+    ]
+
+
 # ── 학습 ──────────────────────────────────────────────────────────────────────
 
 def _make_ranker_labels(excess: np.ndarray, dates: pd.Index) -> tuple[np.ndarray, np.ndarray]:
@@ -128,127 +160,206 @@ def _make_ranker_labels(excess: np.ndarray, dates: pd.Index) -> tuple[np.ndarray
     df["label"] = df.groupby("date")["excess"].transform(
         lambda x: pd.qcut(x.rank(method="first"), q=4, labels=[0, 1, 2, 3])
     ).astype(int)
-    # stable 정렬 필수 — train_ranker의 X_train 재정렬(np.argsort kind="stable")과
+    # stable 정렬 필수 — _fit_gbdt 의 X 재정렬(np.argsort kind="stable")과
     # 동일 날짜 내 행 순서가 일치해야 라벨-피처 정렬이 깨지지 않음
     df = df.sort_values("date", kind="stable")
     groups = df.groupby("date", sort=True).size().values
     return df["label"].values, groups
 
 
+def _fit_gbdt(X: np.ndarray, y: np.ndarray, dates: pd.Index, feat_names: list[str],
+              backend: str, use_ranker: bool):
+    """GBDT ranker(일자 그룹 라벨)/regressor 한 번 적합."""
+    if use_ranker:
+        labels, groups = _make_ranker_labels(y, dates)
+        order = np.argsort(dates, kind="stable")        # 라벨·그룹과 같은 날짜순
+        model = gbdt.make_ranker(backend=backend, random_state=42)
+        gbdt.fit_ranker_model(model, X[order], labels, groups, feat_names, backend)
+    else:
+        model = gbdt.make_regressor(backend=backend, random_state=42)
+        gbdt.fit_regressor_model(model, X, y, feat_names, backend)
+    return model
+
+
+def _clean_flags(dataset: dict, index: pd.MultiIndex) -> np.ndarray | None:
+    """원천 스냅샷과 그 일자 봉이 모두 complete 인 (일자, 종목) 행만 True.
+
+    스냅샷이 없으면 None — 품질 증거가 없으니 clean 지표도 만들지 않는다(게이트 fail-closed).
+    """
+    snapshots = dataset["features"].attrs.get("data_snapshots")
+    if not snapshots:
+        return None
+    complete = {t for t, snap in snapshots.items()
+                if str((snap or {}).get("quality", "")).lower() == "complete"}
+    bad_bars = {(t, _naive_day(stamp.get("timestamp")))
+                for t, snap in snapshots.items()
+                for stamp in (snap or {}).get("data_stamps", [])
+                if str(stamp.get("quality", "")).lower() != "complete"}
+    return np.array([t in complete and (t, _naive_day(d)) not in bad_bars
+                     for d, t in zip(index.get_level_values("date"),
+                                     index.get_level_values("ticker"))], dtype=bool)
+
+
+def _decile_book(frame: pd.DataFrame, col: str, horizon: int) -> dict:
+    """비중첩 리밸런스(horizon 거래일 간격) 상위 10% 동일가중 북.
+
+    수익은 벤치마크 대비 초과수익, 비용은 교체 비율 × 왕복 RANKER_COST_ONE_WAY.
+    MDD 는 비용 차감 초과수익 누적 곡선 기준(0~1).
+    """
+    gross, costs, hits, prev = [], [], [], None
+    for _, fold in frame.groupby("fold", sort=True):
+        fold = fold[np.isfinite(fold[col])]
+        for day in sorted(fold["date"].unique())[::max(1, horizon)]:
+            book = fold[fold["date"] == day]
+            if len(book) < 2:
+                continue
+            k = max(1, int(np.ceil(len(book) * 0.1)))
+            top = book.nlargest(k, col)
+            pick = set(top["ticker"])
+            gross.append(float(top["y"].mean()))
+            hits.append(float((top["y"] > 0).mean()))
+            turnover = 1.0 if prev is None else 1.0 - len(pick & prev) / k
+            costs.append(2.0 * RANKER_COST_ONE_WAY * turnover)
+            prev = pick
+    if not gross:
+        return {}
+    net = np.asarray(gross) - np.asarray(costs)
+    equity = np.cumprod(np.maximum(1.0 + net, 0.0))
+    peak = np.maximum.accumulate(np.concatenate([[1.0], equity]))[1:]
+    return {"top_decile_excess": float(np.mean(gross)),
+            "transaction_cost": float(np.mean(costs)),
+            "net_top_decile_excess": float(np.mean(net)),
+            "mdd": float(np.max(1.0 - equity / peak)),
+            "top_decile_hit_rate": float(np.mean(hits)),
+            "n_rebalances": len(gross)}
+
+
+def _oos_calibration(frame: pd.DataFrame, col: str) -> dict:
+    """P(초과수익>0) 보정 — 앞선 폴드 OOS 의 일자별 백분위→적중 로지스틱을 다음 폴드에 적용.
+
+    첫 폴드는 앞선 OOS 가 없어 채점하지 않는다. 표본·클래스 부족이면 invalid(None) 그대로.
+    """
+    from sklearn.linear_model import LogisticRegression
+    from ml.recommendation_validation import validate_calibration
+
+    data = frame[np.isfinite(frame[col])].copy()
+    data["pct"] = data.groupby("date")[col].rank(pct=True) - 0.5
+    data["hit"] = (data["y"] > 0).astype(int)
+    ys, probs = [], []
+    for fold in sorted(data["fold"].unique())[1:]:
+        hist, cur = data[data["fold"] < fold], data[data["fold"] == fold]
+        if hist["hit"].nunique() < 2:
+            return validate_calibration([], [])
+        fitted = LogisticRegression().fit(hist[["pct"]].to_numpy(), hist["hit"].to_numpy())
+        probs.extend(fitted.predict_proba(cur[["pct"]].to_numpy())[:, 1].tolist())
+        ys.extend(cur["hit"].tolist())
+    return validate_calibration(ys, probs)
+
+
+def _fold_mean_ic(frame: pd.DataFrame, col: str) -> float | None:
+    ics = []
+    for _, fold in frame.groupby("fold", sort=True):
+        fold = fold[np.isfinite(fold[col])]
+        monthly = _monthly_ic(fold[col].to_numpy(), fold["y"].to_numpy(), pd.DatetimeIndex(fold["date"]))
+        if len(monthly):
+            ics.append(float(monthly.mean()))
+    return float(np.mean(ics)) if ics else None
+
+
+def _wf_evidence(frame: pd.DataFrame, horizon: int) -> tuple[dict, dict]:
+    """WF OOS 행으로 게이트 증거(모델)와 같은 행의 단일 팩터 기준선을 만든다."""
+    book = _decile_book(frame, "pred", horizon)
+    calibration = _oos_calibration(frame, "pred")
+    evidence = {**book, "brier": calibration["brier"], "ece": calibration["ece"],
+                "calibration_samples": calibration["n_samples"],
+                "cost_one_way": RANKER_COST_ONE_WAY,
+                "clean_mean_ic": None, "clean_top_decile_excess": None}
+    clean = frame["clean"]
+    if clean.map(lambda v: isinstance(v, (bool, np.bool_))).all():
+        clean_rows = frame[clean.astype(bool)]
+        evidence["clean_rows"] = len(clean_rows)
+        if not clean_rows.empty:
+            evidence["clean_mean_ic"] = _fold_mean_ic(clean_rows, "pred")
+            evidence["clean_top_decile_excess"] = _decile_book(
+                clean_rows, "pred", horizon).get("net_top_decile_excess")
+
+    baseline: dict = {"feature": RANKER_BASELINE_FEATURE}
+    if np.isfinite(frame["baseline"]).any():
+        base_book = _decile_book(frame, "baseline", horizon)
+        base_cal = _oos_calibration(frame, "baseline")
+        baseline.update(mean_ic=_fold_mean_ic(frame, "baseline"), mdd=base_book.get("mdd"),
+                        brier=base_cal["brier"], ece=base_cal["ece"],
+                        top_decile_excess=base_book.get("top_decile_excess"),
+                        transaction_cost=base_book.get("transaction_cost"))
+    return evidence, baseline
+
+
 def train_ranker(
     dataset: dict,
-    train_frac: float = 0.7,
+    *,
+    n_folds: int = 4,
     use_ranker: bool = True,
     backend: str = "lightgbm",
 ) -> RankerResult:
-    """시계열 분할로 GBDT ranker/regressor 학습, OOS 성능 평가.
+    """Purged walk-forward 로 검증 증거를 만들고, 라벨이 확정된 전 구간으로 실전 모델을 적합.
+
+    검증 수치(oos_*, validation_metrics, validation_baseline)는 모두 WF OOS 에서 온다.
+    실전 모델은 같은 설정으로 전 구간을 학습해 train_end_date 가 마지막 라벨일이 된다
+    (70% 홀드아웃 분할 모델은 학습 종료가 약 11개월 전이라 90일 신선도를 구조적으로 넘는다).
 
     Args:
         dataset:     build_ml_dataset() 반환값
-        train_frac:  학습 기간 비율 (나머지는 OOS 평가)
+        n_folds:     walk-forward 폴드 수
         use_ranker:  True=ranker(lambdarank/pairwise), False=regressor
         backend:     lightgbm(기본 챔피언) 또는 xgboost(챌린저)
-
-    Returns:
-        RankerResult
     """
     backend = gbdt.normalize_backend(backend)
-
     features: pd.DataFrame = dataset["features"]
     excess:   pd.Series    = dataset["excess"]
-
     if features.empty:
         raise ValueError("피처 데이터가 비어있습니다")
 
-    # 날짜 기준 시계열 분할 (Purged: 분할 직전 embargo 거래일은 학습에서 제외 —
-    # forward 레이블이 test 구간을 내다보는 데이터 누수 방지)
-    embargo = int(dataset.get("meta", {}).get("forward_days", 20))
-    dates = features.index.get_level_values("date")
-    unique_dates = sorted(dates.unique())
-    split_idx = int(len(unique_dates) * train_frac)
-    split_date = unique_dates[split_idx]
-    purge_date = unique_dates[max(split_idx - embargo, 0)]
+    wf = walk_forward_backtest(dataset, n_folds=n_folds, backend=backend, use_ranker=use_ranker)
+    baseline = wf.pop("baseline", None) or {}
 
-    train_mask = dates < purge_date
-    test_mask  = dates >= split_date
-
-    X_train = features[train_mask].values.astype(float)
-    y_train = excess[train_mask].values.astype(float)
-    X_test  = features[test_mask].values.astype(float)
-    y_test  = excess[test_mask].values.astype(float)
-
-    # NaN 제거
-    train_valid = np.isfinite(X_train).all(axis=1) & np.isfinite(y_train)
-    test_valid  = np.isfinite(X_test).all(axis=1) & np.isfinite(y_test)
-    X_train, y_train = X_train[train_valid], y_train[train_valid]
-    X_test,  y_test  = X_test[test_valid],  y_test[test_valid]
-    train_dates = features[train_mask][train_valid].index.get_level_values("date")
-
-    logger.info("학습: %d행 | OOS: %d행 | 분할일: %s | 모델: %s",
-                len(X_train), len(X_test), split_date.date(),
-                f"{gbdt.backend_label(backend)} {'ranker' if use_ranker else 'regressor'}")
-
+    X = features.values.astype(float)
+    y = excess.values.astype(float)
+    valid = np.isfinite(X).all(axis=1) & np.isfinite(y)
+    train_dates = features[valid].index.get_level_values("date")
     feat_names = list(features.columns)
+    model = _fit_gbdt(X[valid], y[valid], train_dates, feat_names, backend, use_ranker)
 
-    if use_ranker:
-        labels, groups = _make_ranker_labels(y_train, train_dates)
-        # X_train도 날짜 순서로 재정렬
-        date_order = np.argsort(train_dates, kind="stable")
-        X_train_sorted = X_train[date_order]
-
-        model = gbdt.make_ranker(backend=backend, random_state=42)
-        gbdt.fit_ranker_model(model, X_train_sorted, labels, groups, feat_names, backend)
-    else:
-        model = gbdt.make_regressor(backend=backend, random_state=42)
-        gbdt.fit_regressor_model(model, X_train, y_train, feat_names, backend)
-
-    # OOS 예측
-    preds = model.predict(X_test)
-
-    # 성능 지표 — 월별 IC (rank correlation)
-    test_dates = features[test_mask][test_valid].index.get_level_values("date")
-    ic_series = _monthly_ic(preds, y_test, test_dates)
-    oos_ic   = float(ic_series.mean()) if len(ic_series) > 0 else 0.0
-    oos_icir = float(ic_series.mean() / ic_series.std()) if len(ic_series) > 1 else 0.0
-
-    # 상위 10분위 실현 초과수익
-    top_mask = preds >= np.percentile(preds, 90)
-    oos_top_decile_ret = float(y_test[top_mask].mean()) if top_mask.any() else 0.0
-
-    # hit rate — 모델이 고른 상위 10분위 픽의 양수 초과수익 적중률(모델 성능).
-    # (기존 (y_test>0).mean() 은 preds 무관한 전체 기저율이라 어떤 모델이든 동일 — 감사 확정)
-    oos_hit_rate = float((y_test[top_mask] > 0).mean()) if top_mask.any() else 0.0
-
-    # feature importance
-    fi = gbdt.feature_importance(model, feat_names)
+    def metric(key: str) -> float:
+        value = wf.get(key)
+        return float(value) if _finite(value) else float("nan")
 
     logger.info(
-        "OOS IC=%.3f  ICIR=%.2f  top10%%=%.2f%%  hit=%.1f%%",
-        oos_ic, oos_icir, oos_top_decile_ret * 100, oos_hit_rate * 100,
+        "실전 적합 %d행(~%s) | WF IC=%.3f top10%%=%.2f%% 비용=%.2f%%",
+        int(valid.sum()), train_dates.max().date(), metric("mean_ic"),
+        metric("top_decile_excess") * 100, metric("transaction_cost") * 100,
     )
-
     return RankerResult(
         model=model,
         feature_names=feat_names,
         train_end_date=str(train_dates.max().date()),
-        oos_ic=oos_ic,
-        oos_icir=oos_icir,
-        oos_top_decile_ret=oos_top_decile_ret,
-        oos_hit_rate=oos_hit_rate,
-        feature_importance=fi,
+        oos_ic=metric("mean_ic"),
+        oos_icir=metric("icir"),
+        oos_top_decile_ret=metric("top_decile_excess"),
+        oos_hit_rate=metric("top_decile_hit_rate"),
+        feature_importance=gbdt.feature_importance(model, feat_names),
         meta={
             "backend": backend,
             "backend_label": gbdt.backend_label(backend),
             "model_type": type(model).__name__,
             "use_ranker": bool(use_ranker),
-            "n_train": int(train_valid.sum()),
-            "n_test":  int(test_valid.sum()),
+            "fit_scope": "all_labeled",
+            "n_train": int(valid.sum()),
             "n_tickers": features.index.get_level_values("ticker").nunique(),
             "trained_at": datetime.now(timezone.utc).isoformat(),
-            "data_coverage": {"train_valid_rows": int(train_valid.sum()),
-                              "train_total_rows": len(train_valid),
-                              "oos_valid_rows": int(test_valid.sum()),
-                              "oos_total_rows": len(test_valid)},
+            "data_coverage": {"train_valid_rows": int(valid.sum()),
+                              "train_total_rows": len(valid)},
+            "validation_metrics": wf,
+            "validation_baseline": baseline,
         },
     )
 
@@ -294,11 +405,15 @@ def walk_forward_backtest(
 
     Returns:
         fold_ics       — 폴드별 월평균 IC
-        fold_top10_rets — 폴드별 상위10분위 평균 수익
+        fold_top10_rets — 폴드별 상위10분위 평균 수익(풀링 진단값)
         mean_ic        — 전체 평균 IC
         std_ic         — IC 표준편차
         icir           — mean_ic / std_ic
         n_folds        — 실행된 폴드 수
+        top_decile_excess / transaction_cost / mdd — 비중첩 리밸런스 상위 10% 북(기간당)
+        brier / ece    — 앞선 폴드 OOS 로 보정한 P(초과수익>0)
+        clean_mean_ic / clean_top_decile_excess — 스냅샷 complete 행만, 초과수익은 비용 차감
+        baseline       — 같은 행에서 RANKER_BASELINE_FEATURE 단일 팩터의 같은 지표
     """
     backend = gbdt.normalize_backend(backend)
     features: pd.DataFrame = dataset["features"]
@@ -318,6 +433,7 @@ def walk_forward_backtest(
     fold_size = len(usable) // n_folds
     fold_ics: list[float] = []
     fold_top10: list[float] = []
+    oos_frames: list[pd.DataFrame] = []
 
     if embargo is None:
         embargo = int(dataset.get("meta", {}).get("forward_days", 20))
@@ -347,21 +463,23 @@ def walk_forward_backtest(
         if len(X_tr) < 500 or len(X_te) < 100:
             continue
 
-        if use_ranker:
-            train_dates = features[train_mask][valid_tr].index.get_level_values("date")
-            labels, groups = _make_ranker_labels(y_tr, train_dates)
-            order = np.argsort(train_dates, kind="stable")
-            model = gbdt.make_ranker(backend=backend, random_state=42)
-            gbdt.fit_ranker_model(model, X_tr[order], labels, groups, list(features.columns), backend)
-        else:
-            model = gbdt.make_regressor(backend=backend, random_state=42)
-            gbdt.fit_regressor_model(model, X_tr, y_tr, list(features.columns), backend)
+        model = _fit_gbdt(X_tr, y_tr, features[train_mask][valid_tr].index.get_level_values("date"),
+                          list(features.columns), backend, use_ranker)
         preds = np.asarray(model.predict(X_te)).ravel()
 
-        test_dates_fold = features[test_mask][valid_te].index.get_level_values("date")
+        test_index = features[test_mask][valid_te].index
+        test_dates_fold = test_index.get_level_values("date")
         monthly_ics = _monthly_ic(preds, y_te, test_dates_fold)
         if len(monthly_ics):
             fold_ics.append(float(monthly_ics.mean()))
+            baseline_col = (features[test_mask][valid_te][RANKER_BASELINE_FEATURE].to_numpy(dtype=float)
+                            if RANKER_BASELINE_FEATURE in features.columns else np.full(len(preds), np.nan))
+            oos_frames.append(pd.DataFrame({
+                "fold": fold, "date": test_dates_fold,
+                "ticker": test_index.get_level_values("ticker"),
+                "pred": preds, "baseline": baseline_col, "y": y_te,
+                "clean": _clean_flags(dataset, test_index),
+            }))
 
         top_mask = preds >= np.percentile(preds, 90)
         if top_mask.any():
@@ -380,6 +498,8 @@ def walk_forward_backtest(
         "Walk-forward %s %d폴드: mean_IC=%.3f  std=%.3f  ICIR=%.2f",
         gbdt.backend_label(backend), len(fold_ics), mean, std, icir,
     )
+    horizon = int(dataset.get("meta", {}).get("forward_days", 20))
+    evidence, baseline = _wf_evidence(pd.concat(oos_frames, ignore_index=True), horizon)
     return {
         "backend":        backend,
         "mean_ic":        mean,
@@ -388,8 +508,9 @@ def walk_forward_backtest(
         "n_folds":        len(fold_ics),
         "fold_ics":       fold_ics,
         "fold_top10_rets": fold_top10,
-        "top_decile_excess": float(np.mean(fold_top10)) if fold_top10 else None,
-        "purged": embargo >= max(1, int(dataset.get("meta", {}).get("forward_days", 20))),
+        **evidence,
+        "baseline":       baseline,
+        "purged": embargo >= max(1, horizon),
         "embargo": embargo,
         "use_ranker": use_ranker,
     }
@@ -399,10 +520,8 @@ def evaluate_ranker_backend(
     dataset: dict,
     *,
     backend: str = "xgboost",
-    train_frac: float = 0.7,
     use_ranker: bool = False,
     n_folds: int = 4,
-    min_train_months: int = 12,
 ) -> dict:
     """Evaluate a backend as a shadow challenger without saving/adopting it."""
     backend = gbdt.normalize_backend(backend)
@@ -414,15 +533,8 @@ def evaluate_ranker_backend(
             "error": f"{gbdt.backend_label(backend)} 미설치",
         }
     try:
-        result = train_ranker(dataset, train_frac=train_frac, use_ranker=use_ranker, backend=backend)
-        wf = walk_forward_backtest(
-            dataset,
-            n_folds=n_folds,
-            min_train_months=min_train_months,
-            backend=backend,
-            use_ranker=use_ranker,
-        )
-        result.meta["validation_metrics"] = wf
+        result = train_ranker(dataset, n_folds=n_folds, use_ranker=use_ranker, backend=backend)
+        wf = result.meta["validation_metrics"]
         gate = ranker_gate(result)
         return {
             "backend": backend,
@@ -455,7 +567,6 @@ def compare_ranker_backends(
     dataset: dict,
     *,
     backends: tuple[str, ...] = ("lightgbm", "xgboost"),
-    train_frac: float = 0.7,
     use_ranker: bool = False,
     n_folds: int = 4,
     improvement_tol: float = 0.01,
@@ -465,7 +576,6 @@ def compare_ranker_backends(
         evaluate_ranker_backend(
             dataset,
             backend=backend,
-            train_frac=train_frac,
             use_ranker=use_ranker,
             n_folds=n_folds,
         )
@@ -526,8 +636,18 @@ def format_backend_evaluation(evaluation: dict, champion_wf_ic: float | None = N
     )
 
 
-def save_ranker(result: RankerResult, path: Path = MODEL_CACHE, *,
-                dataset: dict | None = None, tol: float = .01) -> bool:
+def _blocks_challenger(champ: RankerResult | None, result: RankerResult, tol: float) -> bool:
+    """게이트를 통과한 챔피언만 비교 기준이 된다 — 노화·증거 없는 챔피언은 교체 대상.
+
+    oos_ic 는 양쪽 모두 각자 채택 시점 WF OOS 평균이다. 챔피언을 현재 데이터로 재채점하면
+    전 구간 적합 모델에는 학습 표본 재채점이 되어 IC 가 부풀므로 쓰지 않는다.
+    """
+    if champ is None or not ranker_gate(champ)["passed"]:
+        return False
+    return result.oos_ic < champ.oos_ic - tol
+
+
+def save_ranker(result: RankerResult, path: Path = MODEL_CACHE, *, tol: float = .01) -> bool:
     if not ranker_gate(result)["passed"]:
         logger.info("Ranker cache unchanged: validation requires shadow mode")
         return False
@@ -535,14 +655,8 @@ def save_ranker(result: RankerResult, path: Path = MODEL_CACHE, *,
     if champ is None and (path.exists() or path.is_symlink()):
         logger.warning("Ranker cache unchanged: existing artifact could not be loaded")
         return False
-    if champ is not None:
-        champ_ic = champ.oos_ic
-        if dataset is not None:
-            reevaluated = _oos_ic_for_model(champ.model, champ.feature_names, dataset)
-            if reevaluated is not None:
-                champ_ic = reevaluated
-        if not _finite(champ_ic) or result.oos_ic < champ_ic - tol:
-            return False
+    if _blocks_challenger(champ, result, tol):
+        return False
     path.parent.mkdir(parents=True, exist_ok=True)
     from ml._safe_cache import harden_cache_dir
     harden_cache_dir(path.parent)  # 0700 best-effort — 타 사용자 모델 주입 방지
@@ -559,66 +673,20 @@ def load_ranker(path: Path = MODEL_CACHE) -> Optional[RankerResult]:
     return safe_unpickle(path)
 
 
-def _oos_ic_for_model(model, feature_names, dataset: dict, train_frac: float = 0.7) -> float | None:
-    """주어진 모델을 dataset 의 동일 시계열 OOS 분할에서 재평가한 OOS IC.
+def adopt_if_better(result: RankerResult, path: Path = MODEL_CACHE, *,
+                    tol: float = 0.01) -> tuple[bool, float | None]:
+    """챔피언/챌린저 채택 게이트 — 게이트 통과 + 통과 챔피언보다 WF IC 가 tol 이상 나쁘지 않을 때 저장.
 
-    챔피언/챌린저를 '같은 창'에서 비교하기 위함 — 저장된 스칼라 oos_ic 는 채택 당시의 다른
-    기간이라 직접 비교하면 노화 챔피언 무기한 유지·부당 채택이 생긴다(감사 확정). 챔피언 학습
-    피처가 현재 데이터에 모두 없으면 재평가 불가 → None(호출자가 저장 스칼라로 폴백).
-    """
-    try:
-        features = dataset.get("features")
-        excess = dataset.get("excess")
-        if features is None or excess is None or features.empty:
-            return None
-        if not set(feature_names).issubset(set(features.columns)):
-            return None
-        feats = features[list(feature_names)]           # 챔피언 학습 피처 순서로 정렬
-        dates = feats.index.get_level_values("date")
-        unique_dates = sorted(dates.unique())
-        if len(unique_dates) < 3:
-            return None
-        split_date = unique_dates[int(len(unique_dates) * train_frac)]
-        test_mask = dates >= split_date
-        X_test = feats[test_mask].values.astype(float)
-        y_test = excess[test_mask].values.astype(float)
-        valid = np.isfinite(X_test).all(axis=1) & np.isfinite(y_test)
-        X_test, y_test = X_test[valid], y_test[valid]
-        if len(X_test) == 0:
-            return None
-        test_dates = feats[test_mask][valid].index.get_level_values("date")
-        preds = model.predict(X_test)
-        ic_series = _monthly_ic(preds, y_test, test_dates)
-        return float(ic_series.mean()) if len(ic_series) > 0 else 0.0
-    except Exception as e:
-        logger.warning("챔피언 OOS 동일창 재평가 실패: %s", e)
-        return None
-
-
-def adopt_if_better(result: RankerResult, path: Path = MODEL_CACHE, *, tol: float = 0.01,
-                    dataset: dict | None = None) -> tuple[bool, float | None]:
-    """챔피언/챌린저 채택 게이트 — 신규 모델 OOS IC 가 현행보다 명백히 나쁘지 않을 때만 저장.
-
-    dataset 을 주면 챔피언을 **현재 창에서 재평가**해 챌린저와 동일 기간으로 비교한다(저장
-    스칼라 직접 비교는 이질 기간 — 감사 확정). 재평가 불가 시 저장 스칼라로 폴백.
-    재학습 모델이 OOS IC 에서 (tol 이상) 퇴보하면 기존(챔피언) 모델을 유지(노이즈성 악화 방지).
     반환: (채택 여부, 비교에 쓴 챔피언 OOS IC | None).
     """
     champ = load_ranker(path)
+    champ_ic = getattr(champ, "oos_ic", None)
     if not ranker_gate(result)["passed"]:
-        return False, getattr(champ, "oos_ic", None)
-    if champ is None:
-        return save_ranker(result, path, dataset=dataset, tol=tol) is not False, None
-    champ_ic = champ.oos_ic
-    if dataset is not None:
-        re_ic = _oos_ic_for_model(champ.model, champ.feature_names, dataset)
-        if re_ic is not None:
-            champ_ic = re_ic
-    if _finite(champ_ic) and result.oos_ic >= champ_ic - tol:
-        return save_ranker(result, path, dataset=dataset, tol=tol) is not False, champ_ic
-    logger.info("랭커 재학습 보류 — OOS IC %.3f < 챔피언 %.3f (동일창 재평가·퇴보) → 기존 유지",
-                result.oos_ic, champ_ic)
-    return False, champ_ic
+        return False, champ_ic
+    if _blocks_challenger(champ, result, tol):
+        logger.info("랭커 재학습 보류 — WF IC %.3f < 챔피언 %.3f → 기존 유지", result.oos_ic, champ_ic)
+        return False, champ_ic
+    return save_ranker(result, path, tol=tol) is not False, champ_ic
 
 
 # ── 오늘의 랭킹 생성 ──────────────────────────────────────────────────────────
@@ -784,7 +852,7 @@ def rank_today(
         logger.info("모델 없음 — 신규 학습 시작 (bench=%s)", benchmark_ticker)
         ds = build_ml_dataset(mode=mode, days=756, forward_days=20, benchmark_ticker=benchmark_ticker)
         result = train_ranker(ds)
-        adopted, _ = adopt_if_better(result, cache_path, dataset=ds)
+        adopted, _ = adopt_if_better(result, cache_path)
         if not adopted:
             result = load_ranker(cache_path)
 
