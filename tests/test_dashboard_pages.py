@@ -157,6 +157,9 @@ cached.risk_struct = lambda: {"port_vol":0.2,"n_eff":3.5,"n_assets":5,"mdd_est":
     "factor_net":{"QQQ":0.95,"TLT":-0.1},"factor_caveat":"베타 참고",
     "leverage":{"recommend":1.3,"dd_cap":1.3,"current":1.0,
                 "kelly_half":{"conservative":0.5,"moderate":0.9,"trailing":1.1}}}
+cached.watchlist_quotes = lambda tickers: {}
+cached.institution_screener = lambda keys: {"new_buys": [], "increased": [], "decreased": []}
+cached.congress_top_traded = lambda days=90: {"bought": [], "sold": []}
 cached.institution_watch = lambda keys=None: {
     "institutions": [
         {"key": "berkshire", "display_name": "Berkshire Hathaway", "source_kind": "13f",
@@ -2190,17 +2193,15 @@ def test_ai_console_surface_pin_overrides_inference(monkeypatch):
     assert seen["surface"] == "paper"
 
 
-def test_watchlist_page_renders_rows_and_navigates_on_click():
-    """관심종목 페이지 — 테이블 렌더 + 행 클릭 시 종목분석 이동(2026-07-29)."""
+def test_watchlist_page_renders_rows_linking_to_ticker_analysis():
+    """관심종목 페이지 — 종목 행이 종목명과 함께 그려지고 누르면 `?tk=` 로 종목 분석 이동."""
     script = _STUBS + 'from dashboard.pages import watchlist\nwatchlist.render()\n'
     at = AppTest.from_string(script, default_timeout=30)
     at.run()
     assert not at.exception, str(at.exception)
-    assert len(at.dataframe) >= 1
-    df = next(item.value for item in at.dataframe if "티커" in item.value.columns)
-    assert "AAPL" in df["티커"].values
-    assert "Apple Inc" in df["종목"].values
-
+    html = next(m.value for m in at.markdown if 'class="tn-sl"' in m.value)
+    assert 'href="?tk=AAPL"' in html
+    assert "Apple Inc" in html
 
 
 def test_watchlist_korean_price_uses_won():
@@ -2219,17 +2220,15 @@ watchlist.render()
 '''
     at = AppTest.from_string(script, default_timeout=30).run()
     assert not at.exception, str(at.exception)
-    df = next(item.value for item in at.dataframe if "현재가" in item.value.columns)
-    prices = dict(zip(df["티커"], df["현재가"]))
-    assert prices["005930.KS"] == "₩70,200"
-    assert prices["AAPL"] == "$190.50"
+    html = next(m.value for m in at.markdown if 'class="tn-sl"' in m.value)
+    assert '<span class="tn-sl-val">₩70,200</span>' in html
+    assert '<span class="tn-sl-val">$190.50</span>' in html
     body = " ".join(str(getattr(c, "value", "")) for c in at.caption)
     assert "국내 티커는 미지원" not in body
 
 def test_watchlist_page_renders_institution_hub_and_rows():
     script = _STUBS + '''
 import streamlit as st
-st.session_state["_watch_show_hub"] = True
 st.session_state["_watch_llm_requested"] = True
 cached.institution_screener = lambda keys: {"new_buys": [], "increased": [], "decreased": []}
 cached.congress_top_traded = lambda days=90: {"bought": [], "sold": []}
@@ -2283,7 +2282,6 @@ watchlist.render()
 def test_watchlist_page_filters_selected_institutions():
     script = _STUBS + '''
 import streamlit as st
-st.session_state["_watch_show_hub"] = True
 st.session_state["_institution_watch_keys"] = ["berkshire"]
 st.session_state["_inst_calls"] = []
 cached.institution_screener = lambda keys: {"new_buys": [], "increased": [], "decreased": []}
@@ -2336,48 +2334,9 @@ watchlist.render()
     assert "Bridgewater" not in body
 
 
-def test_watchlist_page_clicks_through_to_ticker_detail(monkeypatch):
-    import streamlit as _st
-    monkeypatch.setattr(_st, "dataframe", _st.dataframe)  # 스크립트 내부 st.dataframe 오버라이드를 테스트 종료 시 복원
-    script = _STUBS + '''
-import streamlit as st
-from types import SimpleNamespace
-
-cached.institution_watch = lambda keys=None: {
-    "institutions": [],
-    "comparison": {"rows": [], "selected_keys": []},
-    "analysis": {"shared_moves": [], "divergences": [], "confidence": 0.0, "summary": "LLM 요약"},
-}
-data.load_watchlist = lambda *a, **k: [
-    {"ticker": "AAPL", "name": "Apple Inc", "reason": "기관 편입", "added_at": "2026-07-01T00:00:00"},
-]
-st.session_state["_ticker_page"] = "ticker-page"
-st.session_state["_switch_calls"] = []
-
-class _Event:
-    def __init__(self, rows):
-        self.selection = SimpleNamespace(rows=rows)
-
-def fake_dataframe(df, *args, **kwargs):
-    if "티커" in getattr(df, "columns", []):
-        return _Event([0])
-    return _Event([])
-
-st.dataframe = fake_dataframe
-st.switch_page = lambda page: st.session_state["_switch_calls"].append(page)
-from dashboard.pages import watchlist
-watchlist.render()
-'''
-    at = AppTest.from_string(script, default_timeout=30).run()
-
-    assert at.session_state["ticker"] == "AAPL"
-    assert at.session_state["_switch_calls"] == ["ticker-page"]
-
-
 def test_watchlist_page_uses_generic_label_for_fallback_analysis():
     script = _STUBS + '''
 import streamlit as st
-st.session_state["_watch_show_hub"] = True
 cached.institution_screener = lambda keys: {"new_buys": [], "increased": [], "decreased": []}
 cached.congress_top_traded = lambda days=90: {"bought": [], "sold": []}
 cached.institution_watch = lambda keys=None: {
@@ -2452,7 +2411,6 @@ def test_institution_watch_summary_uses_llm_prompt(monkeypatch):
 def test_watchlist_page_handles_empty_institution_hub_gracefully():
     script = _STUBS + '''
 import streamlit as st
-st.session_state["_watch_show_hub"] = True
 cached.institution_screener = lambda keys: {"new_buys": [], "increased": [], "decreased": []}
 cached.congress_top_traded = lambda days=90: {"bought": [], "sold": []}
 cached.institution_watch = lambda keys=None: {

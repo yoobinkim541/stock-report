@@ -171,6 +171,19 @@ def test_watchlist_row_links_and_escapes():
     assert "href=" not in plain
 
 
+def test_stock_list_row_links_escapes_and_colors_direction():
+    row = theme.stock_list_row_html({"ticker": "^TNX", "name": "<10Y>", "tags": ["미분류"],
+                                     "memo": "a&b", "value": "4.1", "delta": "-0.4%", "direction": -1})
+    assert 'href="?tk=%5ETNX"' in row
+    assert "<10Y>" not in row and "&lt;10Y&gt;" in row and "a&amp;b" in row
+    assert f"color:{theme.DOWN}" in row
+    kr = theme.stock_list_row_html({"ticker": "005930.KS", "name": "삼성전자", "direction": 1})
+    assert '>삼</span>' in kr and f"color:{theme.UP}" in kr
+    assert "href=" not in theme.stock_list_row_html({"ticker": "—", "name": "x"})
+    empty = theme.stock_list_html([], title="전체 0", empty="종목 없음")
+    assert "종목 없음" in empty and "tn-sl-row" not in empty
+
+
 def test_holding_watch_rows_split_currency_and_normalize_kr_codes():
     us, kr = theme.holding_watch_rows([
         {"ticker": "MSFT", "name": "Microsoft", "value": 1200.5, "ret": 1.2},

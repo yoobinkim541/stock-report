@@ -448,6 +448,67 @@ def watchlist_html(rows: list[dict], title="워치리스트", link: bool = True,
     return f'<div class="tn-wl"><div class="tn-wl-head">{title}</div>{body}</div>'
 
 
+_AVATAR_COLORS = ("#3182f6", "#f04452", "#00a878", "#ff8a00", "#7c5cff", "#0ea5e9", "#e5508a", "#4e5968")
+
+
+def _avatar_html(ticker, name="") -> str:
+    """종목 아바타 — 한글 종목명은 첫 글자, 그 외는 티커 첫 글자. 색은 티커로 고정."""
+    head = str(name or "").strip()[:1]
+    if not ("가" <= head <= "힣"):
+        head = (str(ticker or "").strip()[:1] or "?").upper()
+    color = _AVATAR_COLORS[sum(map(ord, str(ticker or "?"))) % len(_AVATAR_COLORS)]
+    return (f'<span class="tn-sl-ava" style="background:{color}" aria-hidden="true">'
+            f'{_html_esc(head)}</span>')
+
+
+def stock_list_row_html(row: dict, link: bool = True) -> str:
+    """토스식 종목 행 — 아바타 / 종목명·티커·태그·메모 / 값·등락 (순수).
+
+    row: {ticker, name, tags: [str], memo, value, delta, direction(+1 상승·-1 하락·0 중립), title}
+    link=True 면 행 전체가 `?tk=` 앵커 — app.py 가 소비해 종목 분석으로 이동.
+    """
+    ticker = str(row.get("ticker") or "").strip()
+    name = str(row.get("name") or "").strip() or ticker or "?"
+    direction = row.get("direction") or 0
+    col = UP if direction > 0 else DOWN if direction < 0 else MUTED
+    tags = "".join(f'<span class="tn-sl-chip">{_html_esc(str(t))}</span>'
+                   for t in row.get("tags") or [] if str(t).strip())
+    memo = str(row.get("memo") or "").strip()
+    memo_html = f'<span class="tn-sl-memo">{_html_esc(memo)}</span>' if memo else ""
+    tk_html = f'<span class="tn-sl-tk">{_html_esc(ticker)}</span>' if ticker and ticker != name else ""
+    inner = (
+        f'{_avatar_html(ticker, name)}'
+        f'<span class="tn-sl-main"><span class="tn-sl-name">{_html_esc(name)}</span>'
+        f'<span class="tn-sl-sub">{tk_html}{tags}{memo_html}</span></span>'
+        f'<span class="tn-sl-side"><span class="tn-sl-val">{_html_esc(str(row.get("value") or "—"))}</span>'
+        f'<span class="tn-sl-delta" style="color:{col}">{_html_esc(str(row.get("delta") or ""))}</span></span>')
+    title = str(row.get("title") or "").strip()
+    tip = f' title="{_html_esc(title)}"' if title else ""
+    if link and ticker and ticker not in ("?", "—"):
+        href = "?tk=" + _urlquote(ticker, safe="")
+        return (f'<a class="tn-sl-row" href="{href}" target="_self" '
+                f'aria-label="{_html_esc(name)} 종목 분석"{tip}>{inner}</a>')
+    return f'<div class="tn-sl-row"{tip}>{inner}</div>'
+
+
+def stock_list_html(rows: list[dict], *, title: str = "", meta: str = "",
+                    empty: str = "해당 종목이 없습니다.", link: bool = True) -> str:
+    """토스식 종목 리스트 카드 — 머리줄(제목·보조) + 행들. 행이 없으면 empty 문구."""
+    head = ""
+    if title or meta:
+        head = (f'<div class="tn-sl-head"><b>{_html_esc(title)}</b>'
+                f'<span>{_html_esc(meta)}</span></div>')
+    body = ("".join(stock_list_row_html(r, link=link) for r in rows or [])
+            or f'<div class="tn-sl-empty">{_html_esc(empty)}</div>')
+    return f'<div class="tn-sl">{head}{body}</div>'
+
+
+def section_head_html(title: str, sub: str = "") -> str:
+    """페이지 안 큰 섹션 제목 — 굵은 제목 + 회색 보조줄."""
+    sub_html = f'<span class="tn-h-sub">{_html_esc(sub)}</span>' if sub else ""
+    return f'<div class="tn-h"><span class="tn-h-title">{_html_esc(title)}</span>{sub_html}</div>'
+
+
 def holding_watch_rows(holdings: list[dict]) -> tuple[list[dict], list[dict]]:
     """보유 스냅샷을 미국/국내 워치 행으로 나눈다.
 
@@ -666,7 +727,8 @@ _LIGHT_OVERRIDE = """
 /* 입력·선택·버튼 (baseweb) */
 [data-baseweb="select"] > div, [data-baseweb="input"] > div, [data-baseweb="base-input"],
 .stTextInput input, .stNumberInput input, [data-baseweb="popover"] [role="listbox"],
-[data-testid="stChatInput"] { background: #ffffff !important; border-color: #e5e8eb !important; }
+[data-testid="stChatInput"], [data-testid="stTextInputRootElement"] {
+  background: #ffffff !important; border-color: #e5e8eb !important; }
 [data-baseweb="select"] div, [data-baseweb="select"] input,
 [data-baseweb="select"] svg, [data-baseweb="input"] input,
 [data-baseweb="popover"] [role="option"] {
@@ -681,7 +743,9 @@ _LIGHT_OVERRIDE = """
   background: #ffffff !important; color: #191f28 !important; border-color: #e5e8eb !important; }
 [data-testid="stButtonGroup"] button[aria-checked="true"],
 [data-testid="stButtonGroup"] button[aria-selected="true"],
-[data-testid="stRadio"] label[data-checked="true"] {
+[data-testid="stRadio"] label[data-checked="true"],
+[data-testid="stButtonGroup"] button[data-testid="stBaseButton-pillsActive"],
+[data-testid="stButtonGroup"] button[data-testid="stBaseButton-segmented_controlActive"] {
   background: #e8f3ff !important; color: #3182f6 !important; border-color: #3182f6 !important; }
 /* 팝오버/드롭다운 내용 배경 */
 [data-baseweb="popover"] [data-testid="stPopoverBody"], [data-baseweb="menu"] {
@@ -846,6 +910,37 @@ a.tn-wl-row:focus-visible {{ outline: 2px solid {BLUE}; outline-offset: -2px; }}
 .tn-sec {{ border-left: 3px solid {BLUE}; padding-left: 10px; margin: 18px 0 10px; }}
 .tn-sec span {{ font-size: .84rem; font-weight: 700; color: {TEXT}; letter-spacing: -0.02em; }}
 
+.tn-sl {{ background: {PANEL}; border: 1px solid {BORDER}; border-radius: 20px; overflow: hidden; }}
+.tn-sl-head {{ display: flex; justify-content: space-between; align-items: baseline; gap: 12px;
+  padding: 16px 20px 10px; }}
+.tn-sl-head b {{ font-size: 1rem; font-weight: 700; color: {TEXT}; letter-spacing: -0.02em; }}
+.tn-sl-head span {{ font-size: .78rem; color: {MUTED}; text-align: right; }}
+.tn-sl-row {{ display: grid; grid-template-columns: 40px minmax(0, 1fr) auto; align-items: center;
+  gap: 14px; padding: 12px 20px; }}
+a.tn-sl-row {{ color: inherit; text-decoration: none !important; cursor: pointer; transition: background .12s; }}
+a.tn-sl-row:hover {{ background: {PANEL2}; }}
+a.tn-sl-row:focus-visible {{ outline: 2px solid {BLUE}; outline-offset: -2px; }}
+.tn-sl-ava {{ width: 40px; height: 40px; border-radius: 50%; display: flex; align-items: center;
+  justify-content: center; color: #fff; font-weight: 700; font-size: 1rem; }}
+.tn-sl-main {{ display: flex; flex-direction: column; gap: 3px; min-width: 0; }}
+.tn-sl-name {{ font-size: 1rem; font-weight: 600; color: {TEXT}; letter-spacing: -0.02em;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+.tn-sl-sub {{ display: flex; align-items: center; gap: 6px; min-width: 0; font-size: .78rem; color: {MUTED};
+  white-space: nowrap; overflow: hidden; }}
+.tn-sl-tk {{ font-weight: 600; }}
+.tn-sl-chip {{ flex: none; padding: 1px 7px; border-radius: 6px; background: {PANEL2};
+  border: 1px solid {BORDER}; font-size: .7rem; }}
+.tn-sl-memo {{ overflow: hidden; text-overflow: ellipsis; }}
+.tn-sl-side {{ display: flex; flex-direction: column; align-items: flex-end; gap: 3px; }}
+.tn-sl-val {{ font-size: 1rem; font-weight: 700; color: {TEXT}; font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em; white-space: nowrap; }}
+.tn-sl-delta {{ font-size: .84rem; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }}
+.tn-sl-empty {{ padding: 22px 20px; color: {MUTED}; font-size: .86rem; text-align: center; }}
+.tn-h {{ display: flex; flex-direction: column; gap: 2px; margin: 26px 0 10px; }}
+.tn-h-title {{ font-size: 1.22rem; font-weight: 700; color: {TEXT}; letter-spacing: -0.03em; }}
+.tn-h-sub {{ font-size: .8rem; color: {MUTED}; }}
+[class*="st-key-tn-card"] {{ background: {PANEL}; border-color: {BORDER} !important; border-radius: 20px !important; }}
+
 [data-testid="stButtonGroup"] button[aria-pressed="true"],
 [data-testid="stButtonGroup"] button[aria-checked="true"] {{
   background: {BLUE}1a !important; border-color: {BLUE} !important; color: {BLUE} !important; }}
@@ -898,6 +993,10 @@ footer {{ display: none !important; }}
   .tn-etf-rets {{ gap: 6px; }}
   .tn-hold-row {{ grid-template-columns: minmax(0,1fr) 58px; }}
   .tn-hold-track {{ display: none; }}
+  .tn-sl-row {{ grid-template-columns: 36px minmax(0, 1fr) auto; gap: 10px; padding: 11px 14px; }}
+  .tn-sl-ava {{ width: 36px; height: 36px; font-size: .9rem; }}
+  .tn-sl-head {{ padding: 14px 14px 8px; }}
+  .tn-sl-memo {{ display: none; }}
 }}
 
 @media (max-width: 430px) {{

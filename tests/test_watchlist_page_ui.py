@@ -1,9 +1,9 @@
-"""tests/test_watchlist_page_ui.py — 관심종목 페이지 재구성 (감사 후속).
+"""tests/test_watchlist_page_ui.py — 관심종목 페이지 (토스식 리스트 · 접지 않는 관리·투자자 섹션).
 
 기존 페이지는 (1) 기관투자자 허브의 LLM 요약(최대 20초)이 매 렌더마다 동기 호출돼
-"느리다", (2) 내 관심종목 표에 티커/사유/추가일뿐 가격이 없어 "정보가 없다",
-(3) 무관한 두 기능(기관 허브 vs 내 관심종목)이 섞여 "쓰는 법을 모르겠다"는
-불만으로 이어졌다. 이 테스트는 재구성된 페이지가 실제로 그 문제를 없앴는지 검증한다.
+"느리다", (2) 내 관심종목 표에 가격이 없어 "정보가 없다", (3) 토글·접기 뒤에 기능이
+숨어 "눌러 봐야 보인다"는 불만으로 이어졌다. 이 테스트는 지금 페이지가 가격·등락을
+리스트로 바로 보여주고, 투자자 섹션을 토글 없이 그리되 LLM 은 버튼으로만 부르는지 검증한다.
 
 AppTest.from_string 스크립트는 이 프로세스와 같은 모듈 객체를 공유하므로(별도 서브
 프로세스가 아님), 스크립트 안에서 직접 속성을 대입하면 pytest monkeypatch 의 자동
@@ -12,6 +12,7 @@ AppTest.from_string 스크립트는 이 프로세스와 같은 모듈 객체를 
 from __future__ import annotations
 
 import os
+import re
 import sys
 
 import pandas as pd
@@ -39,39 +40,83 @@ _ROWS = [
      "note": None, "added_at": "2026-07-15T00:00:00"},
 ]
 
+_EMPTY_HUB = {"institutions": [], "comparison": {}, "analysis": {}}
 
-def test_first_render_never_touches_institution_hub(monkeypatch):
-    """토글 기본값 False — 첫 렌더에서 institution_watch 가 호출되면 안 된다(감사 후속 성능수정)."""
+
+@pytest.fixture(autouse=True)
+def _stub_investor_data(monkeypatch):
+    """투자자 섹션은 늘 그려지므로 기본은 빈 데이터 — 네트워크·13F 파일을 건드리지 않게."""
+    monkeypatch.setattr(cached, "institution_watch", lambda *a, **k: _EMPTY_HUB)
+    monkeypatch.setattr(cached, "institution_screener",
+                        lambda keys: {"new_buys": [], "increased": [], "decreased": []})
+    monkeypatch.setattr(cached, "congress_top_traded", lambda days=90: {"bought": [], "sold": []})
+
+
+def _lists(at) -> list[str]:
+    return [str(m.value) for m in at.markdown if 'class="tn-sl"' in str(m.value)]
+
+
+def _watch_list(at) -> str:
+    return _lists(at)[0]
+
+
+def _tickers(html: str) -> list[str]:
+    return re.findall(r'href="\?tk=([^"]+)"', html)
+
+
+def _values(html: str) -> list[str]:
+    return re.findall(r'class="tn-sl-val">([^<]*)<', html)
+
+
+def test_first_render_shows_investor_sections_without_toggle_or_llm(monkeypatch):
+    """토글 없이 기관 카드까지 바로 보이지만, LLM 버튼을 안 눌렀으면 with_llm_summary=True 호출은 없다."""
     monkeypatch.setattr(data, "load_watchlist", lambda: _ROWS)
-    monkeypatch.setattr(cached, "watchlist_quotes", lambda tickers: {"PLTR": {"price": 30.0, "chg_pct": 1.5}})
+    monkeypatch.setattr(cached, "watchlist_quotes", lambda tickers: {})
+    calls = []
 
-    def _boom(*a, **k):
-        raise AssertionError("institution_watch 호출됨 — 토글 꺼진 상태에서 호출되면 안 됨")
-    monkeypatch.setattr(cached, "institution_watch", _boom)
+    def _institution_watch(keys=None, with_llm_summary=False):
+        calls.append(with_llm_summary)
+        return {
+            "institutions": [{"key": "buffett", "display_name": "버크셔", "category": "asset_manager",
+                              "source_kind": "13f", "freshness": "fresh", "holdings_count": 5,
+                              "availability_flags": {}, "primary_sources": []}],
+            "comparison": {"rows": []},
+            "analysis": {"summary": "", "shared_moves": [], "divergences": [], "confidence": 0.0,
+                        "mode": "heuristic"},
+        }
+    monkeypatch.setattr(cached, "institution_watch", _institution_watch)
 
     at = AppTest.from_string(_RUN_SCRIPT, default_timeout=30)
     at.run()
+
     assert not at.exception, str(at.exception)
+    assert len(at.toggle) == 0
+    assert len(at.expander) == 0
+    body = " ".join(str(m.value) for m in at.markdown)
+    assert "버크셔" in body
+    caption_body = " ".join(str(c.value) for c in at.caption)
+    assert "버튼을 누르면" in caption_body, "LLM 버튼 안 눌렀는데 요약이 이미 뜸 — 지연 로딩 위반"
+    assert True not in calls, "with_llm_summary=True 로 호출됨 — 버튼 안 눌렀는데 LLM 요청됨"
 
 
-def test_watchlist_table_shows_price_and_change_columns(monkeypatch):
+def test_watchlist_list_shows_price_and_change_and_links_to_ticker(monkeypatch):
     monkeypatch.setattr(data, "load_watchlist", lambda: _ROWS)
     monkeypatch.setattr(cached, "watchlist_quotes", lambda tickers: {
         "PLTR": {"price": 30.0, "chg_pct": 1.5},
         "NVDA": {"price": 176.0, "chg_pct": -2.2},
     })
-    monkeypatch.setattr(cached, "institution_watch",
-                        lambda *a, **k: {"institutions": [], "comparison": {}, "analysis": {}})
 
     at = AppTest.from_string(_RUN_SCRIPT, default_timeout=30)
     at.run()
     assert not at.exception, str(at.exception)
-    df = at.dataframe[0].value
-    assert list(df["현재가"]) == ["$30.00", "$176.00"]
-    assert list(df["등락률"]) == ["+1.50%", "-2.20%"]
+    html = _watch_list(at)
+    assert _tickers(html) == ["PLTR", "NVDA"]
+    assert _values(html) == ["$30.00", "$176.00"]
+    assert "+1.50%" in html and "-2.20%" in html
+    assert "상승 1 · 하락 1" in html
 
 
-def test_watchlist_table_shows_krw_price_basis_and_per_ticker_failure(monkeypatch):
+def test_watchlist_list_shows_krw_price_mixed_basis_and_per_ticker_failure(monkeypatch):
     rows = [
         {"ticker": "005930.KS", "name": "삼성전자", "reason": "메모리", "source": "manual",
          "note": None, "added_at": "2026-08-01T00:00:00"},
@@ -89,10 +134,27 @@ def test_watchlist_table_shows_krw_price_basis_and_per_ticker_failure(monkeypatc
     at = AppTest.from_string(_RUN_SCRIPT, default_timeout=30)
     at.run()
     assert not at.exception, str(at.exception)
-    df = at.dataframe[0].value
-    assert list(df["현재가"]) == ["₩61,200", "—", "$176.00"]
-    assert list(df["시세 기준"]) == ["2026-10-23 일봉 · yfinance", "⚠️ 시세 없음", "2026-10-22 일봉 · yfinance"]
-    assert any("시세 미확인 1개" in str(c.value) for c in at.caption)
+    html = _watch_list(at)
+    assert _values(html) == ["₩61,200", "—", "$176.00"]
+    assert "시세 미확인 1개" in html
+    assert "2026-10-22 기준" in html, "다른 날짜 일봉 종목은 행에 기준일이 보여야 한다"
+
+
+def test_sort_by_decline_puts_missing_quotes_last(monkeypatch):
+    rows = [*_ROWS, {"ticker": "AMD", "name": "AMD", "reason": "", "source": "manual",
+                     "note": None, "added_at": "2026-07-01T00:00:00"}]
+    monkeypatch.setattr(data, "load_watchlist", lambda: rows)
+    monkeypatch.setattr(cached, "watchlist_quotes", lambda tickers: {
+        "PLTR": {"price": 30.0, "chg_pct": 1.5},
+        "NVDA": {"price": 176.0, "chg_pct": -2.2},
+    })
+
+    at = AppTest.from_string(_RUN_SCRIPT, default_timeout=30)
+    at.run()
+    at.button_group(key="_watchlist_sort").set_value("하락률").run()
+
+    assert not at.exception, str(at.exception)
+    assert _tickers(_watch_list(at)) == ["NVDA", "PLTR", "AMD"]
 
 
 def test_add_and_remove_buttons_use_shared_watchlist_store(monkeypatch):
@@ -133,21 +195,17 @@ def test_add_shows_validation_error_instead_of_saving(monkeypatch):
     assert any("티커 형식" in str(e.value) for e in at.error)
 
 
-
 def test_watchlist_search_filters_rows(monkeypatch):
     monkeypatch.setattr(data, "load_watchlist", lambda: _ROWS)
     monkeypatch.setattr(cached, "watchlist_quotes", lambda tickers: {})
-    monkeypatch.setattr(cached, "institution_watch",
-                        lambda *a, **k: {"institutions": [], "comparison": {}, "analysis": {}})
 
     at = AppTest.from_string(_RUN_SCRIPT, default_timeout=30)
     at.run()
-    assert len(at.dataframe[0].value) == 2
+    assert _tickers(_watch_list(at)) == ["PLTR", "NVDA"]
 
     at.text_input(key="_watchlist_search").set_value("nvda").run()
     assert not at.exception, str(at.exception)
-    df = at.dataframe[0].value
-    assert list(df["티커"]) == ["NVDA"]
+    assert _tickers(_watch_list(at)) == ["NVDA"]
 
 
 def test_empty_watchlist_shows_info_without_calling_quotes(monkeypatch):
@@ -156,8 +214,6 @@ def test_empty_watchlist_shows_info_without_calling_quotes(monkeypatch):
     def _boom(*a, **k):
         raise AssertionError("관심종목이 비었는데 시세 조회가 호출됨")
     monkeypatch.setattr(cached, "watchlist_quotes", _boom)
-    monkeypatch.setattr(cached, "institution_watch",
-                        lambda *a, **k: {"institutions": [], "comparison": {}, "analysis": {}})
 
     at = AppTest.from_string(_RUN_SCRIPT, default_timeout=30)
     at.run()
@@ -165,80 +221,18 @@ def test_empty_watchlist_shows_info_without_calling_quotes(monkeypatch):
     assert any("비어 있습니다" in str(m.value) for m in at.info)
 
 
-def test_toggling_hub_on_loads_institutions_without_llm_call(monkeypatch):
-    """허브 토글을 켜면 기관 카드는 뜨지만, LLM 버튼을 안 눌렀으면 with_llm_summary=True 호출은 없다."""
-    from dashboard import cached as _cached
-
-    monkeypatch.setattr(data, "load_watchlist", lambda: _ROWS)
-    monkeypatch.setattr(cached, "watchlist_quotes", lambda tickers: {})
-    monkeypatch.setattr(_cached, "institution_screener",
-                        lambda keys: {"new_buys": [], "increased": [], "decreased": []})
-    monkeypatch.setattr(_cached, "congress_top_traded", lambda days=90: {"bought": [], "sold": []})
-
-    calls = []
-
-    def _institution_watch(keys=None, with_llm_summary=False):
-        calls.append(with_llm_summary)
-        return {
-            "institutions": [{"key": "buffett", "display_name": "버크셔", "category": "asset_manager",
-                              "source_kind": "13f", "freshness": "fresh", "holdings_count": 5,
-                              "availability_flags": {}, "primary_sources": []}],
-            "comparison": {"rows": []},
-            "analysis": {"summary": "", "shared_moves": [], "divergences": [], "confidence": 0.0,
-                        "mode": "heuristic"},
-        }
-    monkeypatch.setattr(cached, "institution_watch", _institution_watch)
-
-    at = AppTest.from_string(_RUN_SCRIPT, default_timeout=30)
-    at.run()
-    assert not at.exception, str(at.exception)
-
-    at.toggle(key="_watch_show_hub").set_value(True).run()
-
-    assert not at.exception, str(at.exception)
-    body = " ".join(str(m.value) for m in at.markdown)
-    assert "버크셔" in body
-    caption_body = " ".join(str(c.value) for c in at.caption)
-    assert "버튼을 누르면" in caption_body, "LLM 버튼 안 눌렀는데 요약이 이미 뜸 — 지연 로딩 위반"
-    assert True not in calls, "with_llm_summary=True 로 호출됨 — 버튼 안 눌렀는데 LLM 요청됨"
-
-
-def test_congress_section_hidden_until_hub_toggle_on(monkeypatch):
-    """정치인 거래 섹션도 기관허브와 같은 토글 뒤에 있어 첫 렌더에 실행되면 안 된다."""
-    from dashboard import cached as _cached
-
-    monkeypatch.setattr(data, "load_watchlist", lambda: _ROWS)
-    monkeypatch.setattr(cached, "watchlist_quotes", lambda tickers: {})
-
-    def _boom(*a, **k):
-        raise AssertionError("congress_trading 호출됨 — 허브 토글 꺼진 상태에서 호출되면 안 됨")
-    monkeypatch.setattr(_cached, "congress_trading", _boom)
-
-    at = AppTest.from_string(_RUN_SCRIPT, default_timeout=30)
-    at.run()
-    assert not at.exception, str(at.exception)
-
-
 def test_congress_section_shows_transactions_for_searched_member(monkeypatch):
-    from dashboard import cached as _cached
-
     monkeypatch.setattr(data, "load_watchlist", lambda: _ROWS)
     monkeypatch.setattr(cached, "watchlist_quotes", lambda tickers: {})
-    monkeypatch.setattr(cached, "institution_watch",
-                        lambda *a, **k: {"institutions": [], "comparison": {}, "analysis": {}})
-    monkeypatch.setattr(_cached, "institution_screener",
-                        lambda keys: {"new_buys": [], "increased": [], "decreased": []})
-    monkeypatch.setattr(_cached, "congress_top_traded", lambda days=90: {"bought": [], "sold": []})
 
     def _fake_congress_trading(name):
         assert name == "Pelosi"
         return [{"date": "01/16/2026", "ticker": "GOOGL", "asset": "Alphabet Inc.",
                  "type": "Purchase", "amount": "$500,001 - $1,000,000", "owner": "Spouse"}]
-    monkeypatch.setattr(_cached, "congress_trading", _fake_congress_trading)
+    monkeypatch.setattr(cached, "congress_trading", _fake_congress_trading)
 
     at = AppTest.from_string(_RUN_SCRIPT, default_timeout=30)
     at.run()
-    at.toggle(key="_watch_show_hub").set_value(True).run()
     at.text_input(key="_congress_member_search").set_value("Pelosi").run()
 
     assert not at.exception, str(at.exception)
@@ -247,49 +241,22 @@ def test_congress_section_shows_transactions_for_searched_member(monkeypatch):
 
 
 def test_congress_section_no_op_caption_when_search_blank(monkeypatch):
-    from dashboard import cached as _cached
-
     monkeypatch.setattr(data, "load_watchlist", lambda: _ROWS)
     monkeypatch.setattr(cached, "watchlist_quotes", lambda tickers: {})
-    monkeypatch.setattr(cached, "institution_watch",
-                        lambda *a, **k: {"institutions": [], "comparison": {}, "analysis": {}})
-    monkeypatch.setattr(_cached, "institution_screener",
-                        lambda keys: {"new_buys": [], "increased": [], "decreased": []})
-    monkeypatch.setattr(_cached, "congress_top_traded", lambda days=90: {"bought": [], "sold": []})
 
     def _boom(*a, **k):
         raise AssertionError("검색어 없는데 congress_trading 호출됨")
-    monkeypatch.setattr(_cached, "congress_trading", _boom)
+    monkeypatch.setattr(cached, "congress_trading", _boom)
 
     at = AppTest.from_string(_RUN_SCRIPT, default_timeout=30)
     at.run()
-    at.toggle(key="_watch_show_hub").set_value(True).run()
 
     assert not at.exception, str(at.exception)
     caption_body = " ".join(str(c.value) for c in at.caption)
     assert "의원 이름을 입력하면" in caption_body
 
 
-def test_screening_sections_hidden_until_hub_toggle_on(monkeypatch):
-    """스크리닝/정치인 섹션도 기관허브 토글 뒤 — 첫 렌더에 호출되면 안 된다."""
-    from dashboard import cached as _cached
-
-    monkeypatch.setattr(data, "load_watchlist", lambda: _ROWS)
-    monkeypatch.setattr(cached, "watchlist_quotes", lambda tickers: {})
-
-    def _boom(*a, **k):
-        raise AssertionError("토글 꺼진 상태에서 스크리닝이 호출됨")
-    monkeypatch.setattr(_cached, "institution_screener", _boom)
-    monkeypatch.setattr(_cached, "congress_top_traded", _boom)
-
-    at = AppTest.from_string(_RUN_SCRIPT, default_timeout=30)
-    at.run()
-    assert not at.exception, str(at.exception)
-
-
-def test_screening_sections_render_when_hub_toggle_on(monkeypatch):
-    from dashboard import cached as _cached
-
+def test_screening_and_congress_lists_render_on_first_load(monkeypatch):
     monkeypatch.setattr(data, "load_watchlist", lambda: _ROWS)
     monkeypatch.setattr(cached, "watchlist_quotes", lambda tickers: {})
     monkeypatch.setattr(cached, "institution_watch",
@@ -302,12 +269,12 @@ def test_screening_sections_render_when_hub_toggle_on(monkeypatch):
                         "comparison": {"rows": []},
                         "analysis": {"summary": "", "shared_moves": [], "divergences": [],
                                     "confidence": 0.0, "mode": "heuristic"}})
-    monkeypatch.setattr(_cached, "institution_screener",
+    monkeypatch.setattr(cached, "institution_screener",
                         lambda keys: {"new_buys": [{"ticker": "SMCI", "name": "Super Micro",
                                                     "institutions": ["berkshire"], "count": 1,
                                                     "avg_delta_pct": 0.01}],
                                      "increased": [], "decreased": []})
-    monkeypatch.setattr(_cached, "congress_top_traded",
+    monkeypatch.setattr(cached, "congress_top_traded",
                         lambda days=90: {"bought": [{"ticker": "NVDA", "member_count": 3,
                                                      "members": ["A", "B", "C"],
                                                      "total_amount_mid": 300000}],
@@ -315,36 +282,28 @@ def test_screening_sections_render_when_hub_toggle_on(monkeypatch):
 
     at = AppTest.from_string(_RUN_SCRIPT, default_timeout=30)
     at.run()
-    at.toggle(key="_watch_show_hub").set_value(True).run()
 
     assert not at.exception, str(at.exception)
     body = " ".join(str(m.value) for m in at.markdown)
     assert "공통 움직임" in body
     assert "정치인" in body
-    dataframes = [df.value for df in at.dataframe]
-    assert any("SMCI" in df.get("티커", pd.Series(dtype=object)).tolist() for df in dataframes)
-    assert any("NVDA" in df.get("티커", pd.Series(dtype=object)).tolist() for df in dataframes)
+    lists = " ".join(_lists(at)[1:])
+    assert "SMCI" in _tickers(lists) and "NVDA" in _tickers(lists)
+    assert "기관 1곳" in lists and "+1.0%p" in lists
+    assert "$300.0K" in lists and "의원 3명" in lists
 
 
 def test_screen_explain_button_gates_llm_call(monkeypatch):
-    from dashboard import cached as _cached
-
     monkeypatch.setattr(data, "load_watchlist", lambda: _ROWS)
     monkeypatch.setattr(cached, "watchlist_quotes", lambda tickers: {})
-    monkeypatch.setattr(cached, "institution_watch",
-                        lambda *a, **k: {"institutions": [], "comparison": {}, "analysis": {}})
-    monkeypatch.setattr(_cached, "institution_screener",
-                        lambda keys: {"new_buys": [], "increased": [], "decreased": []})
-    monkeypatch.setattr(_cached, "congress_top_traded", lambda days=90: {"bought": [], "sold": []})
 
     calls = []
-    monkeypatch.setattr(_cached, "institution_screen_explain",
+    monkeypatch.setattr(cached, "institution_screen_explain",
                         lambda screen, congress: calls.append(1) or
                         {"summary": "설명", "confidence": 0.5, "mode": "llm"})
 
     at = AppTest.from_string(_RUN_SCRIPT, default_timeout=30)
     at.run()
-    at.toggle(key="_watch_show_hub").set_value(True).run()
 
     assert calls == [], "버튼 안 눌렀는데 LLM 해설이 호출됨"
 
@@ -372,13 +331,12 @@ def test_folder_filter_shows_only_matching_rows(monkeypatch):
 
     at = AppTest.from_string(_RUN_SCRIPT, default_timeout=30)
     at.run()
-    assert len(at.dataframe[0].value) == 2
+    assert _tickers(_watch_list(at)) == ["PLTR", "NVDA"]
 
-    at.selectbox(key="_watchlist_folder_filter").set_value("반도체").run()
+    at.button_group(key="_watchlist_folder_filter").set_value("반도체").run()
 
     assert not at.exception, str(at.exception)
-    df = at.dataframe[0].value
-    assert list(df["티커"]) == ["PLTR"]
+    assert _tickers(_watch_list(at)) == ["PLTR"]
 
 
 def test_folder_move_button_calls_move_watchlist_folder(monkeypatch):
