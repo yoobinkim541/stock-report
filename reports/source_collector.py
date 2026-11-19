@@ -116,7 +116,8 @@ NEWS_RSS_FEEDS = (
     ("mk", "https://www.mk.co.kr/rss/30000001/", "매일경제"),
     ("hankyung", "https://www.hankyung.com/feed/finance", "한국경제"),
     ("yonhap", "https://www.yna.co.kr/rss/economy.xml", "연합뉴스"),
-    ("sec", "https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=8-K&company=&dateb=&owner=include&start=0&count=15&output=atom", "SEC 8-K"),
+    # SEC 는 count 를 10·20·…·100·500 으로만 받는다 (15 → 400 Bad Request, 2026-11-16 부터 수집 0)
+    ("sec", "https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=8-K&company=&dateb=&owner=include&start=0&count=20&output=atom", "SEC 8-K"),
 )
 # Official directory: https://kr.investing.com/webmaster-tools/rss
 # Separate provider budget: two additional feeds must not starve the existing RSS group.
