@@ -238,6 +238,43 @@ def test_token_refresh_lock_timeout_fails_closed(rec, monkeypatch, isolated_toke
     assert kiwoom_mock._get_token() is None
 
 
+def test_balance_retries_once_with_fresh_token_when_server_rejects_cached_token(rec, monkeypatch):
+    """실측(2026-11-19): 디스크 캐시 토큰이 만료 전인데 서버가 8005 로 거부하자
+    만료 시각까지 잔고 조회가 계속 실패했다. 거부되면 캐시를 버리고 1회 재발급해야 한다."""
+    import time
+
+    import safe_io
+    safe_io.atomic_write_json(kiwoom_mock._TOKEN_FILE, {"token": "revoked", "exp": time.time() + 3600})
+    orig = rec.post
+
+    def post(url, headers=None, **kw):
+        if url.endswith("/api/dostk/acnt") and headers["Authorization"] == "Bearer revoked":
+            rec.calls.append({"url": url, "headers": headers})
+            return SimpleNamespace(status_code=200, raise_for_status=lambda: None,
+                                   json=lambda: {"return_code": 3,
+                                                 "return_msg": "인증에 실패했습니다[8005:Token이 유효하지 않습니다]"})
+        return orig(url, headers=headers, **kw)
+
+    monkeypatch.setattr(kiwoom_mock.requests, "post", post)
+    bal = kiwoom_mock.get_balance()
+    assert bal["ok"] is True and "005930" in bal["positions"]
+    auths = [c["headers"].get("Authorization") for c in rec.calls if c["url"].endswith("/acnt")]
+    assert auths == ["Bearer revoked", "Bearer tok-123"]
+
+
+def test_token_rejection_retries_only_once(rec, monkeypatch):
+    def post(url, headers=None, **kw):
+        if url.endswith("/oauth2/token"):
+            return rec.__class__.post(rec, url, headers=headers, **kw)
+        rec.calls.append({"url": url, "headers": headers})
+        return SimpleNamespace(status_code=200, raise_for_status=lambda: None,
+                               json=lambda: {"return_code": 3, "return_msg": "[8005:Token이 유효하지 않습니다]"})
+
+    monkeypatch.setattr(kiwoom_mock.requests, "post", post)
+    assert kiwoom_mock.get_balance()["ok"] is False
+    assert sum(1 for c in rec.calls if c["url"].endswith("/acnt")) == 2
+
+
 # ── 4. is_enabled 게이팅 ──────────────────────────────────────────────────────
 def test_is_enabled(monkeypatch):
     monkeypatch.delenv("KIWOOM_MOCK_ENABLED", raising=False)

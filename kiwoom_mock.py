@@ -164,12 +164,46 @@ def _refresh_token(now: float) -> str | None:
 
 # ── 공통 POST ─────────────────────────────────────────────────────────────────
 
+def _token_rejected(res) -> bool:
+    """키움 '8005:Token이 유효하지 않습니다' — 인증 단계 거부라 주문은 접수되지 않았다."""
+    return (isinstance(res, dict) and res.get("return_code") not in (0, None)
+            and "8005" in str(res.get("return_msg") or ""))
+
+
+def _invalidate_token(tok: str) -> None:
+    """서버가 거부한 토큰을 메모리·디스크에서 버린다. 디스크가 이미 다른 프로세스의
+    새 토큰이면 그대로 둔다(재발급 경합으로 그 토큰까지 무효화하지 않게)."""
+    _token_cache.update(token=None, exp=0.0)
+    try:
+        with safe_io.file_write_lock(_TOKEN_FILE, timeout=20):
+            with open(_TOKEN_FILE, encoding="utf-8") as f:
+                on_disk = json.load(f).get("token")
+            if on_disk == tok:
+                os.remove(_TOKEN_FILE)
+    except FileNotFoundError:
+        pass
+    except Exception as exc:
+        logger.warning("거부된 모의 토큰 정리 실패: %s", exc)
+
+
 def _post(path: str, api_id: str, body: dict) -> dict | None:
-    tok = _get_token()
-    if not tok:
-        return None
     url = _MOCK_BASE + path
     _assert_mock_url(url)
+    # 토큰 거부(8005)는 1회만 새 토큰으로 재시도 — 서버 쪽에서 토큰이 무효화되면
+    # 디스크 캐시의 만료 시각까지 모든 크론·대시보드가 잔고 조회에 실패했다.
+    for _auth_try in range(2):
+        tok = _get_token()
+        if not tok:
+            return None
+        res = _post_once(url, api_id, body, tok)
+        if not _token_rejected(res) or _auth_try:
+            return res
+        logger.warning("모의 토큰 거부(8005) [%s] — 재발급 후 1회 재시도", api_id)
+        _invalidate_token(tok)
+    return None
+
+
+def _post_once(url: str, api_id: str, body: dict, tok: str) -> dict | None:
     headers = {
         "content-type": "application/json;charset=UTF-8",
         "Authorization": f"Bearer {tok}",
