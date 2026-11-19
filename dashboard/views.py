@@ -1016,32 +1016,71 @@ def tech_subsector(sector, industry) -> str | None:
     return _TECH_SUB.get(industry, "기타 기술")
 
 
+def market_overview() -> dict:
+    """홈 상세 시장 — 시장 지표·매크로 자산·S&P500 밸류·모으기 Phase 를 **병렬** 조회.
+
+    순차 대기 합(~2.5초 · 밸류 캐시 만료 시 ~9초)을 가장 느린 1개로 줄인다. 각 로더는
+    graceful 이고 yfinance≥1.0 의 download 는 호출별 컨텍스트라 스레드 동시 호출 안전.
+    반환 {indicators, macro, valuation, phase:{emoji,label,dd,mult}}. 표시·참고용.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    def phase():
+        plan = accumulation_plan()
+        return {k: plan.get(k) for k in ("emoji", "label", "dd", "mult") if k in plan}
+
+    jobs = {"indicators": (market_indicators, {"fear_greed": None, "indices": []}),
+            "macro": (macro_assets, []), "valuation": (sp500_valuation, {}),
+            "phase": (phase, {})}
+    out: dict = {}
+    with ThreadPoolExecutor(max_workers=len(jobs)) as ex:
+        futs = {k: ex.submit(fn) for k, (fn, _) in jobs.items()}
+        for k, fut in futs.items():
+            try:
+                out[k] = fut.result()
+            except Exception:
+                out[k] = jobs[k][1]
+    return out
+
+
 def market_indicators() -> dict:
     """홈 시장 지표 — 공포·탐욕지수 + S&P500·나스닥 일/주봉 RSI. 표시·graceful.
 
     반환 {fear_greed:{score,rating,prev_week,prev_month}|None,
           indices:[{ticker,name,price,chg,rsi_d,rsi_w}]}. 네트워크 실패는 None/빈으로 흡수.
+    F&G 와 yf 는 동시 조회 · 주봉은 2년 일봉을 주 단위(금 마감)로 리샘플(다운로드 1회).
     """
+    from concurrent.futures import ThreadPoolExecutor
+
     from dashboard import data
     out: dict = {"fear_greed": None, "indices": []}
-    try:
-        from providers import market_data
-        fg = market_data.fetch_fear_greed()
-        if isinstance(fg, dict) and fg.get("score") is not None:
-            out["fear_greed"] = {"score": float(fg["score"]), "rating": fg.get("rating"),
-                                 "prev_week": fg.get("prev_week"), "prev_month": fg.get("prev_month")}
-    except Exception:
-        pass
     specs = [("^GSPC", "S&P 500"), ("^IXIC", "나스닥")]
-    try:
+
+    def fear_greed():
+        from providers import market_data
+        return market_data.fetch_fear_greed()
+
+    def daily():
         import warnings
         warnings.filterwarnings("ignore")
         import yfinance as yf
-        tks = [s[0] for s in specs]
-        hd = yf.download(tks, period="4mo", progress=False, group_by="ticker", threads=True)
-        hw = yf.download(tks, period="2y", interval="1wk", progress=False, group_by="ticker", threads=True)
-    except Exception:
-        return out
+        return yf.download([s[0] for s in specs], period="2y", progress=False,
+                           group_by="ticker", threads=True)
+
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        f_fg, f_hd = ex.submit(fear_greed), ex.submit(daily)
+        try:
+            fg = f_fg.result()
+            if isinstance(fg, dict) and fg.get("score") is not None:
+                out["fear_greed"] = {"score": float(fg["score"]), "rating": fg.get("rating"),
+                                     "prev_week": fg.get("prev_week"),
+                                     "prev_month": fg.get("prev_month")}
+        except Exception:
+            pass
+        try:
+            hd = f_hd.result()
+        except Exception:
+            return out
     for tk, name in specs:
         row = {"ticker": tk, "name": name, "price": None, "chg": None, "rsi_d": None, "rsi_w": None}
         try:
@@ -1051,10 +1090,7 @@ def market_indicators() -> dict:
             if len(cd) >= 2 and cd.iloc[-2]:
                 row["price"] = float(cd.iloc[-1])
                 row["chg"] = round((cd.iloc[-1] / cd.iloc[-2] - 1) * 100, 2)
-        except Exception:
-            pass
-        try:
-            rw = data.rsi(hw[tk]["Close"].dropna())
+            rw = data.rsi(cd.resample("W-FRI").last().dropna())
             row["rsi_w"] = round(rw, 1) if rw is not None else None
         except Exception:
             pass
@@ -2279,10 +2315,12 @@ def income_summary(qqqi_shares: float = 0.0, qqqi_usd: float = 0.0) -> dict:
 
 
 def sp500_valuation() -> dict:
-    """S&P500 지수 밸류 (상위 100 시총가중 집계 — market_valuation). graceful {}."""
+    """S&P500 지수 밸류 (상위 100 시총가중 집계 — market_valuation). graceful {}.
+
+    만료 캐시는 즉시 표시하고 재집계(~7초)는 백그라운드 — 클릭 후 대기에서 제외."""
     try:
         from providers.market_valuation import sp500_valuation as _v
-        return _v() or {}
+        return _v(stale_ok=True) or {}
     except Exception:
         return {}
 

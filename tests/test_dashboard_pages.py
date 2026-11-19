@@ -94,7 +94,7 @@ cached.macro_corr = lambda t: [{"symbol": "^TNX", "label": "미 10년물", "note
 cached.llm_related = lambda t: ([{"ticker": "AMD", "relation": "경쟁사", "reason": "GPU"}], "cached")
 cached.ai_briefing = lambda: None
 cached.llm_related.clear = lambda: None
-cached.macro_assets = lambda: [
+_MACRO_STUB = [
     {"symbol": "KRW=X", "label": "달러/원 환율", "emoji": "\U0001f4b1", "unit": "₩",
      "ticker": "KRW=X", "price": 1505.05, "chg": -3.2, "pct": -0.21, "spark": [1500, 1503, 1505]},
     {"symbol": "GC=F", "label": "금", "emoji": "\U0001f947", "unit": "$/oz", "ticker": "GC=F",
@@ -200,13 +200,16 @@ cached.sp500_heatmap = lambda *a, **k: [
     {"ticker":"AAPL","name":"Apple","sector_kr":"기술","market_cap":4e12,"pct":1.96},
     {"ticker":"MSFT","name":"Microsoft","sector_kr":"기술","market_cap":2.8e12,"pct":3.17},
     {"ticker":"JPM","name":"JPMorgan","sector_kr":"금융","market_cap":9e11,"pct":-2.18}]
-cached.sp500_valuation = lambda: {"per": 27.3, "fper": 21.9, "eps_growth_pct": 24.7,
+_VALUATION_STUB = {"per": 27.3, "fper": 21.9, "eps_growth_pct": 24.7,
     "peg": 1.11, "n": 100, "cov_trailing_pct": 68.0, "cov_forward_pct": 66.0,
     "per_reported": 32.28, "per_pctile_all": 97.8, "per_pctile_20y": 91.7,
     "hist_n": 1867, "asof": "2026-07-08"}
-cached.market_indicators = lambda: {"fear_greed":{"score":32.0,"rating":"fear","prev_week":26.0,"prev_month":56.0},
+_INDICATORS_STUB = {"fear_greed":{"score":32.0,"rating":"fear","prev_week":26.0,"prev_month":56.0},
     "indices":[{"ticker":"^GSPC","name":"S&P 500","price":6000.0,"chg":1.2,"rsi_d":63.0,"rsi_w":81.0},
                {"ticker":"^IXIC","name":"나스닥","price":20000.0,"chg":0.8,"rsi_d":58.0,"rsi_w":75.0}]}
+cached.market_overview = lambda: {"indicators": _INDICATORS_STUB, "macro": _MACRO_STUB,
+    "valuation": _VALUATION_STUB,
+    "phase": {"emoji": "\U0001f7e2", "label": "정상", "dd": -5.0, "mult": 1.0}}
 cached.axes_gate = lambda: {
     "kr":{"available":True,"env_on":True,"asof":"2026-07-04 10:45","period":"2001~2026",
           "verdict":{"code":"OBSERVE","label":"\U0001f440 OBSERVE — OOS 순초과>0 이나 통계 관문 미달",

@@ -875,17 +875,63 @@ def test_views_market_indicators(monkeypatch):
     from providers import market_data
     monkeypatch.setattr(market_data, "fetch_fear_greed",
                         lambda: {"score": 31.9, "rating": "fear", "prev_week": 26.0, "prev_month": 56.5})
-    idx = pd.date_range("2025-01-01", periods=40)
+    idx = pd.date_range("2025-01-01", periods=200)
     cols = pd.MultiIndex.from_product([["^GSPC", "^IXIC"], ["Open", "High", "Low", "Close", "Volume"]])
     df = pd.DataFrame(1.0, index=idx, columns=cols)
-    df[("^GSPC", "Close")] = range(100, 140)
-    df[("^IXIC", "Close")] = range(200, 240)
+    df[("^GSPC", "Close")] = [100 + (i % 7) * (1 if i % 3 else -2) for i in range(200)]
+    df[("^IXIC", "Close")] = range(200, 400)
     monkeypatch.setattr(yf, "download", lambda *a, **k: df)
     mi = views.market_indicators()
     assert mi["fear_greed"]["score"] == 31.9 and mi["fear_greed"]["rating"] == "fear"
     names = {i["name"]: i for i in mi["indices"]}
     assert "S&P 500" in names and "나스닥" in names
     assert names["S&P 500"]["rsi_d"] is not None and names["S&P 500"]["price"] is not None
+    assert names["S&P 500"]["rsi_w"] is not None             # 2년 일봉 → 주봉 리샘플 (다운로드 1회)
+
+
+def test_views_market_overview_runs_loaders_concurrently(monkeypatch):
+    """홈 상세 시장 로더 4개는 동시에 돌아야 한다(순차면 Barrier 가 깨져 기본값으로 떨어짐)."""
+    import threading
+
+    from dashboard import views
+    barrier = threading.Barrier(4, timeout=5)
+
+    def loader(value):
+        def fn():
+            barrier.wait()
+            return value
+        return fn
+
+    monkeypatch.setattr(views, "market_indicators", loader({"fear_greed": {"score": 40.0}, "indices": []}))
+    monkeypatch.setattr(views, "macro_assets", loader([{"symbol": "GC=F"}]))
+    monkeypatch.setattr(views, "sp500_valuation", loader({"per": 25.0}))
+    monkeypatch.setattr(views, "accumulation_plan",
+                        loader({"emoji": "🟢", "label": "정상", "dd": -3.0, "mult": 1.5, "rows": [1]}))
+    out = views.market_overview()
+    assert out["indicators"]["fear_greed"]["score"] == 40.0
+    assert out["macro"] == [{"symbol": "GC=F"}] and out["valuation"] == {"per": 25.0}
+    assert out["phase"] == {"emoji": "🟢", "label": "정상", "dd": -3.0, "mult": 1.5}
+
+
+def test_sp500_valuation_stale_ok_returns_cache_and_refreshes_in_background(monkeypatch, tmp_path):
+    """만료 캐시 + stale_ok → 동기 재집계(~7초) 없이 캐시 반환, 재집계는 백그라운드로."""
+    import json
+    import os
+
+    from providers import market_valuation as mv
+    cache = tmp_path / "sp500_valuation.json"
+    cache.write_text(json.dumps({"per": 26.0, "per_reported": 30.0, "asof": "old"}))
+    old = cache.stat().st_mtime - mv.CACHE_TTL_S - 60
+    os.utime(cache, (old, old))
+    monkeypatch.setattr(mv, "CACHE", cache)
+    computed, refreshed = [], []
+    monkeypatch.setattr(mv, "_compute", lambda n: computed.append(n) or {"per": 27.0})
+    monkeypatch.setattr(mv, "_refresh_in_background", lambda n: refreshed.append(n))
+
+    assert mv.sp500_valuation(stale_ok=True)["asof"] == "old"
+    assert refreshed and not computed
+    assert mv.sp500_valuation() == {"per": 27.0}               # 크론 경로는 동기 재집계
+    assert computed
 
 
 def test_views_market_indicators_graceful(monkeypatch):

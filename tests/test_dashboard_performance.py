@@ -158,9 +158,7 @@ def test_home_first_paint_skips_heavy_market_loaders():
         """
 def _unexpected(*args, **kwargs):
     raise AssertionError("첫 렌더에서 상세 시장 loader 호출")
-cached.market_indicators = _unexpected
-cached.macro_assets = _unexpected
-cached.sp500_valuation = _unexpected
+cached.market_overview = _unexpected
 from dashboard.pages import home
 home.render()
 """
@@ -180,10 +178,8 @@ def _loader(kind, value):
     if not st.session_state.get("_home_market_details_loaded"):
         raise AssertionError("상세 버튼 전 loader 실행")
     return value
-cached.market_indicators = lambda: _loader("indicators", {"fear_greed": None, "indices": []})
-cached.macro_assets = lambda: _loader("macro", [])
-cached.sp500_valuation = lambda: _loader("valuation", {})
-cached.accumulation = lambda: {}
+cached.market_overview = lambda: _loader("overview", {"indicators": {"fear_greed": None, "indices": []},
+                                                      "macro": [], "valuation": {}, "phase": {}})
 cached.market_temp_history = lambda: []
 from dashboard.pages import home
 home.render()

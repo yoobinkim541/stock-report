@@ -9,12 +9,14 @@ trailing/forward PE 를 **시총가중 조화평균**으로 집계한다:
   지수 PER = Σ시총 / Σ(시총/PER) = Σ시총 / Σ이익   (조화평균 — 지수 PE 의 정의와 일치)
   EPS 성장률 = Σ이익_fwd / Σ이익_ttm − 1 · PEG = PER ÷ 성장률(%) (교과서식)
 
-상위 100 종목(지수 시총의 ~70%) 커버리지 — 정직 라벨 병기. 12h 디스크 캐시.
+상위 100 종목(지수 시총의 ~70%) 커버리지 — 정직 라벨 병기. 12h 디스크 캐시
+(`stale_ok=True` 호출은 만료 캐시를 즉시 돌려주고 백그라운드에서 재집계 — 대시보드용).
 순수 집계(aggregate_index_valuation)는 무네트워크 테스트.
 """
 from __future__ import annotations
 
 import json
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -23,6 +25,7 @@ from pathlib import Path
 CACHE = Path.home() / "reports" / "ml-cache" / "sp500_valuation.json"
 CACHE_TTL_S = 12 * 3600
 TOP_N = 100
+_REFRESH_LOCK = threading.Lock()                 # 백그라운드 재집계 1개만
 
 
 def aggregate_index_valuation(rows: list[dict]) -> dict:
@@ -137,18 +140,8 @@ def _fetch_rows(top_n: int = TOP_N) -> list[dict]:
         return list(ex.map(one, tks))
 
 
-def sp500_valuation(top_n: int = TOP_N) -> dict:
-    """지수 밸류 집계 — 12h 디스크 캐시. 실패/재료 부족 {} (graceful)."""
-    try:
-        if CACHE.exists() and time.time() - CACHE.stat().st_mtime < CACHE_TTL_S:
-            cached = json.loads(CACHE.read_text())
-            if "per_reported" not in cached:            # 구 캐시 self-heal — multpl 만 보강
-                cached.update(fetch_multpl_pe())
-                if "per_reported" in cached:
-                    CACHE.write_text(json.dumps(cached, ensure_ascii=False))
-            return cached
-    except Exception:
-        pass
+def _compute(top_n: int) -> dict:
+    """상위 N 종목 .info 집계(~7초) + multpl → 캐시 기록. 실패/재료 부족 {}."""
     try:
         out = aggregate_index_valuation(_fetch_rows(top_n))
         out.update(fetch_multpl_pe())
@@ -161,3 +154,40 @@ def sp500_valuation(top_n: int = TOP_N) -> dict:
         return out
     except Exception:
         return {}
+
+
+def _refresh_in_background(top_n: int) -> None:
+    if not _REFRESH_LOCK.acquire(blocking=False):
+        return                                   # 이미 재집계 중
+
+    def run():
+        try:
+            _compute(top_n)
+        finally:
+            _REFRESH_LOCK.release()
+
+    threading.Thread(target=run, name="sp500-valuation-refresh", daemon=True).start()
+
+
+def sp500_valuation(top_n: int = TOP_N, stale_ok: bool = False) -> dict:
+    """지수 밸류 집계 — 12h 디스크 캐시. 실패/재료 부족 {} (graceful).
+
+    stale_ok: 만료 캐시가 있으면 그대로 반환하고 재집계는 백그라운드로(장수 프로세스 전용 —
+    크론처럼 곧 종료하는 프로세스는 데몬 스레드가 끝나기 전에 죽으므로 기본 False).
+    """
+    cached = None
+    try:
+        if CACHE.exists():
+            cached = json.loads(CACHE.read_text())
+            if time.time() - CACHE.stat().st_mtime < CACHE_TTL_S:
+                if "per_reported" not in cached:        # 구 캐시 self-heal — multpl 만 보강
+                    cached.update(fetch_multpl_pe())
+                    if "per_reported" in cached:
+                        CACHE.write_text(json.dumps(cached, ensure_ascii=False))
+                return cached
+    except Exception:
+        cached = None
+    if stale_ok and cached:
+        _refresh_in_background(top_n)
+        return cached
+    return _compute(top_n)

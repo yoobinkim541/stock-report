@@ -161,16 +161,15 @@ def _market_detail_control() -> bool:
                      type="secondary", width="stretch",
                      help="이미 연 뒤에는 시장 지표·매크로 캐시를 비우고 다시 조회합니다"):
             if loaded:
-                for fn in (cached.market_indicators, cached.macro_assets, cached.sp500_valuation):
-                    clearer = getattr(fn, "clear", None)
-                    if callable(clearer):
-                        clearer()
+                clearer = getattr(cached.market_overview, "clear", None)
+                if callable(clearer):
+                    clearer()
             st.session_state["_home_market_details_loaded"] = True
             st.rerun()
             return True
     with right:
         if loaded:
-            st.caption("상세 시장 데이터 로드됨 · 15분/1시간 캐시 사용")
+            st.caption("상세 시장 데이터 로드됨 · 15분 캐시 사용")
         else:
             st.caption("핵심 화면을 먼저 표시했습니다 · 시장 지표·매크로·밸류는 요청 시 조회")
     return loaded
@@ -182,10 +181,11 @@ def _market_bar(load_details: bool = False):
     if not load_details:
         st.info("상세 시장 데이터는 **상세 시장 데이터 불러오기**를 눌렀을 때 조회됩니다.")
         return
-    mi = cached.market_indicators()
+    mo = cached.market_overview()
+    mi = mo.get("indicators") or {}
     fg = mi.get("fear_greed")
     idx = mi.get("indices") or []
-    v = cached.sp500_valuation()
+    v = mo.get("valuation") or {}
     cols = st.columns([1, 1, 1, 1])
     with cols[0]:
         if fg:
@@ -202,7 +202,7 @@ def _market_bar(load_details: bool = False):
                 st.caption("지수 데이터 없음")
     with cols[3]:
         # 🌡️ 시장 온도계 — 역발상 종합 (표시·참고 — 실행 규칙은 Phase DCA 배율)
-        plan = cached.accumulation() or {}
+        plan = mo.get("phase") or {}
         spx = next((x for x in idx if "S&P" in str(x.get("name", ""))),
                    idx[0] if idx else {})
         temp = data.market_temperature(
@@ -240,7 +240,7 @@ def _macro_row(load_details: bool = False):
     if not load_details:
         st.caption("상세 시장 데이터 로드 후 환율·금·비트코인·유가·금리 카드가 표시됩니다.")
         return
-    items = cached.macro_assets()
+    items = cached.market_overview().get("macro") or []
     if not items:
         st.caption("매크로 자산 데이터를 불러오지 못했습니다 (네트워크 일시 오류 — 새로고침).")
         return

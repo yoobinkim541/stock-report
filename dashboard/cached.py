@@ -400,10 +400,10 @@ def heatmap_status(kind="S&P 500"):
     return views.heatmap_status(kind)
 
 
-@st.cache_data(ttl=_TTL, show_spinner="시장 지표 불러오는 중…")
-def market_indicators():
-    """공포·탐욕지수 + S&P500·나스닥 일/주봉 RSI (15분 캐시)."""
-    return views.market_indicators()
+@st.cache_data(ttl=900, show_spinner="시장 데이터 불러오는 중…")
+def market_overview():
+    """홈 상세 시장 — 지표(F&G·RSI)·매크로 자산·S&P500 밸류·Phase 병렬 조회 (15분 캐시)."""
+    return views.market_overview()
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -450,15 +450,6 @@ def trendlines_for(t, tf, lines, ch_key):
 @st.cache_data(ttl=300, show_spinner=False)
 def market_tape(force_live=False, allow_live=True):
     return views.market_tape(force_live=force_live, allow_live=allow_live)
-
-
-@st.cache_data(ttl=900, show_spinner="매크로 자산 불러오는 중…")
-def macro_assets():
-    """환율·금·비트코인 등 매크로 자산 시세 + 30일 스파크라인 (15분 캐시).
-
-    5분 TTL 은 홈 재방문마다 yf 배치(8심볼) 블로킹을 유발 — 표시용이라 15분이면 충분.
-    """
-    return views.macro_assets()
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -540,11 +531,6 @@ def target_weights_map():
 @st.cache_data(ttl=3600, show_spinner=False)
 def income_summary(qqqi_shares=0.0, qqqi_usd=0.0):
     return views.income_summary(qqqi_shares, qqqi_usd)
-
-
-@st.cache_data(ttl=3600, show_spinner="S&P500 밸류 집계 중… (12h 캐시)")
-def sp500_valuation():
-    return views.sp500_valuation()
 
 
 @st.cache_data(ttl=60, show_spinner=False)
