@@ -244,11 +244,13 @@ def password_gate() -> bool:
         st.error(f"로그인 실패가 많아 잠시 막았습니다. {max(1, int(-(-wait // 60)))}분 뒤에 다시 시도하세요.")
         return False
 
-    pw = st.text_input("비밀번호", type="password", key="_pw")
+    slot = st.empty()                            # 로그인 성공 런에 입력칸이 본문 위에 남지 않게 비운다
+    pw = slot.text_input("비밀번호", type="password", key="_pw")
     if pw:
         if verify_password(pw, secret):
             _with_failures(lambda s: record_success(s, ip))
             st.session_state["_authed"] = True
+            slot.empty()
             # 서명 토큰 쿠키 발급 — 이후 네비게이션/리로드는 무입력 재인증
             try:
                 st.iframe(

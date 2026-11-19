@@ -737,7 +737,11 @@ _LIGHT_OVERRIDE = """
 [data-testid="stSidebar"] { background: #ffffff !important; }
 [data-testid="stMetric"], [data-testid="stExpander"] { background: #ffffff !important; }
 [data-testid="stMetricValue"] { color: #191f28 !important; }
-[data-testid="stDataFrame"], [data-testid="stTable"] { background: #ffffff; }
+/* st.dataframe 은 canvas(glide-grid) 라 config 테마(다크)로만 그려진다 — 캔버스·툴바를 반전하고
+   색상을 180° 되돌려 밝은 표로 만든다(빨강↑·파랑↓ 색상은 유지, 명도만 뒤집힘). */
+[data-testid="stDataFrame"] { background: #ffffff; }
+[data-testid="stDataFrame"] > div { filter: invert(1) hue-rotate(180deg) brightness(1.05); }
+[data-testid="stTable"] { background: #ffffff; }
 /* 드롭다운 글자 — baseweb 가 다크 config 색을 인라인으로 박는다 */
 [data-baseweb="select"] div, [data-baseweb="select"] input,
 [data-baseweb="select"] svg, [data-baseweb="input"] input,

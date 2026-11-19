@@ -20,7 +20,10 @@ from dashboard import auth, cached, theme
 
 st.set_page_config(page_title="퀀트 터미널", page_icon="📊", layout="wide")
 
-# 테마 모드 — 세션 없으면 쿠키(지난 방문 선택)에서 복원 (기본 다크). inject 전에 확정.
+# 테마 모드 — 세션 값 tn_light(위젯 키 아님)가 기준. 세션에 없을 때만 쿠키(지난 방문 선택)에서 복원.
+# 예전엔 토글 위젯 키가 곧 tn_light 였다. 토글이 등록되기 전에 끝난 런(예외·st.stop)이 있으면
+# Streamlit 이 위젯 상태를 지우면서 tn_light 도 사라지고, 다음 런이 접속 시점 쿠키 스냅샷
+# (st.context.cookies 는 웹소켓 접속 때 값)을 다시 읽어 방금 고른 모드를 되돌린 뒤 쿠키까지 덮었다.
 if "tn_light" not in st.session_state:
     try:
         st.session_state["tn_light"] = (st.context.cookies.get("tn_theme") == "light")
@@ -28,26 +31,6 @@ if "tn_light" not in st.session_state:
         st.session_state["tn_light"] = False
 theme.inject_global_css()   # 세션 tn_light 를 읽어 라이트/다크 표면 CSS 주입
 
-# st.dataframe 은 canvas(glide-grid) 라 CSS 로 못 칠함 — config 테마(다크)만 따라 라이트
-# 모드서 어둡게 남는다. pandas Styler 셀 배경은 canvas 에 렌더되므로(헤더 제외) 라이트
-# 모드일 때만 전 st.dataframe 을 밝은 셀 Styler 로 감싼다(monkeypatch — 21개 호출부 무수정,
-# column_config·on_select 호환 검증됨). 래퍼는 **호출 시점 모드를 확인**(토글 왕복 안전) ·
-# DataFrame 아닌 인자·Styler·다크 모드는 원본 그대로.
-if not getattr(st, "_tn_df_patched", False):
-    import pandas as _pd
-    _orig_dataframe = st.dataframe
-
-    def _themed_dataframe(data=None, *a, **k):
-        try:
-            if theme.is_light() and isinstance(data, _pd.DataFrame):
-                data = data.style.set_properties(
-                    **{"background-color": "#ffffff", "color": "#191f28"})
-        except Exception:
-            pass
-        return _orig_dataframe(data, *a, **k)
-
-    st.dataframe = _themed_dataframe
-    st._tn_df_patched = True
 # 테마 쿠키 + 재기동 워치독은 iframe 하나 — 매 rerun 마운트를 줄인다.
 st.iframe(
     "<script>parent.document.cookie='tn_theme="
@@ -56,7 +39,35 @@ st.iframe(
     + auth.reconnect_watchdog_html(),
     height=1)
 
+from dashboard.pages import ai_console, ai_wiki, chart_full, home, kr_etf, market, paper, portfolio, research, watchlist
+from dashboard.pages import ticker as ticker_pg
+
+_home_pg = st.Page(home.render, title="홈", icon="🏠", url_path="home", default=True)
+_portfolio_pg = st.Page(portfolio.render, title="포트폴리오", icon="💼", url_path="portfolio")
+_ticker_pg = st.Page(ticker_pg.render, title="종목 분석", icon="🔍", url_path="ticker")
+_kr_etf_pg = st.Page(kr_etf.render, title="국내 ETF", icon="🇰🇷", url_path="kr-etf")
+_market_pg = st.Page(market.render, title="시장·캘린더", icon="🗓️", url_path="market")
+_paper_pg = st.Page(paper.render, title="모의투자", icon="🧪", url_path="paper")
+_research_pg = st.Page(research.render, title="리서치", icon="🔬", url_path="research")
+_agent_pg = st.Page(ai_console.render, title="AI 콘솔", icon="🧠", url_path="agent")
+_chart_pg = st.Page(chart_full.render, title="차트 풀뷰", icon="🖥️", url_path="chart")
+_watchlist_pg = st.Page(watchlist.render, title="관심종목", icon="⭐", url_path="watchlist")
+
+# 홈 보유표 행 클릭 → 종목 분석 자동 이동용 (switch_page 는 StreamlitPage 객체 필요)
+st.session_state["_ticker_page"] = _ticker_pg
+st.session_state["_kr_etf_page"] = _kr_etf_pg
+st.session_state["_chart_page"] = _chart_pg          # ⛶ 전체화면 풀차트 왕복용
+st.session_state["_portfolio_page"] = _portfolio_pg  # 홈 → 포트폴리오 전체 보기 링크
+_wiki_pg = st.Page(ai_wiki.render, title="AI 위키", icon="🗂️", url_path="wiki")
+st.session_state["_wiki_page"] = _wiki_pg        # AI 콘솔 위키 카드 → 위키 페이지 이동용
+
+_pages = [_home_pg, _portfolio_pg, _watchlist_pg, _ticker_pg, _kr_etf_pg, _chart_pg,
+          _market_pg, _paper_pg, _research_pg, _agent_pg, _wiki_pg]
+
+# 로그인 화면도 st.navigation 을 한 번 부른다(내비 숨김). 재기동 직후 첫 세션은 st.navigation 이
+# 아직 돈 적 없어 pages/ 폴더를 옛 MPA v1 으로 보고 로그인 화면에 영문 파일명 내비를 띄웠다.
 if not auth.password_gate():
+    st.navigation(_pages, position="hidden")
     st.stop()
 
 # ── 사이드바: 단일 검색 셀렉트박스 (한글·영문·티커 타입어헤드) ────────────────
@@ -135,9 +146,13 @@ with st.sidebar:
         st.rerun()
     _lc, _tc = st.columns([1, 1.1], vertical_alignment="center")
     _lc.caption(f"⏱ {datetime.now().strftime('%m/%d %H:%M')} · 캐시 15~60분")
-    # ☀️/🌙 테마 토글 — key=tn_light 라 다음 런 최상단 inject 가 새 값을 읽음(쿠키 지속)
-    _tc.toggle("☀️ 라이트" if st.session_state.get("tn_light") else "🌙 다크",
-               key="tn_light", help="라이트/다크 모드 전환 (선택은 이 브라우저에 기억)")
+    # ☀️/🌙 테마 토글 — 위젯 값은 on_change 로 tn_light 에 옮긴다(다음 런 최상단 inject·쿠키가 읽음).
+    def _sync_theme():
+        st.session_state["tn_light"] = bool(st.session_state["_tn_light_toggle"])
+
+    _tc.toggle("☀️ 라이트" if st.session_state["tn_light"] else "🌙 다크",
+               value=st.session_state["tn_light"], key="_tn_light_toggle", on_change=_sync_theme,
+               help="라이트/다크 모드 전환 (선택은 이 브라우저에 기억)")
 
     # 보유 워치 — 미국북·국내북 평가액·수익률. 국내 코드는 클릭 가능한 .KS/.KQ.
     try:
@@ -177,30 +192,7 @@ with st.sidebar:
     else:
         st.caption("주식 모으기 계획은 버튼을 눌렀을 때 조회")
 
-from dashboard.pages import ai_console, ai_wiki, chart_full, home, kr_etf, market, paper, portfolio, research, watchlist
-from dashboard.pages import ticker as ticker_pg
-
-_home_pg = st.Page(home.render, title="홈", icon="🏠", url_path="home", default=True)
-_portfolio_pg = st.Page(portfolio.render, title="포트폴리오", icon="💼", url_path="portfolio")
-_ticker_pg = st.Page(ticker_pg.render, title="종목 분석", icon="🔍", url_path="ticker")
-_kr_etf_pg = st.Page(kr_etf.render, title="국내 ETF", icon="🇰🇷", url_path="kr-etf")
-_market_pg = st.Page(market.render, title="시장·캘린더", icon="🗓️", url_path="market")
-_paper_pg = st.Page(paper.render, title="모의투자", icon="🧪", url_path="paper")
-_research_pg = st.Page(research.render, title="리서치", icon="🔬", url_path="research")
-_agent_pg = st.Page(ai_console.render, title="AI 콘솔", icon="🧠", url_path="agent")
-_chart_pg = st.Page(chart_full.render, title="차트 풀뷰", icon="🖥️", url_path="chart")
-_watchlist_pg = st.Page(watchlist.render, title="관심종목", icon="⭐", url_path="watchlist")
-
-# 홈 보유표 행 클릭 → 종목 분석 자동 이동용 (switch_page 는 StreamlitPage 객체 필요)
-st.session_state["_ticker_page"] = _ticker_pg
-st.session_state["_kr_etf_page"] = _kr_etf_pg
-st.session_state["_chart_page"] = _chart_pg          # ⛶ 전체화면 풀차트 왕복용
-st.session_state["_portfolio_page"] = _portfolio_pg  # 홈 → 포트폴리오 전체 보기 링크
-_wiki_pg = st.Page(ai_wiki.render, title="AI 위키", icon="🗂️", url_path="wiki")
-st.session_state["_wiki_page"] = _wiki_pg        # AI 콘솔 위키 카드 → 위키 페이지 이동용
-
-nav = st.navigation([_home_pg, _portfolio_pg, _watchlist_pg, _ticker_pg, _kr_etf_pg, _chart_pg,
-                     _market_pg, _paper_pg, _research_pg, _agent_pg, _wiki_pg])
+nav = st.navigation(_pages)
 # 사이드바에서 종목을 새로 고르면 종목 분석 페이지로 이동 (홈 행클릭과 동일 UX)
 if st.session_state.pop("_nav_to_ticker", False):
     st.switch_page(_ticker_pg)
