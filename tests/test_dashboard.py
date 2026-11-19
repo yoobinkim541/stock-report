@@ -790,6 +790,33 @@ def test_views_screener_graceful(monkeypatch):
     assert out["rows"] == [] and "error" in out
 
 
+def test_views_screener_gated_model_explains_and_replaces_last_run(monkeypatch, tmp_path):
+    """게이트 미통과면 rank_today 가 빈 표 — 이유를 싣고 마지막 실행을 덮어 옛 랭킹이 다시 뜨지 않게."""
+    import json
+
+    import pandas as pd
+    from dashboard import views
+    from dashboard.pages import research
+    from ml import ranker
+
+    class _R:
+        oos_ic, oos_icir, oos_top_decile_ret, train_end_date = -0.01, -0.06, -0.01, "2025-04-14"
+
+    last = tmp_path / "screener_last.json"
+    last.write_text(json.dumps({"rows": [{"rank": 1, "ticker": "OLD"}], "asof": "old"}))
+    monkeypatch.setattr(views, "_screener_last_path", lambda: last)
+    monkeypatch.setattr(ranker, "rank_today", lambda mode="nasdaq100", top_n=20: pd.DataFrame(columns=["ticker"]))
+    monkeypatch.setattr(ranker, "load_ranker", lambda: _R())
+    monkeypatch.setattr(ranker, "ranker_gate", lambda res: {
+        "passed": False, "reasons": ["finite:mean_ic", "model_stale_or_unknown", "negative_or_missing_oos_ic"]})
+    out = views.screener(20)
+    assert out["rows"] == [] and out["gate_reasons"]
+    saved = json.loads(last.read_text())
+    assert saved["rows"] == [] and saved["gate_reasons"] == out["gate_reasons"]
+    msg = research.gate_message(out["gate_reasons"], "2025-04-14")
+    assert "검증 지표 누락 · 모델이 오래됨 · 검증 IC 가 0 이하" in msg and "2025-04-14" in msg
+
+
 def test_views_backtest_graceful(monkeypatch):
     from dashboard import views
     from ml import data_pipeline

@@ -290,7 +290,16 @@ def screener(top_n: int = 20) -> dict:
                     "train_end": getattr(res, "train_end_date", None),
                     "importance": dict(sorted(imp.items(), key=lambda x: -x[1])[:15])}
         out = {"rows": rows, "feats": feats, "meta": meta}
-        if rows:                                      # 마지막 실행 디스크 영속 (재방문 즉시 표시)
+        if not rows and res is not None:              # rank_today 는 게이트 미통과면 조용히 빈 표를 준다
+            try:
+                from ml.ranker import ranker_gate
+                gate = ranker_gate(res)
+                if not gate.get("passed"):
+                    out["gate_reasons"] = list(gate.get("reasons") or [])
+            except Exception:
+                pass
+        # 마지막 실행 디스크 영속 (재방문 즉시 표시) — 게이트 차단도 최신 결과로 남겨 옛 랭킹이 뜨지 않게
+        if rows or out.get("gate_reasons"):
             try:
                 import json
                 from datetime import datetime

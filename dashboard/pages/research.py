@@ -206,11 +206,35 @@ def _screener_section():
             })
         _screener_detail(event, rows, sc.get("feats") or {},
                          (sc.get("meta") or {}).get("importance") or {})
+    elif sc.get("gate_reasons"):
+        st.info(gate_message(sc["gate_reasons"], (sc.get("meta") or {}).get("train_end")))
     else:
         st.warning(ui_actions.user_message(sc.get("error"), "랭킹이 없습니다."))
     _pa = sc.get("prev_asof")
     st.caption("⚠️ 생존편향(⚠️) + 검증상 종목선택 무엣지 — 정보·표시용, 매매신호 아님 · "
                "행 클릭 = 상세" + (f" · 변동 기준 = 직전 실행 {_pa}" if _pa else ""))
+
+
+_GATE_REASON_LABELS = (
+    ("stale", "모델이 오래됨"),
+    ("oos_ic", "검증 IC 가 0 이하"),
+    ("oos_excess", "검증 초과수익 없음"),
+    ("purged_walk_forward", "워크포워드 검증 없음"),
+    ("finite:", "검증 지표 누락"),
+)
+
+
+def gate_message(reasons: list[str], train_end=None) -> str:
+    """ranker_gate 사유 코드 → 사용자 문장. 같은 뜻의 코드는 한 번만."""
+    labels: list[str] = []
+    for code in reasons:
+        label = next((lab for key, lab in _GATE_REASON_LABELS if key in str(code)), None)
+        if label and label not in labels:
+            labels.append(label)
+    why = " · ".join(labels) or "검증 기준 미달"
+    trained = f" (학습 {train_end})" if train_end else ""
+    return (f"모델이 검증 게이트를 통과하지 못해 랭킹을 내지 않습니다{trained} — {why}. "
+            "검증상 우위가 없는 모델로 종목을 줄 세우지 않기 위한 안전장치이며, 재학습이 통과하면 다시 표시됩니다.")
 
 
 def score_bounds(scores: pd.Series) -> tuple[float, float]:
