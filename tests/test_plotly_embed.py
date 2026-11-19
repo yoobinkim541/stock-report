@@ -26,7 +26,7 @@ def test_embed_html_contract():
     html = plotly_embed.pannable_chart_html(fig, hist, view_days=180)
     # 핵심 계약: relayout→y 자동맞춤·초기창·마커 클릭 상세·드로잉 도구·CDN 핀·fig 데이터
     for token in ("plotly_relayout", "function yFit", "plotly_click", "drawline",
-                  "cdn.plot.ly/plotly-", "candlestick", "eraseshape"):
+                  "cdn.plot.ly/plotly-", "candlestick", "bt-erase", "_activeShapeIndex"):
         assert token in html, f"누락: {token}"
     assert "const categoryX = true" in html
     assert "function rangeValueToMs" in html and "function curXRangeMs" in html

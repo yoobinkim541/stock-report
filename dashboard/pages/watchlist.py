@@ -196,7 +196,9 @@ def _fmt_price(ticker: str, q: dict | None) -> str:
     if not q or q.get("price") is None:
         return "—"
     price = float(q["price"])
-    if q.get("currency") == "KRW":
+    # 시세에 통화가 없으면(일부 출처·캐시) 상장 코드로 판정 — 005930·0167A0·.KS/.KQ 는 원
+    currency = q.get("currency") or ("KRW" if ticker_names.is_kr_listing(ticker) else "USD")
+    if currency == "KRW":
         return f"₩{price:,.0f}"
     return f"${price:,.2f}"
 

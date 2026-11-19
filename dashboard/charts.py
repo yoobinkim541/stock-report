@@ -327,6 +327,16 @@ def _trade_price(hist, trade: dict):
     return None
 
 
+def trade_marker_style(symbol: str, color: str) -> dict:
+    """매수·매도·알림 마커 공통 스타일 (charts·chart_renderer 두 렌더 경로 공용).
+
+    적립식 매수처럼 연속 체결이 많으면 13px+흰 테두리 삼각형이 최근 봉을 덮었다.
+    chart_renderer 는 이 함수를 부르는데 정의가 빠져 체결 마커가 있는 렌더가 AttributeError 로 죽었다.
+    """
+    return dict(symbol=symbol, size=9, color=color, opacity=0.85,
+                line=dict(color="rgba(255,255,255,0.6)", width=0.5))
+
+
 def _add_trade_markers(fig, hist, trades):
     hist = normalize_ohlc_frame(hist)
     if not trades:
@@ -381,8 +391,7 @@ def _add_trade_markers(fig, hist, trades):
             name=name,
             showlegend=False,
             customdata=custom,
-            marker=dict(symbol=symbol, size=13, color=color,
-                        line=dict(color="#ffffff", width=0.8)),
+            marker=trade_marker_style(symbol, color),
             hovertemplate=hovertemplate,
         ))
 
@@ -1316,7 +1325,7 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
     _add_trend_lines(fig, trend_lines or [])
     _add_top_indicators(fig, hist, supertrend=supertrend, envelope=envelope,
                         fractals=fractals, vol_profile=vol_profile, panes=panes)
-    _add_top_indicators2(fig, hist, emas=emas, psar=psar, donchian_on=donchian_on,
+    _add_top_indicators2(fig, hist, ticker=ticker, emas=emas, psar=psar, donchian_on=donchian_on,
                          vwap=vwap, avwap=avwap, view_days=view_days, panes=panes)
     _add_trade_markers(fig, hist, trades or [])
     _add_event_markers(fig, hist, events, panes)
@@ -1844,17 +1853,18 @@ def donchian(hist, n: int = 20):
     return up, lo, (up + lo) / 2
 
 
-def session_vwap(hist):
-    """세션(일자별 리셋) VWAP — 인트라데이 전용. Volume 없으면 None."""
+def session_vwap(hist, ticker: str = ""):
+    """세션 VWAP — 거래소 현지 날짜로 리셋(경보·스터디와 같은 계산). Volume 없으면 None.
+
+    hist.index.date 로 묶으면 UTC 저장 미국 봉이 뉴욕 20:00 에 끊겼다(같은 거래일이 두 세션)."""
     hist = normalize_ohlc_frame(hist)
     if "Volume" not in hist.columns:
         return None
-    tp = (hist["High"] + hist["Low"] + hist["Close"]) / 3
-    v = hist["Volume"].fillna(0)
-    day = hist.index.date
-    cum_tv = (tp * v).groupby(day).cumsum()
-    cum_v = v.groupby(day).cumsum().replace(0, float("nan"))
-    return cum_tv / cum_v
+    import ticker_names
+    from dashboard import chart_data_policy, chart_studies
+    market = "kr" if ticker_names.is_kr_listing(ticker) else "us"
+    zone = chart_studies._exchange_timezone(hist, None) or chart_data_policy.regular_session(market)[0]
+    return chart_studies.session_vwap(hist.assign(Volume=hist["Volume"].fillna(0)), zone)
 
 
 def anchored_vwap(hist, anchor=None):
@@ -1871,7 +1881,7 @@ def anchored_vwap(hist, anchor=None):
     return (tp * v).cumsum() / cum_v
 
 
-def _add_top_indicators2(fig, hist, *, emas=(), psar=False, donchian_on=False,
+def _add_top_indicators2(fig, hist, *, ticker="", emas=(), psar=False, donchian_on=False,
                          vwap=False, avwap=False, view_days=None, panes=1):
     """상단 지표 2차 오버레이 — price_chart 내부 전용."""
     go = _go()
@@ -1905,7 +1915,7 @@ def _add_top_indicators2(fig, hist, *, emas=(), psar=False, donchian_on=False,
                                  legendgroup="프라이스 채널(20)",
                                  line=dict(color="#8b93a7", width=0.7, dash="dot")), **kw)
     if vwap:
-        sv = session_vwap(hist)
+        sv = session_vwap(hist, ticker)
         if sv is not None:
             fig.add_trace(go.Scatter(x=hist.index, y=sv, name="VWAP(세션)",
                                      line=dict(color="#f59e0b", width=1.3)), **kw)

@@ -204,6 +204,7 @@ _TEMPLATE = r"""
   <button id="bt-sess" class="tbtn" title="최근 10세션 가격대별 거래량 (인트라데이 5분·1시간 전용)">🧱 세션VP</button>
   <span class="tsep"></span>
   <button id="bt-replay" class="tbtn" title="과거 시점으로 되감아 한 봉씩 재생 — 매매 연습 (미래 봉 가림)">⏪ 리플레이</button>
+  <button id="bt-erase" class="tbtn" title="그린 도형을 클릭해 선택한 뒤 누르기(또는 Delete 키) = 그 도형만 제거">⌫ 선택 삭제</button>
   <button id="bt-clear" class="tbtn" title="직접 그린 도형 전체 제거">🗑 지우기</button>
   <span id="tool-hint"></span>
   <span id="ohlcbar" style="margin-left:auto;font:11px 'JetBrains Mono', ui-monospace, monospace;
@@ -1784,6 +1785,36 @@ _TEMPLATE = r"""
     document.getElementById("detail").style.display = "none";
     if (replayCut !== null) replayApply();       // 리플레이 중이면 커튼은 유지 (일시 상태)
   };
+
+  // ⌫ 선택 삭제 — 모드바(eraseshape) 를 숨겨 개별 도형 지우개가 사라졌던 것을 대체.
+  // Plotly 는 클릭한 편집 가능 도형을 _activeShapeIndex 로 들고 있다. 서버 오버레이는 지우지 않는다.
+  function eraseActiveShape() {
+    const fl = gd._fullLayout || {};
+    const idx = fl._activeShapeIndex;
+    const shapes = (gd.layout.shapes || []).slice();
+    const hint = document.getElementById("tool-hint");
+    if (idx == null || idx < 0 || idx >= shapes.length) {
+      hint.textContent = "지울 도형을 먼저 클릭해 선택하세요";
+      return false;
+    }
+    const picked = JSON.stringify(shapes[idx]);
+    if (baseShapes.some((b) => JSON.stringify(b) === picked)) {
+      hint.textContent = "기본 표시선(평단·현재가 등)은 지울 수 없습니다";
+      return false;
+    }
+    shapes.splice(idx, 1);
+    fl._activeShapeIndex = null;
+    if (!reconcileHlineAnns(shapes)) applyDraw(shapes, curAnns());
+    hint.textContent = "";
+    return true;
+  }
+  document.getElementById("bt-erase").onclick = eraseActiveShape;
+  document.addEventListener("keydown", (ev) => {
+    if (ev.key !== "Delete" && ev.key !== "Backspace") return;
+    const t = ev.target;
+    if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+    if (eraseActiveShape()) ev.preventDefault();
+  });
 
   // ── ⏪ 바 리플레이 — 과거로 되감아 한 봉씩 재생 (매매 연습 · 미래 봉 커튼) ──
   // 커튼 = layer:"above" rect 가 컷 이후를 가림. y맞춤·콜아웃·데이터창은 replayCut 으로

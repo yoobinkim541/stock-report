@@ -257,7 +257,7 @@ def test_a_fix_exec_paper_rail_shows_awaiting_new_generation():
     row = html.split('class="tn-wl-chg"', 1)[1]
     assert "새 세대 대기" in row and "-40.00%" not in row
     assert "₩600만" in html
-    assert "세대 1 마감 NAV (2026-04-05)" in html and "전체 2세대 누적 -40.00%" in html
+    assert "세대 1 마감 순자산 (2026-04-05)" in html and "전체 2세대 누적 -40.00%" in html
 
 
 def test_a_exec_fix2_paper_rail_flags_balance_failure_after_last_valid_record():
