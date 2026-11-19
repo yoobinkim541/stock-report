@@ -905,8 +905,8 @@ def test_views_market_overview_runs_loaders_concurrently(monkeypatch):
     monkeypatch.setattr(views, "market_indicators", loader({"fear_greed": {"score": 40.0}, "indices": []}))
     monkeypatch.setattr(views, "macro_assets", loader([{"symbol": "GC=F"}]))
     monkeypatch.setattr(views, "sp500_valuation", loader({"per": 25.0}))
-    monkeypatch.setattr(views, "accumulation_plan",
-                        loader({"emoji": "🟢", "label": "정상", "dd": -3.0, "mult": 1.5, "rows": [1]}))
+    monkeypatch.setattr(views, "accumulation_phase",
+                        loader({"emoji": "🟢", "label": "정상", "dd": -3.0, "mult": 1.5}))
     out = views.market_overview()
     assert out["indicators"]["fear_greed"]["score"] == 40.0
     assert out["macro"] == [{"symbol": "GC=F"}] and out["valuation"] == {"per": 25.0}

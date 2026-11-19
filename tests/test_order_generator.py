@@ -67,3 +67,22 @@ def test_order_passes_drawdown_to_dca(monkeypatch):
 
     order_generator.generate()
     assert seen["dd"] == -60.0   # None 이면 낙폭 정지 우회(버그) → 실패
+
+
+def test_phase_summary_matches_build_without_price_fetch(monkeypatch):
+    """대시보드 온도계의 Phase·DCA 배율은 build() 와 같아야 하고, 종목 가격 조회는 하지 않는다."""
+    monkeypatch.setattr(order_generator, "fetch_qqq_data", lambda: {"drawdown_pct": -12.4})
+    monkeypatch.setattr(order_generator, "fetch_rsi", lambda ticker: 40.0)
+    monkeypatch.setattr(order_generator, "fetch_vix", lambda: 25.0)
+    monkeypatch.setattr(order_generator, "fetch_exchange_rate_close", lambda: 1450.0)
+    monkeypatch.setattr(order_generator, "classify_market", lambda qqq, rsi, vix: ("bear", 2))
+    monkeypatch.setattr(order_generator, "calculate_dca", lambda mt, pk, fx, drawdown_pct=None: {
+        "total_krw": 100000, "multiplier": 2.0, "by_ticker": {"MSFT": 100000}})
+    prices = []
+    monkeypatch.setattr(order_generator, "fetch_prices", lambda tickers: prices.append(tickers) or {"MSFT": 400.0})
+
+    summary = order_generator.phase_summary()
+    assert not prices
+    plan = order_generator.build()
+    assert summary == {k: plan[k] for k in ("market_type", "phase_key", "emoji", "label", "dd", "mult")}
+    assert summary["mult"] == 2.0 and summary["dd"] == -12.4 and summary["label"]

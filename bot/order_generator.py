@@ -131,13 +131,8 @@ def round_alloc_1000(by_ticker: dict) -> dict:
     return {t: n * 1000 for t, n in base.items() if n > 0}
 
 
-def build() -> dict:
-    """주식 모으기(소수점 DCA) 계획 — 구조화 산출 (봇 주문서·대시보드 사이드바 공용).
-
-    반환: {now, market_type, phase_key, emoji, label, dd, fx, total_krw, mult,
-           rows: [{ticker, krw_amt, qty|None, price, precision_warn}], total_usd,
-           precision_warns}. qty=None = 가격 조회 실패 행.
-    """
+def _phase_dca():
+    """시장 국면 + DCA 배율 계산 (가격 조회 전 단계) — build·phase_summary 공용."""
     qqq = fetch_qqq_data()
     rsi = fetch_rsi("QQQ")
     vix = fetch_vix()
@@ -147,13 +142,33 @@ def build() -> dict:
     # 낙폭 정지(BARBELL_LEV_HALT_DD) 가드가 발동하도록 drawdown_pct 전달 —
     # 없으면 leverage_dca_guard 가 낙폭 정지를 건너뛰어 극단 낙폭서도 5× 권고가 나감(감사 확정).
     dca = calculate_dca(market_type, phase_key, fx, drawdown_pct=qqq.get("drawdown_pct"))
+    phase_inf = BULL_PHASES[phase_key] if market_type == "bull" else BEAR_PHASES.get(phase_key, BEAR_PHASES[0])
+    return qqq, fx, market_type, phase_key, dca, phase_inf
+
+
+def phase_summary() -> dict:
+    """국면·DCA 배율만 {market_type, phase_key, emoji, label, dd, mult} — 종목 가격 조회 없음
+    (대시보드 시장 온도계용 · build() 와 같은 값)."""
+    qqq, _fx, market_type, phase_key, dca, phase_inf = _phase_dca()
+    return {"market_type": market_type, "phase_key": phase_key,
+            "emoji": phase_inf.get("emoji", ""), "label": phase_inf.get("label", ""),
+            "dd": qqq.get("drawdown_pct", 0), "mult": dca.get("multiplier")}
+
+
+def build() -> dict:
+    """주식 모으기(소수점 DCA) 계획 — 구조화 산출 (봇 주문서·대시보드 사이드바 공용).
+
+    반환: {now, market_type, phase_key, emoji, label, dd, fx, total_krw, mult,
+           rows: [{ticker, krw_amt, qty|None, price, precision_warn}], total_usd,
+           precision_warns}. qty=None = 가격 조회 실패 행.
+    """
+    qqq, fx, market_type, phase_key, dca, phase_inf = _phase_dca()
 
     # 키움 주식모으기 입력 단위(최소 1,000원·천원 단위)에 맞춰 재배분 — 합계 보존
     dca["by_ticker"] = round_alloc_1000(dca["by_ticker"])
     dca["total_krw"] = sum(dca["by_ticker"].values())
     tickers   = list(dca["by_ticker"].keys())
     prices    = fetch_prices(tickers)
-    phase_inf = BULL_PHASES[phase_key] if market_type == "bull" else BEAR_PHASES.get(phase_key, BEAR_PHASES[0])
 
     total_usd  = 0.0
     rows: list[dict] = []

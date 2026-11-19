@@ -1021,17 +1021,13 @@ def market_overview() -> dict:
 
     순차 대기 합(~2.5초 · 밸류 캐시 만료 시 ~9초)을 가장 느린 1개로 줄인다. 각 로더는
     graceful 이고 yfinance≥1.0 의 download 는 호출별 컨텍스트라 스레드 동시 호출 안전.
-    반환 {indicators, macro, valuation, phase:{emoji,label,dd,mult}}. 표시·참고용.
+    반환 {indicators, macro, valuation, phase:{market_type,phase_key,emoji,label,dd,mult}}.
     """
     from concurrent.futures import ThreadPoolExecutor
 
-    def phase():
-        plan = accumulation_plan()
-        return {k: plan.get(k) for k in ("emoji", "label", "dd", "mult") if k in plan}
-
     jobs = {"indicators": (market_indicators, {"fear_greed": None, "indices": []}),
             "macro": (macro_assets, []), "valuation": (sp500_valuation, {}),
-            "phase": (phase, {})}
+            "phase": (accumulation_phase, {})}
     out: dict = {}
     with ThreadPoolExecutor(max_workers=len(jobs)) as ex:
         futs = {k: ex.submit(fn) for k, (fn, _) in jobs.items()}
@@ -2253,6 +2249,15 @@ def accumulation_plan() -> dict:
     try:
         from bot import order_generator
         return order_generator.build() or {}
+    except Exception:
+        return {}
+
+
+def accumulation_phase() -> dict:
+    """모으기 국면·DCA 배율만 — order_generator.phase_summary (종목 가격 조회 생략). graceful {}."""
+    try:
+        from bot import order_generator
+        return order_generator.phase_summary() or {}
     except Exception:
         return {}
 
