@@ -700,6 +700,25 @@ def test_rss_items_from_xml_reads_rss_and_atom():
     assert filing[0]["url"].startswith("https://www.sec.gov/")
 
 
+def test_sec_items_from_efts_one_item_per_filing_with_archive_link():
+    """SEC 8-K 는 efts JSON — 같은 공시의 첨부 문서는 한 건으로, 링크는 EDGAR Archives 원문."""
+    def hit(doc, items):
+        return {"_id": f"0001628280-26-074973:{doc}", "_source": {
+            "adsh": "0001628280-26-074973", "ciks": ["0000010456"], "form": "8-K",
+            "display_names": ["BAXTER INTERNATIONAL INC  (BAX)  (CIK 0000010456)"],
+            "file_date": "2026-11-19", "file_description": "CURRENT REPORT", "items": items,
+            "biz_locations": ["Deerfield, IL"]}}
+    payload = json.dumps({"hits": {"hits": [hit("bax-20261119.htm", ["2.02", "9.01"]),
+                                            hit("ex99.htm", ["2.02", "9.01"])]}})
+    items = sc.sec_items_from_efts(payload)
+    assert len(items) == 1
+    assert items[0]["title"] == "BAXTER INTERNATIONAL INC (BAX) 8-K — 2.02 실적 발표"
+    assert items[0]["url"] == ("https://www.sec.gov/Archives/edgar/data/10456/"
+                               "000162828026074973/bax-20261119.htm")
+    assert items[0]["published_at"] == "2026-11-19T00:00:00-05:00"   # 접수일(ET) — 시각을 지어내지 않음
+    assert sc.sec_items_from_efts('{"hits": {"hits": []}}') == []
+
+
 def test_expected_sources_include_public_rss():
     sources = sc.expected_sources()
     assert "rss:fed" in sources and "rss:yonhap" in sources and "rss:sec" in sources

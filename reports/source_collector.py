@@ -116,8 +116,9 @@ NEWS_RSS_FEEDS = (
     ("mk", "https://www.mk.co.kr/rss/30000001/", "매일경제"),
     ("hankyung", "https://www.hankyung.com/feed/finance", "한국경제"),
     ("yonhap", "https://www.yna.co.kr/rss/economy.xml", "연합뉴스"),
-    # SEC 는 count 를 10·20·…·100·500 으로만 받는다 (15 → 400 Bad Request, 2026-11-16 부터 수집 0)
-    ("sec", "https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=8-K&company=&dateb=&owner=include&start=0&count=20&output=atom", "SEC 8-K"),
+    # SEC 8-K: browse-edgar Atom(cgi-bin)은 클라우드 IP(hermes)에서 응답 없이 묶인다(tarpit, 8초 타임아웃).
+    # 같은 SEC 의 EDGAR 전문검색 API(efts)는 열려 있어 최신 8-K 를 file_date 내림차순 JSON 으로 받는다.
+    ("sec", "https://efts.sec.gov/LATEST/search-index?forms=8-K", "SEC 8-K"),
 )
 # Official directory: https://kr.investing.com/webmaster-tools/rss
 # Separate provider budget: two additional feeds must not starve the existing RSS group.
@@ -674,7 +675,7 @@ def _extract_tickers(text: str, universe: Iterable[str] = PORTFOLIO_TICKERS) -> 
 # 본문에서 종목보다 다른 뜻(업종·지수·일반 약어)으로 더 자주 쓰이는 대문자 약어.
 # 회사 이름, `$IT`, `(IT US)` 표기로 나오면 그대로 잡힌다.
 _PROSE_ACRONYM_RE = re.compile(
-    r"(?<![A-Za-z0-9$])(?:IT|SW|ESS|MSCI|IR|MTD|IP|KEY|GE|MS|ON|ALL|NOW|ES|PM|HD|ICE|FAST|LOW|WELL|APP|DD|CME)"
+    r"(?<![A-Za-z0-9$])(?:IT|SW|ESS|MSCI|IR|MTD|IP|KEY|GE|MS|ON|ALL|NOW|ES|PM|HD|ICE|FAST|LOW|WELL|APP|DD|CME)"  # ticker-ok — 영단어 오인 방지
     r"(?![A-Za-z0-9])"
 )
 _INDEX_PROXIES = frozenset({"SPY", "QQQ", "IWM", "DIA"})
@@ -1110,6 +1111,63 @@ def rss_items_from_xml(xml_text: str, *, limit: int = 12) -> list[dict]:
     return items
 
 
+# 8-K 항목 번호 → 짧은 한국어 (자주 나오는 것만, 나머지는 번호 그대로)
+_SEC_8K_ITEMS = {
+    "1.01": "중요 계약 체결", "1.02": "중요 계약 해지", "2.01": "자산 인수·처분", "2.02": "실적 발표",
+    "2.03": "채무 발생", "2.05": "구조조정 비용", "2.06": "자산 손상", "3.01": "상장 유지 미달",
+    "3.02": "비등록 증권 발행", "4.01": "감사인 변경", "5.02": "임원 변동", "5.03": "정관 변경",
+    "5.07": "주총 표결", "7.01": "공정공시(Reg FD)", "8.01": "기타 중요 사건", "9.01": "재무제표·첨부",
+}
+
+
+def _sec_file_date(value) -> str:
+    """efts 는 접수 시각 없이 접수일(미 동부 날짜)만 준다 — 그 날 00:00 ET 로 둔다(UTC 자정으로 두면 KST 09:00 처럼 보였다)."""
+    try:
+        from zoneinfo import ZoneInfo
+        day = datetime.strptime(str(value or ""), "%Y-%m-%d")
+    except ValueError:
+        return str(value or "")
+    return day.replace(tzinfo=ZoneInfo("America/New_York")).isoformat()
+
+
+def sec_items_from_efts(json_text: str, *, limit: int = 12) -> list[dict]:
+    """EDGAR 전문검색(efts) 응답 → rss_items_from_xml 과 같은 {title, url, body, published_at}."""
+    hits = ((json.loads(json_text or "{}") or {}).get("hits") or {}).get("hits") or []
+    items: list[dict] = []
+    seen: set[str] = set()
+    for hit in hits:
+        src = hit.get("_source") or {}
+        adsh = str(src.get("adsh") or "")
+        if not adsh or adsh in seen:          # 같은 공시의 첨부 문서가 따로 잡힌다 — 공시당 1건
+            continue
+        seen.add(adsh)
+        name = " ".join(str((src.get("display_names") or [""])[0]).split())
+        name = re.sub(r"\s*\(CIK \d+\)$", "", name)
+        form = str(src.get("form") or "8-K")
+        codes = [str(code) for code in src.get("items") or []]
+        labels = [f"{code} {_SEC_8K_ITEMS[code]}" if code in _SEC_8K_ITEMS else code for code in codes]
+        _, _, filename = str(hit.get("_id") or "").partition(":")
+        cik = str((src.get("ciks") or [""])[0]).lstrip("0")
+        url = (f"https://www.sec.gov/Archives/edgar/data/{cik}/{adsh.replace('-', '')}/{filename}"
+               if cik and filename else
+               f"https://www.sec.gov/Archives/edgar/data/{cik}/{adsh.replace('-', '')}/")
+        main = [label for label in labels if not label.startswith("9.01")]
+        title = f"{name} {form}" + (f" — {', '.join(main)}" if main else "")
+        body = " · ".join(part for part in (
+            str(src.get("file_description") or "").strip(),
+            ", ".join(labels),
+            ", ".join(src.get("biz_locations") or []),
+        ) if part)
+        items.append({"title": title[:180], "url": url, "body": (body or title)[:1500],
+                      "published_at": _sec_file_date(src.get("file_date"))})
+        if len(items) >= limit:
+            break
+    return items
+
+
+_FEED_PARSERS = {"sec": sec_items_from_efts}
+
+
 def fetch_news_rss_events(feeds=NEWS_RSS_FEEDS) -> list[dict]:
     """공개 통신·공시 RSS. 피드 실패는 그 피드만 남기고 나머지는 반환한다."""
     events = []
@@ -1120,7 +1178,7 @@ def fetch_news_rss_events(feeds=NEWS_RSS_FEEDS) -> list[dict]:
             resp = _bounded_get(url, timeout=8, headers=PLAIN_HEADERS)
             payload = getattr(resp, "_content", None)
             xml_text = payload.decode("utf-8-sig", errors="replace") if isinstance(payload, bytes) else resp.text
-            items = rss_items_from_xml(xml_text)
+            items = _FEED_PARSERS.get(key, rss_items_from_xml)(xml_text)
         except Exception as exc:
             errors.append(f"{source} {type(exc).__name__}")
             _note_error(source, exc)
