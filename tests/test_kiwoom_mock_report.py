@@ -52,6 +52,21 @@ def test_build_report_shows_objective_metrics(patched):
     assert "근거: 기관 매집" in txt and "해석:" in txt            # 편입 사유/해석
 
 
+def test_build_report_shows_sweet_spot_basis_not_unused_rationale(patched, monkeypatch):
+    """스위트스팟 편입의 근거는 순위(selection_basis)다. 선정에 안 쓰인 재무·신호 문구를
+    근거처럼 보이면 안 된다(2026-11-19: 재무 37점(D) 종목이 '낮은 재무 점수' 근거로 표시됨)."""
+    basis = "스위트스팟 선정 · 공격(mom12·lowvol) 1위(0.79) · 방어(lowvol·hi52) 2위(0.69) · 목표 20%"
+    monkeypatch.setattr(rpt, "_recent_decisions", lambda since: (
+        [{"date": "2026-11-19", "side": "편입", "code": "086790", "qty": 7, "name": "하나금융지주",
+          "selection_basis": basis,
+          "rationale": {"one_line_reason": "재무 37점(D) · 일일 신호 긍정 · 낮은 재무 점수"}}], "2026-11-19"))
+
+    for txt in (rpt.build_report(), rpt.build_report(detail=True)):
+        assert f"근거: {basis}" in txt
+        assert "낮은 재무 점수" not in txt
+        assert "가격 축" in txt
+
+
 def test_build_report_excess_positive(patched):
     # nav 11M / inception 10M = +10%, KOSPI +6% → 초과 +4%p (헤드라인 KOSPI대비)
     txt = rpt.build_report(detail=True)

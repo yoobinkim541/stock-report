@@ -73,11 +73,17 @@ def _position_payload(code, p, total_value):
     }
 
 
+def _decision_reason(d: dict) -> str:
+    """결정의 실제 선정 근거. 스위트스팟 경로는 selection_basis(순위·목표 비중)가 근거이고,
+    rationale 의 _decision_v2 문구(재무·일일 신호)는 선정에 쓰이지 않은 참고값이다."""
+    return str(d.get("selection_basis") or (d.get("rationale") or {}).get("one_line_reason") or "")
+
+
 def _decision_payload(d):
     return {
         "side": d.get("side"),
         "code": d.get("code"),
-        "reason": (d.get("rationale") or {}).get("one_line_reason", ""),
+        "reason": _decision_reason(d),
     }
 
 
@@ -105,6 +111,12 @@ def _kr_label(code: str | None, name: str | None = None, ticker: str | None = No
 def _decision_interpretation(d: dict) -> str:
     """최근 결정 한 줄 해석. 원장 근거만 기반으로 보수적으로 요약."""
     side = d.get("side")
+    if str(d.get("selection_basis") or "").startswith("스위트스팟"):
+        if side == "편입":
+            return "가격 축(12개월 모멘텀·저변동·52주 고점) 순위로 선정 — 재무·일일 신호는 참고만"
+        if side == "퇴출":
+            return "가격 축 순위가 상위·유예 범위 밖으로 밀려 제외"
+        return "가격 축 순위·목표 비중 변화에 따른 조정"
     reason = str((d.get("rationale") or {}).get("one_line_reason") or "")
     if side == "편입":
         if "일일 신호 긍정" in reason:
@@ -379,7 +391,7 @@ def build_report(html: bool = False, detail: bool | None = None) -> str:
             qty = first.get("qty")
             qty_s = f" · {int(qty)}주" if isinstance(qty, (int, float)) and qty else ""
             more = f" 외 {len(recent) - 1}건" if len(recent) > 1 else ""
-            rr = (first.get("rationale") or {}).get("one_line_reason", "")
+            rr = _decision_reason(first)
             lines.append(fmt.sep("최근 결정"))
             lines.append(f"{first.get('side')} {_kr_label(code, first.get('name'), first.get('ticker'))}{qty_s}{more}")
             if rr:
@@ -462,7 +474,7 @@ def build_report(html: bool = False, detail: bool | None = None) -> str:
         lines.append(fmt.sep("최근 결정"))
         for d in recent:
             icon = "📥" if d.get("side") == "편입" else "📤"
-            rr = (d.get("rationale") or {}).get("one_line_reason", "")
+            rr = _decision_reason(d)
             code = d.get("code") or str(d.get("ticker", "")).replace(".KS", "").replace(".KQ", "")
             qty = d.get("qty")
             qty_s = f" · {int(qty)}주" if isinstance(qty, (int, float)) and qty else ""

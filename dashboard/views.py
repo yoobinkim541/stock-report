@@ -375,7 +375,8 @@ def join_decisions(decisions: list[dict], outcomes: list[dict]) -> list[dict]:
             "regime": d.get("regime"),
             "market": d.get("market"),
             "reason_codes": d.get("reason_codes") or d.get("momentum_reason_codes"),
-            "reason": (d.get("rationale") or {}).get("one_line_reason", ""),
+            # 실제 선정 근거 우선(스위트스팟 순위) — rationale 은 선정에 안 쓰인 _decision_v2 문구일 수 있음
+            "reason": d.get("selection_basis") or (d.get("rationale") or {}).get("one_line_reason", ""),
             "ok": d.get("ok"),
             "features": d.get("features") or {},   # 새 축(mom12·hi52·lowvol·pead·news) 가시화용
             "fwd_excess": o.get("fwd_excess"), "correct": correct,

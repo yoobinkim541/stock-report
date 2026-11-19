@@ -64,11 +64,16 @@ def _position_payload(sym, p, total_value):
     }
 
 
+def _decision_reason(d: dict) -> str:
+    """결정의 실제 선정 근거. 스위트스팟 경로는 selection_basis(추세·VIX·변동성 → 목표 비중)."""
+    return str(d.get("selection_basis") or (d.get("rationale") or {}).get("one_line_reason") or "")
+
+
 def _decision_payload(d):
     return {
         "side": d.get("side"),
         "ticker": d.get("ticker"),
-        "reason": (d.get("rationale") or {}).get("one_line_reason", ""),
+        "reason": _decision_reason(d),
         "policy_score": d.get("policy_score"),
     }
 
@@ -176,6 +181,10 @@ def _factor_level(value: float) -> str:
 
 
 def _decision_interpretation(d: dict) -> str:
+    if str(d.get("selection_basis") or "").startswith("스위트스팟"):
+        if d.get("side") == "퇴출":
+            return "스위트스팟 ETF 바구니 밖이라 전량 매도"
+        return "QQQ 추세·VIX 기간구조·QLD 변동성 규칙이 정한 ETF 목표 비중"
     reason = str((d.get("rationale") or {}).get("one_line_reason") or "")
     factors = _parse_decision_factors(reason)
     if factors:
@@ -486,7 +495,7 @@ def build_report(html: bool = False, detail: bool | None = None) -> str:
             first = recent[0]
             ticker = first.get("ticker") or first.get("code") or ""
             more = f" 외 {len(recent) - 1}건" if len(recent) > 1 else ""
-            rr = (first.get("rationale") or {}).get("one_line_reason", "")
+            rr = _decision_reason(first)
             lines.append(fmt.sep("최근 결정"))
             lines.append(f"{first.get('side')} {fmt.name(ticker, maxlen=16)}{more}")
             if rr:
@@ -602,7 +611,7 @@ def build_report(html: bool = False, detail: bool | None = None) -> str:
         lines.append(fmt.sep(f"최근 결정 ({last})"))
         for d in recent:
             icon = "📥" if d.get("side") == "편입" else "📤"
-            rr = (d.get("rationale") or {}).get("one_line_reason", "")
+            rr = _decision_reason(d)
             ticker = d.get("ticker") or d.get("code") or ""
             lines.append(f"{icon} {d.get('side')}  {fmt.name(ticker, maxlen=16)}")
             lines.append(f"근거: {rr or d.get('action') or '—'}")
