@@ -167,7 +167,8 @@ def _account_section(surface: str):
 
     # ── NAV 곡선 ─────────────────────────────────────────────────────────────
     series = d.get("nav_series") or []
-    if len(series) >= 2:
+    # 인셉션 기록과 당일 스냅샷이 같은 날짜면 x 축이 밀리초 눈금으로 찢어진다 — 날짜가 2개 이상일 때만 그린다
+    if len({str(p.get("date")) for p in series if p.get("nav") is not None}) >= 2:
         st.plotly_chart(charts.nav_curve(series, cur), width="stretch", config=_NOBAR)
     else:
         st.info("순자산 시계열이 아직 쌓이는 중입니다. 평일 마감 스냅샷마다 누적됩니다.")
