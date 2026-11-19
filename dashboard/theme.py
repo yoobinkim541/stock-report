@@ -116,8 +116,11 @@ def _hero_money(value, currency: str = "USD", *, signed: bool = False) -> str:
 def ticker_hero_html(symbol, name="", price=None, change=None, change_pct=None,
                      asof="", currency="USD") -> str:
     """원형 심볼 뱃지 + 큰 가격 + 색으로만 구분한 등락 (토스증권 종목 헤더)."""
-    up = (change_pct or 0) >= 0
-    col = UP if up else DOWN
+    pct = change_pct or 0
+    up = pct >= 0
+    # 반올림해 0.00% 인 등락은 보합 — "▼ -$0.00 0.00%" 처럼 방향을 지어내지 않는다
+    flat = change is not None and round(pct, 2) == 0 and round(change or 0, 2) == 0
+    col = "#8b95a1" if flat else (UP if up else DOWN)
     arrow = "▲" if up else "▼"
     badge = (symbol or "?").replace(".KS", "")[:4]
     code = str(currency or "USD")
@@ -125,8 +128,11 @@ def ticker_hero_html(symbol, name="", price=None, change=None, change_pct=None,
         code = "KRW"
     has = isinstance(price, (int, float))
     price_html = _hero_money(price, code) if has else "—"
-    delta = (f"{arrow} {_hero_money(change, code, signed=True)}  {_num(abs(change_pct))}%"
-             if has and change is not None else "—")
+    if has and change is not None:
+        delta = ("보합 0.00%" if flat else
+                 f"{arrow} {_hero_money(change, code, signed=True)}  {_num(abs(pct))}%")
+    else:
+        delta = "—"
     asof_html = f'<div class="tn-asof">{asof}</div>' if asof else ""
     cur_html = "" if code in _WON or code in _DOLLAR or code in {"₩", "%"} else (
         f'<span class="tn-cur">{code}</span>' if code else "")
@@ -234,8 +240,8 @@ def position_band_html(cells) -> str:
         f'<b style="font-size:1.02rem;color:{col or TEXT};font-family:{_NUM_FONT}">{val}</b></div>'
         for lab, val, col in cells)
     return (f'<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;'
-            f'padding:7px 10px;background:{PANEL};border:1px solid {BORDER};'
-            f'border-radius:10px">{items}</div>')
+            f'padding:9px 14px;background:{PANEL};border:none;'
+            f'border-radius:16px">{items}</div>')
 
 
 _FNG_ZONES = [(25, "#ef5350", "극공포"), (45, "#ff9800", "공포"),
@@ -294,7 +300,7 @@ def fng_gauge_html(score, prev_week=None) -> str:
         return ""
     col, lab = fng_label(s)
     trend = f' · 전주 {prev_week:.0f} {"▲" if s >= prev_week else "▼"}' if isinstance(prev_week, (int, float)) else ""
-    return f'''<div style="padding:10px 12px;background:{PANEL};border:1px solid {BORDER};border-radius:10px;min-height:340px;display:flex;flex-direction:column;">
+    return f'''<div style="padding:12px 14px;background:{PANEL};border:none;border-radius:20px;min-height:340px;display:flex;flex-direction:column;">
   <div style="color:{MUTED};font-size:0.82rem;text-align:center">😱 공포·탐욕 지수</div>
   <div style="flex:1;display:flex;flex-direction:column;justify-content:center">
     <div style="max-width:230px;margin:0 auto;width:100%">{_gauge_svg(s, 0, 100, _FNG_GAUGE, big=f"{s:.0f}", big_col=col, sub=lab)}</div>
@@ -331,7 +337,7 @@ def index_rsi_gauges_html(name, price=None, chg=None, rsi_d=None, rsi_w=None) ->
         return (f'<div style="flex:1;text-align:center"><div style="color:{MUTED};font-size:0.72rem">{lbl}</div>'
                 f'{_gauge_svg(val, 0, 100, _RSI_GAUGE, big=big, big_col=c, sub=_rsi_zone(v))}</div>')
 
-    return f'''<div style="padding:10px 12px;background:{PANEL};border:1px solid {BORDER};border-radius:10px;min-height:340px;display:flex;flex-direction:column;">
+    return f'''<div style="padding:12px 14px;background:{PANEL};border:none;border-radius:20px;min-height:340px;display:flex;flex-direction:column;">
   <div style="display:flex;justify-content:space-between;align-items:baseline">
     <b style="color:{TEXT}">{name}</b>
     <span style="font-family:{_NUM_FONT};color:{MUTED};font-size:0.82rem">{pxs} <span style="color:{ccol}">{chgs}</span></span></div>
@@ -389,10 +395,10 @@ def macro_cards_html(items: list[dict], cols: int = 4, link: bool = True) -> str
     return f'''<style>
 .tn-macro {{ display:grid; grid-template-columns:repeat({cols}, minmax(0, 1fr)); gap:8px; }}
 @media (max-width: 600px) {{ .tn-macro {{ grid-template-columns:repeat(2, minmax(0, 1fr)); }} }}
-.tn-macro .tn-macro-card {{ padding:12px 14px; background:{PANEL}; border:1px solid {BORDER};
+.tn-macro .tn-macro-card {{ padding:12px 14px; background:{PANEL}; border:none;
   border-radius:16px; display:flex; flex-direction:column; gap:2px;
-  text-decoration:none !important; color:inherit; transition:border-color .12s; }}
-a.tn-macro-card:hover {{ border-color:{BLUE}; }}
+  text-decoration:none !important; color:inherit; transition:background .12s; }}
+a.tn-macro-card:hover {{ background:{PANEL2}; }}
 </style><div class="tn-macro">{cards}</div>'''
 
 
@@ -691,7 +697,7 @@ def econ_calendar_html(events: list, start=None, weeks: int = 3) -> str:
         "<style>"
         ".ec-cal{display:grid;grid-template-columns:repeat(7,1fr);gap:4px;margin:4px 0 8px}"
         f".ec-head{{color:{MUTED};font-size:.72rem;text-align:center;padding:2px 0}}"
-        f".ec-cell{{background:{PANEL};border:1px solid {BORDER};border-radius:8px;"
+        f".ec-cell{{background:{PANEL};border:none;border-radius:10px;"
         "min-height:78px;padding:4px 6px;overflow:hidden}"
         f".ec-today{{border-color:{BLUE};box-shadow:inset 0 0 0 1px {BLUE}}}"
         f".ec-dim .ec-date{{color:{MUTED}}}"
@@ -739,7 +745,7 @@ _LIGHT_OVERRIDE = """
 .stApp p, .stApp li, .stApp label, .stMarkdown, [data-testid="stMarkdownContainer"],
 .stApp h1, .stApp h2, .stApp h3, .stApp h4, .stApp h5, [data-testid="stMetricLabel"] p { color: #191f28; }
 [data-testid="stCaptionContainer"], .stApp small { color: #6b7684; }
-.stCode, pre, code { background: #f2f4f6 !important; color: #191f28 !important; }
+.stCode, pre, pre code { background: #f2f4f6 !important; color: #191f28 !important; }
 [data-testid="stButtonGroup"] [data-testid$="Active"] { box-shadow: 0 1px 3px rgba(0,23,51,.08); }
 ::-webkit-scrollbar-thumb { background: #d1d6db; }
 ::-webkit-scrollbar-thumb:hover { background: #b0b8c1; }
@@ -836,6 +842,11 @@ h5 {{ font-size: 1rem !important; padding-top: .6rem !important; }}
 [data-testid="stCaptionContainer"] {{ color: {MUTED} !important; font-size: .8rem; line-height: 1.5; }}
 /* 해시·URL 같은 끊김 없는 긴 토큰이 컬럼 밖으로 넘쳐 옆 컬럼과 겹치지 않게 */
 [data-testid="stMarkdownContainer"], [data-testid="stCaptionContainer"] {{ overflow-wrap: anywhere; }}
+[data-testid="stMarkdownContainer"] a {{ text-decoration: none; font-weight: 500; }}
+[data-testid="stMarkdownContainer"] a:hover {{ text-decoration: underline; }}
+[data-testid="stMarkdownContainer"] :not(pre) > code {{
+  background: {PANEL2}; color: {MUTED}; border-radius: 6px; padding: 1px 6px; font-size: .78em;
+  font-family: {_NUM_FONT}; font-weight: 600; }}
 
 /* ── 카드: 테두리 없이 바탕 명도 차이 + 큰 라운드 ── */
 [data-testid="stMetric"] {{
@@ -872,7 +883,7 @@ hr {{ border-color: {BORDER} !important; margin: 1.6rem 0 !important; }}
   background: {PANEL2}; border-radius: 14px; padding: 4px; gap: 2px; width: fit-content; max-width: 100%; }}
 [data-testid="stButtonGroup"] [data-testid^="stBaseButton-segmented_control"] {{
   border: none !important; border-radius: 10px !important; background: transparent !important;
-  color: {MUTED} !important; font-weight: 600; min-height: 34px; padding: 4px 14px; }}
+  color: {MUTED} !important; font-weight: 600; min-height: 34px; padding: 4px 11px; }}
 [data-testid="stButtonGroup"] [data-testid="stBaseButton-segmented_controlActive"] {{
   background: {_CHIP} !important; color: {TEXT} !important; font-weight: 700; }}
 [data-testid="stButtonGroup"] [data-testid^="stBaseButton-pills"] {{
@@ -887,6 +898,7 @@ hr {{ border-color: {BORDER} !important; margin: 1.6rem 0 !important; }}
 [data-testid="stPopover"] > div > button {{
   border-radius: 14px !important; font-weight: 600; min-height: 42px;
   transition: background .12s, transform .06s; }}
+[data-testid="stPopover"] > div > button p {{ white-space: nowrap; }}
 [data-testid="stBaseButton-secondary"], [data-testid="stPopover"] > div > button,
 [data-testid="stDownloadButton"] button {{
   background: {PANEL2} !important; border: none !important; color: {TEXT} !important; }}
@@ -1224,14 +1236,14 @@ def etf_score_label(s):
 def etf_score_html(score, group_name: str = "", low_confidence: bool = False) -> str:
     """ETF 동종그룹 점수(1~100) 반원 게이지 — score None → 데이터 부족 안내."""
     if score is None:
-        return (f'<div style="padding:10px 12px;background:{PANEL};border:1px solid {BORDER};'
-                f'border-radius:10px;text-align:center;color:{MUTED}">'
+        return (f'<div style="padding:12px 14px;background:{PANEL};border:none;'
+                f'border-radius:20px;text-align:center;color:{MUTED}">'
                 f'점수 — <b>데이터 부족</b><br><span style="font-size:0.75rem">'
                 f'이력·지표가 모자라 산출 생략 (정직 표시)</span></div>')
     s = max(1.0, min(100.0, float(score)))
     lab = etf_score_label(s)
     conf = (f' · <span style="color:{RED}">표본 부족</span>' if low_confidence else "")
-    return f'''<div style="padding:8px 12px;background:{PANEL};border:1px solid {BORDER};border-radius:10px">
+    return f'''<div style="padding:10px 14px;background:{PANEL};border:none;border-radius:20px">
   <div style="color:{MUTED};font-size:0.82rem;text-align:center">🏆 ETF 점수 — {group_name or "동종그룹"}</div>
   <div style="max-width:210px;margin:0 auto">{_gauge_svg(s, 0, 100, _ETF_SCORE_ZONES, big=f"{s:.0f}", sub=lab)}</div>
   <div style="color:{MUTED};font-size:0.72rem;text-align:center;margin-top:-2px">동종그룹 백분위 가중합 1~100 · 표시·참고용{conf}</div>
@@ -1268,8 +1280,8 @@ def analysis_card_html(verdict: str, positives: list, risks: list,
     footer = (f'<div style="margin-top:10px;padding-top:9px;border-top:1px solid {BORDER}">'
               f'<span style="color:{MUTED};font-size:0.72rem;margin-right:6px">다음 확인</span>'
               f'{chips}</div>' if chips else "")
-    return f'''<div style="background:{PANEL};border:1px solid {BORDER};border-left:4px solid {col};
-  border-radius:12px;padding:14px 16px">
+    return f'''<div style="background:{PANEL};border:none;border-left:4px solid {col};
+  border-radius:20px;padding:16px 18px">
   <div style="display:flex;gap:22px;flex-wrap:wrap">
     <div style="flex:0 0 170px;min-width:150px;display:flex;flex-direction:column;justify-content:center">
       <div style="color:{MUTED};font-size:0.72rem;letter-spacing:0.06em">종합 판단</div>
@@ -1300,8 +1312,8 @@ def market_temp_html(score, sub: str = "", phase_line: str = "",
                      spark: list | None = None) -> str:
     """시장 온도계 카드 — 역발상 종합(−1 과열 ↔ +1 기회) + 이력 스파크. 표시·참고용."""
     if score is None:
-        return (f'<div style="padding:10px 12px;background:{PANEL};border:1px solid '
-                f'{BORDER};border-radius:10px;text-align:center;color:{MUTED}">'
+        return (f'<div style="padding:12px 14px;background:{PANEL};border:none;'
+                f'border-radius:20px;text-align:center;color:{MUTED}">'
                 f'🌡️ 시장 온도계 — 재료 부족</div>')
     inner = rating_gauge_html(score, sub=sub, title="🌡️ 시장 온도계 (역발상)",
                               end_labels=("과열", "기회"), zones=_TEMP_ZONES,
@@ -1314,8 +1326,8 @@ def market_temp_html(score, sub: str = "", phase_line: str = "",
               f'{len(spark)}일 · {arrow}</span></div>')
     tail = sp + (f'<div style="color:{MUTED};font-size:0.7rem;text-align:center;'
                  f'margin-top:4px">{phase_line}</div>' if phase_line else "")
-    return (f'<div style="padding:10px 12px;background:{PANEL};border:1px solid {BORDER};'
-            f'border-radius:10px;min-height:340px;display:flex;flex-direction:column;">'
+    return (f'<div style="padding:12px 14px;background:{PANEL};border:none;'
+            f'border-radius:20px;min-height:340px;display:flex;flex-direction:column;">'
             f'<div style="flex:1;display:flex;flex-direction:column;'
             f'justify-content:center">{inner}</div>{tail}</div>')
 
@@ -1344,7 +1356,7 @@ def valuation_strip_html(v: dict) -> str:
     g_col = GREEN if (g or 0) >= 0 else RED
     peg_col = GREEN if (peg or 9) < 1 else (AMBER if (peg or 9) < 2 else RED)
     return (f'<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:flex-start;'
-            f'background:{PANEL};border:1px solid {BORDER};border-radius:10px;'
+            f'background:{PANEL};border:none;border-radius:16px;'
             f'padding:9px 8px">'
             + cell("S&P500 PER (보고이익)", f"{per:.1f}" if per else "—", chip)
             + cell("선행 PER (컨센서스)", f"{v.get('fper'):.1f}" if v.get("fper") else "—")
