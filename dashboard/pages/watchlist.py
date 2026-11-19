@@ -465,7 +465,7 @@ def _my_stocks_section(my_tickers: tuple[str, ...], moves: dict, names: dict) ->
                 delta = f"최대 비중 {max(float(e.get('weight_pct') or 0) for e in hit):.1f}%"
             else:   # 평균은 소량 보유에서 크게 늘린 한 명에 끌려간다(MSFT +2199%) — 중앙값
                 chg = [e["shares_change_pct"] for e in hit if e.get("shares_change_pct") is not None]
-                delta = f"주식 수 중앙값 {statistics.median(chg) * 100:+.0f}%" if chg else ""
+                delta = f"주식 {statistics.median(chg) * 100:+.0f}%" if chg else ""
             title = ", ".join(f"{e.get('short_name')} {e['shares_change_pct'] * 100:+.0f}%"
                               for e in hit if e.get("shares_change_pct") is not None)
             rows.append({"ticker": t, "name": name, "tags": _who(hit), "value": f"{len(hit)}명",
@@ -477,8 +477,9 @@ def _my_stocks_section(my_tickers: tuple[str, ...], moves: dict, names: dict) ->
         if i % 2 == 0:
             grid = st.columns(2)
         with grid[i % 2]:
+            unit = "" if action in ("new", "exited") else " · 주식 수 변화 중앙값"
             theme.render(theme.stock_list_html(rows, title=_ACTION_LABELS[action],
-                                               meta=f"{len(rows)}종목", empty="없음"))
+                                               meta=f"{len(rows)}종목{unit}", empty="없음"))
     st.caption("13F 는 분기말 보유를 45일 안에 신고하는 지연 자료 · 주식 수 ±5% 이상 변화만 매매로 봄 "
                "· 정보·표시용, 매매 신호 아님")
 
