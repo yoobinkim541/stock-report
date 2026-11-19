@@ -31,6 +31,8 @@ def _llm_tag(llm: dict | None) -> str:
 def _news_line(item: dict) -> str:
     title = str(item.get("title") or "")
     title = title.replace("[", "［").replace("]", "］").replace("*", "∗").replace("_", "＿")
+    # `$` 두 개가 한 줄에 있으면 st.markdown 이 그 사이를 LaTeX 수식으로 렌더한다 ($500 billion … `$NVDA`).
+    title = title.replace("$", r"\$")
     head = f"{_score_emoji(int(item.get('score') or 0))} **{item.get('score', 0)}**"
     url = str(item.get("url") or "").replace(")", "%29").replace("(", "%28")
     body = f"[{title}]({url})" if url else title
@@ -116,14 +118,22 @@ def _wsb_card(hours: int):
 def _news_section():
     st.subheader("🗞️ 수집 뉴스 — 출처별 · 중요도순")
     _health_banner()
-    hours = st.radio("수집 범위", [24, 48, 72], index=1, horizontal=True,
-                     format_func=lambda h: f"최근 {h}시간", key="news_hours",
-                     label_visibility="collapsed")
-    _wsb_card(hours)
+    ticker = st.session_state.get("ticker", "MSFT")
+    c_hours, c_only = st.columns([3, 2], vertical_alignment="center")
+    hours = c_hours.radio("수집 범위", [24, 48, 72], index=1, horizontal=True,
+                          format_func=lambda h: f"최근 {h}시간", key="news_hours",
+                          label_visibility="collapsed")
+    ticker_only = c_only.toggle(f"{ticker_names.label(ticker)} 뉴스만", key="news_ticker_only",
+                                help="사이드바에서 고른 종목이 언급된 기사만 모아 봅니다.")
+    if not ticker_only:
+        _wsb_card(hours)
     nd = cached.collected_news(hours)
     groups = (nd or {}).get("groups") or {}
     if not groups:
         st.info("수집 뉴스가 없습니다. 뉴스 수집이 비어 있거나 멈춰 있습니다.")
+        return
+    if ticker_only:
+        _ticker_news(groups, ticker)
         return
 
     keys = [k for k in views.NEWS_SOURCE_ORDER if k in groups] \
@@ -145,19 +155,20 @@ def _news_section():
                 st.caption(f"…외 {len(items) - 50}건 (상위 50 표시)")
 
 
-def _ticker_news(ticker: str) -> None:
-    st.subheader(f"뉴스 · {ticker_names.label(ticker)}")
-    hours = int(st.session_state.get("news_hours") or 48)
+def ticker_news_items(groups: dict, ticker: str) -> list[dict]:
+    """모든 출처에서 ticker 가 언급된 기사 — 점수·최신순. 주식 클래스(BRK.A/BRK.B)는 구분한다."""
     from providers.news_labels import _ticker_base
     base = _ticker_base(ticker)
-    nd = cached.collected_news(hours)
-    items = []
-    for rows in ((nd or {}).get("groups") or {}).values():
-        for it in rows:
-            bases = {_ticker_base(t) for t in (it.get("tickers") or [])}
-            if base and base in bases:
-                items.append(it)
+    items = [
+        it for rows in groups.values() for it in rows
+        if base and base in {_ticker_base(t) for t in (it.get("tickers") or [])}
+    ]
     items.sort(key=lambda x: (int(x.get("score") or 0), str(x.get("published_at") or "")), reverse=True)
+    return items
+
+
+def _ticker_news(groups: dict, ticker: str) -> None:
+    items = ticker_news_items(groups, ticker)
     if not items:
         st.caption("이 종목 관련 수집 뉴스 없음")
         return
@@ -165,7 +176,7 @@ def _ticker_news(ticker: str) -> None:
     others = [s for s in ui_actions.mentioned_tickers(items[:20]) if s != ticker]
     if others:
         st.caption("같은 기사에 함께 나온 종목")
-        ui_actions.render_ticker_jumps(others, key_prefix=f"mkt_for_{base}")
+        ui_actions.render_ticker_jumps(others, key_prefix="mkt_news_ticker")
 
 
 def render():
@@ -173,5 +184,3 @@ def render():
     _calendar_section()
     st.divider()
     _news_section()
-    st.divider()
-    _ticker_news(st.session_state.get("ticker", "MSFT"))

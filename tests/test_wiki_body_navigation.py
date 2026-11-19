@@ -15,7 +15,7 @@ def test_body_transform_resolves_only_known_ids_and_unique_legacy_titles():
     markdown, references = wiki_browser.transform_wiki_body(body, pages)
 
     assert "Readable" in markdown
-    assert "[[missing-id|Missing]]" in markdown
+    assert "Missing" in markdown and "missing-id" not in markdown  # 목록에 없는 문서: 해시 대신 제목만
     assert "[[Repeated]]" in markdown
     assert "https://example.com" in markdown
     assert [(page["id"], label) for page, label in references] == [

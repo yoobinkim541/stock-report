@@ -50,7 +50,6 @@ finally:
     at.run()
     assert not at.exception, str(at.exception)
     body = " ".join(str(m.value) for m in at.markdown) + " ".join(str(c.value) for c in at.caption)
-    assert "AI 위키" in body
     assert "탐색기" in body  # Obsidian 식 좌측 파일 트리 패널 헤더
     assert "문서 읽기" in body
     assert "관련 문서" in body

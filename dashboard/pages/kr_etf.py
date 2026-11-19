@@ -60,7 +60,6 @@ def render():
         st.session_state["ticker"] = picked
     st.session_state["_kr_etf_applied"] = picked
     ticker = picked
-    st.markdown(f"**{ticker_names.label(ticker, allow_net=False)}**")
 
     etf = cached.etf(ticker) or {}
     if not etf.get("is_etf"):
@@ -80,5 +79,4 @@ def render():
             ui_actions.open_ticker(ticker, toast=f"종목 분석 → {ticker}")
         return
 
-    st.caption("가격·괴리·보수·구성은 아래 한 화면에서 봅니다.")
     ticker_page._etf_sections(ticker, etf, etf.get("price"))

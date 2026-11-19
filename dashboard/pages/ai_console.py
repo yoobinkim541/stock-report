@@ -16,6 +16,7 @@ import ticker_names
 from agent_console import agent, context, storage
 from agent_console import portfolio_matrix_dsl
 from dashboard import cached, chat_feedback, chat_references, data, strategy_studio, ui_actions, wiki_browser
+from dashboard.pages import ai_wiki
 
 
 _SURFACES = {
@@ -25,7 +26,7 @@ _SURFACES = {
     "paper": "모의투자",
     "lab": "전략랩",
 }
-_CONSOLE_SECTIONS = ("대화", "시장 기억", "AI 위키", "전략 캔버스", "로컬 커넥터")
+_CONSOLE_SECTIONS = ("대화", "시장 기억", "전략 캔버스", "로컬 커넥터")
 _AUTO_CHAT = "auto"
 _PIN_AUTO = "자동"
 _AGENT_PROGRESS_LABELS = (
@@ -116,8 +117,6 @@ def _render_console_section(section: str, surface: str, pack: dict) -> None:
     """Render only the selected section; Streamlit tabs eagerly run every body."""
     if section == "시장 기억":
         _memory_tab(surface)
-    elif section == "AI 위키":
-        _wiki_tab(surface, pack)
     elif section == "전략 캔버스":
         _lab_tab(surface, pack)
     elif section == "로컬 커넥터":
@@ -486,17 +485,8 @@ def _answer_and_append(question: str, surface: str, pack: dict | None, chat_key:
 
 
 def _open_wiki_reference(page_id: str | None) -> None:
-    page_id = str(page_id or "").strip()
-    if page_id:
-        st.session_state["agent_wiki_selected_page_id"] = page_id
-        st.session_state["wiki_selected_page_id"] = page_id
-        st.session_state.pop("wiki_page_picker", None)
-    wiki_page = st.session_state.get("_wiki_page")
-    if wiki_page is not None:
-        st.switch_page(wiki_page)
-        return
-    st.session_state["_ai_console_section"] = "AI 위키"
-    st.rerun()
+    ai_wiki.open_document(str(page_id or "").strip())
+    st.switch_page(st.session_state["_wiki_page"])
 
 
 def _render_reference_panel(references: dict, key_prefix: str) -> None:
@@ -713,52 +703,6 @@ def _memory_detail(event, rows):
         f"<div>{body_html}</div>{link_html}</div>",
         unsafe_allow_html=True,
     )
-
-
-def _wiki_tab(surface: str, pack: dict):
-    _wiki_pipeline_health_panel()
-    st.divider()
-    return wiki_browser.render_wiki_tab(surface, pack)
-
-
-def _wiki_pipeline_health_panel():
-    health = cached.wiki_pipeline_health()
-    source_section = health.get("source_health") or {}
-    wiki_section = health.get("wiki_health") or {}
-    curation_section = health.get("curation_health") or {}
-    overall = source_section.get("overall") or {}
-
-    st.markdown("##### 파이프라인 헬스")
-    if health.get("error"):
-        st.warning(ui_actions.user_message(health.get("error"), "헬스 리포트를 불러오지 못했습니다."))
-        return
-
-    cols = st.columns(5)
-    cols[0].metric("소스", f"{overall.get('healthy_sources', 0)}/{overall.get('expected_sources', 0)}")
-    gap_names = overall.get("gap_source_names") or []
-    cols[1].metric(
-        "소스 공백·차단",
-        f"{overall.get('gap_sources', overall.get('stale_sources', 0))}",
-        help=("수집이 멈춘 소스: " + ", ".join(gap_names)) if gap_names else "수집이 멈춘 소스 없음",
-    )
-    cols[2].metric("출처 확인", f"{wiki_section.get('source_backed_count', 0)}")
-    cols[3].metric("미검증", f"{wiki_section.get('unverified_count', 0)}")
-    cols[4].metric("미연결 요약", f"{curation_section.get('source_digest_unlinked_count', 0)}")
-
-    st.caption(
-        f"오래된 문서 {wiki_section.get('stale_count', 0)} · "
-        f"미사용 {wiki_section.get('unused_count', 0)} · "
-        f"열린 질문 {wiki_section.get('open_question_count', 0)}"
-    )
-    recs = health.get("recommendations") or []
-    if recs:
-        st.markdown("**권장 액션**")
-        for rec in recs[:3]:
-            st.markdown(
-                f"- [{_esc(rec.get('category', '기타'))}] {_esc(rec.get('title', '—'))} — {_esc(rec.get('detail', '—'))}"
-            )
-    else:
-        st.caption("즉시 조치가 필요한 항목이 없습니다.")
 
 
 def _lab_tab(surface: str, pack: dict):

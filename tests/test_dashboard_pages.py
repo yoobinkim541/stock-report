@@ -316,28 +316,6 @@ def test_page_renders_without_exception(mod, call):
     assert not at.exception, f"{mod}: {at.exception}"
 
 
-def test_ai_wiki_page_has_no_dead_save_trigger_button(monkeypatch, tmp_path):
-    """'현재 편집값으로 저장' 버튼은 session_state["wiki_save_trigger"] 만 세팅하고
-    아무도 그 키를 읽지 않아 클릭해도 아무 일도 안 일어나던 죽은 버튼(2026-08-26 감사).
-    폼 안의 '위키 저장' 버튼이 실제 저장 경로이므로 죽은 버튼은 제거했다."""
-    monkeypatch.setenv("AGENT_CONSOLE_SHARED_MEMORY_DIR", str(tmp_path / "shared-memory"))
-
-    from agent_console import wiki
-    wiki.upsert_page({
-        "title": "스모크용 페이지", "summary": "요약", "body": "본문",
-        "surface": "market", "kind": "note", "status": "draft", "source_refs": [],
-    })
-
-    at = AppTest.from_string(_script("from dashboard.pages import ai_wiki", "ai_wiki.render()"),
-                             default_timeout=30)
-    at.run()
-
-    assert not at.exception
-    labels = [b.label for b in at.button]
-    assert "현재 편집값으로 저장" not in labels
-    assert "삭제" in labels
-
-
 def test_ai_console_strategy_canvas_allocation_normalize():
     from dashboard.pages import ai_console
 
@@ -381,7 +359,6 @@ def test_ai_console_renders_only_selected_section(monkeypatch):
     calls = []
     monkeypatch.setattr(ai_console, "_chat_tab", lambda surface, pack: calls.append("chat"))
     monkeypatch.setattr(ai_console, "_memory_tab", lambda surface: calls.append("memory"))
-    monkeypatch.setattr(ai_console, "_wiki_tab", lambda surface, pack: calls.append("wiki"))
     monkeypatch.setattr(ai_console, "_lab_tab", lambda surface, pack: calls.append("lab"))
     monkeypatch.setattr(ai_console, "_connectors_tab", lambda: calls.append("connectors"))
 
@@ -458,14 +435,14 @@ def test_ai_console_context_glance_items_are_compact():
     assert [item["label"] for item in items] == ["최근 이벤트", "누적 기억", "모델 파일", "최신 리포트"]
 
 
-def test_ai_console_does_not_build_context_pack_for_wiki(monkeypatch):
+def test_ai_console_does_not_build_context_pack_for_memory(monkeypatch):
     from dashboard.pages import ai_console
 
     captured = {}
     monkeypatch.setattr(ai_console, "_current_surface", lambda: "market")
-    monkeypatch.setattr(ai_console, "_console_section_control", lambda: "AI 위키")
-    monkeypatch.setattr(ai_console, "_safe_context", lambda *_args: (_ for _ in ()).throw(AssertionError("wiki does not need context pack")))
-    monkeypatch.setattr(ai_console, "_context_glance", lambda *_args: (_ for _ in ()).throw(AssertionError("wiki does not need context glance")))
+    monkeypatch.setattr(ai_console, "_console_section_control", lambda: "시장 기억")
+    monkeypatch.setattr(ai_console, "_safe_context", lambda *_args: (_ for _ in ()).throw(AssertionError("memory does not need context pack")))
+    monkeypatch.setattr(ai_console, "_context_glance", lambda *_args: (_ for _ in ()).throw(AssertionError("memory does not need context glance")))
     monkeypatch.setattr(
         ai_console,
         "_render_console_section",
@@ -474,7 +451,7 @@ def test_ai_console_does_not_build_context_pack_for_wiki(monkeypatch):
 
     ai_console.render()
 
-    assert captured == {"section": "AI 위키", "surface": "market", "pack": {}}
+    assert captured == {"section": "시장 기억", "surface": "market", "pack": {}}
 
 
 def test_ticker_analysis_context_collects_kr_deep_signals(monkeypatch):
@@ -870,6 +847,15 @@ def test_research_screener_gated_no_autocompute():
     assert not at.exception
     assert any("실행" in str(b.label) for b in at.button), "실행 버튼 없음"
     assert any("자동 실행하지 않" in str(i.value) for i in at.info), "게이트 안내 없음"
+
+
+def test_research_score_bounds_never_collapse():
+    """1행·동점·NaN 점수에서도 ProgressColumn 범위가 max>min 이어야 셀이 깨지지 않는다."""
+    import pandas as pd
+    from dashboard.pages import research
+    assert research.score_bounds(pd.Series([2.1])) == (1.6, 2.6)
+    assert research.score_bounds(pd.Series([0.3, None, float("inf"), -0.2])) == (-0.2, 0.3)
+    assert research.score_bounds(pd.Series([None, None])) == (0.0, 1.0)
 
 
 def test_research_shows_learning_curve():
@@ -1424,8 +1410,8 @@ def test_home_has_donut_and_holdings():
     assert any("국면" in str(i.value) for i in at.info)  # 국면 행동 박스
 
 
-def test_home_shows_kr_donut_and_holdings_with_cash():
-    """홈 — 국내(KR) 배분 도넛+보유표+예수금 (2026-07-25 추가)."""
+def test_home_kr_single_holding_skips_donut_and_shows_cash():
+    """홈 — 국내 보유표+예수금. 한 종목뿐이면 100% 한 조각 도넛은 그리지 않는다."""
     body_script = _STUBS + '''
 data.load_kr_holdings = lambda *a, **k: {
     "rows": [{"ticker": "0167A0", "name": "SOL AI반도체TOP2플러스",
@@ -1439,7 +1425,7 @@ home.render()
     at = AppTest.from_string(body_script, default_timeout=30)
     at.run()
     assert not at.exception, str(at.exception)
-    assert any("국내 배분" in str(c.value) for c in at.caption)
+    assert not any("국내 배분" in str(c.value) for c in at.caption)
     caps = " ".join(str(c.value) for c in at.caption)
     assert "예수금 ₩41,011" in caps
     assert len(at.dataframe) >= 2                          # USD 보유표 + KR 보유표
@@ -2665,34 +2651,33 @@ ticker.render()
         assert len(at.markdown) > 0, f"live={live}: 페이지가 비어 렌더됨"
 
 
-def test_wiki_picker_open_wins_over_sticky_label():
-    """분할 문서 읽기는 선택 상자에 남은 이전 라벨보다 우선한다."""
-    from dashboard.pages.ai_wiki import resolve_wiki_picker
+def test_wiki_open_document_switches_section_after_widget_exists(monkeypatch, tmp_path):
+    """인사이트·AI 콘솔에서 문서를 열면 다음 렌더가 문서 구역에서 그 문서를 읽기로 보여 준다.
+    구역 위젯 키를 위젯 생성 뒤 직접 바꾸면 StreamlitAPIException 이 나므로 대기 키로 넘긴다."""
+    monkeypatch.setenv("AGENT_CONSOLE_SHARED_MEMORY_DIR", str(tmp_path / "shared-memory"))
+    from agent_console import wiki
+    page = wiki.upsert_page({
+        "title": "열 문서", "summary": "요약", "body": "본문",
+        "surface": "market", "kind": "note", "status": "draft", "source_refs": [],
+    })
+    from dashboard import wiki_browser
+    wiki_browser._cached_wiki_snapshot.clear()
 
-    parent = {"id": "parent", "title": "원본", "status": "reviewed", "surface": "market"}
-    child = {"id": "child", "title": "세부", "status": "draft", "surface": "market"}
-    pages = [parent, child]
-    sticky = "원본 · reviewed · market"
+    at = AppTest.from_string(_script("from dashboard.pages import ai_wiki", "ai_wiki.render()"),
+                             default_timeout=30)
+    at.session_state["_ai_wiki_section"] = "관리"
+    at.run()
+    assert not at.exception
 
-    stuck, forced = resolve_wiki_picker(
-        pages, selected_id="child", picker_label=sticky, sync_id=None,
-    )
-    assert stuck["id"] == "parent"
-    assert forced is None
+    at.session_state["agent_wiki_selected_page_id"] = page["id"]
+    at.session_state["_ai_wiki_section_next"] = "문서"
+    at.run()
 
-    opened, forced = resolve_wiki_picker(
-        pages, selected_id="child", picker_label=sticky, sync_id="child",
-    )
-    assert opened["id"] == "child"
-    assert forced == "세부 · draft · market"
+    assert not at.exception
+    assert at.session_state["_ai_wiki_section"] == "문서"
+    assert at.session_state["agent_wiki_selected_page_id"] == page["id"]
+    assert any("탐색기" in str(m.value) for m in at.markdown)
 
-    missing, forced = resolve_wiki_picker(
-        pages, selected_id="parent", picker_label=sticky, sync_id="gone",
-    )
-    assert missing["id"] == "parent"
-    assert forced is None
-
-    assert resolve_wiki_picker([], selected_id="child", picker_label=sticky, sync_id="child") == (None, None)
 
 def test_paper_reason_text_translates_factor_codes():
     from dashboard.pages import paper
@@ -2717,34 +2702,22 @@ def test_market_source_label_hides_engine_keys():
     assert "연준" in market._source_label("rss:fed")
 
 
-def test_ticker_news_keeps_share_classes(monkeypatch):
-    from dashboard import cached
+def test_ticker_news_keeps_share_classes():
     from dashboard.pages import market
-    shown = []
-
-    class _St:
-        session_state = {"news_hours": 48}
-
-        def subheader(self, *a, **k):
-            return None
-
-        def caption(self, *a, **k):
-            return None
-
-        def markdown(self, text, **k):
-            shown.append(text)
-
-    monkeypatch.setattr(market, "st", _St())
-    monkeypatch.setattr(market.ticker_names, "label", lambda t: t)
-    monkeypatch.setattr(market.ui_actions, "mentioned_tickers", lambda items: [])
-    monkeypatch.setattr(cached, "collected_news", lambda hours: {"groups": {"x": [
+    groups = {"x": [
         {"title": "class B", "score": 8, "published_at": "2026-11-15", "tickers": ["BRK.B"], "time_str": ""},
         {"title": "class A", "score": 7, "published_at": "2026-11-15", "tickers": ["BRK.A"], "time_str": ""},
         {"title": "samsung", "score": 6, "published_at": "2026-11-15", "tickers": ["005930"], "time_str": ""},
-    ]}})
-    market._ticker_news("BRK.B")
-    text = "\n".join(shown)
-    assert "class B" in text and "class A" not in text
-    shown.clear()
-    market._ticker_news("005930.KS")
-    assert "samsung" in "\n".join(shown) and "class B" not in "\n".join(shown)
+    ]}
+    assert [it["title"] for it in market.ticker_news_items(groups, "BRK.B")] == ["class B"]
+    assert [it["title"] for it in market.ticker_news_items(groups, "005930.KS")] == ["samsung"]
+
+
+def test_news_line_escapes_dollar_amounts_so_markdown_skips_latex():
+    """제목의 $금액 과 티커 태그 `$NVDA` 사이가 LaTeX 수식으로 렌더되던 회귀."""
+    from dashboard.pages import market
+    line = market._news_line({"title": "Wall St's $500 billion pledge to $NVDA", "score": 8,
+                              "url": "https://x.test/a", "tickers": ["NVDA"], "time_str": "11-19"})
+    assert r"\$500" in line and r"to \$NVDA" in line
+    assert "[Wall St's \\$500 billion pledge to \\$NVDA](https://x.test/a)" in line
+    assert "`$NVDA`" in line

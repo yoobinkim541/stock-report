@@ -130,7 +130,7 @@ def _investor_detail(row: dict) -> None:
     left, right = st.columns(2)
     with left:
         theme.render(theme.stock_list_html(top_rows, title="보유 상위 10", meta="롱 대비 비중 · 평가액",
-                                           empty="보유 종목 없음"))
+                                           empty="보유 종목 없음", scroll=True))
     with right:
         theme.render(theme.stock_list_html([{
             "ticker": o.get("ticker") or "", "name": _stock_name(o.get("ticker"), o.get("issuer")),
@@ -138,7 +138,7 @@ def _investor_detail(row: dict) -> None:
             "value": _usd_compact(o.get("value_usd")), "delta": f"{float(o.get('weight_pct') or 0):.1f}%",
             "direction": -1 if o.get("put_call") == "Put" else 1,
         } for o in options], title="옵션 포지션", meta="기초자산 명목 · 전체 신고액 대비",
-            empty="신고한 풋·콜 없음"))
+            empty="신고한 풋·콜 없음", scroll=True))
 
     changes = row.get("changes")
     if not changes:
@@ -153,7 +153,7 @@ def _investor_detail(row: dict) -> None:
         with grid[i % 2]:
             theme.render(theme.stock_list_html(
                 _move_rows(changes.get(action) or []), title=_ACTION_LABELS[action],
-                meta=f"{counts.get(action, 0)}종목", empty="없음"))
+                meta=f"{counts.get(action, 0)}종목", empty="없음", scroll=True))
     st.caption("주식 수 ±5% 이상 변화만 매매로 봅니다(가격 변동으로 비중만 바뀐 건 제외).")
 
 
@@ -472,14 +472,14 @@ def _my_stocks_section(my_tickers: tuple[str, ...], moves: dict, names: dict) ->
                          "delta": delta, "direction": _ACTION_DIR[action], **({"title": title} if title else {})})
     holders.sort(key=lambda r: -r["n"])
     theme.render(theme.stock_list_html(holders, title="보유 중인 유명 투자자", meta=f"{len(holders)}종목",
-                                       empty="내 종목을 보유한 추적 투자자가 없습니다."))
+                                       empty="내 종목을 보유한 추적 투자자가 없습니다.", scroll=True))
     for i, (action, rows) in enumerate(buckets.items()):
         if i % 2 == 0:
             grid = st.columns(2)
         with grid[i % 2]:
             unit = "" if action in ("new", "exited") else " · 주식 수 변화 중앙값"
             theme.render(theme.stock_list_html(rows, title=_ACTION_LABELS[action],
-                                               meta=f"{len(rows)}종목{unit}", empty="없음"))
+                                               meta=f"{len(rows)}종목{unit}", empty="없음", scroll=True))
     st.caption("13F 는 분기말 보유를 45일 안에 신고하는 지연 자료 · 주식 수 ±5% 이상 변화만 매매로 봄 "
                "· 정보·표시용, 매매 신호 아님")
 
@@ -524,7 +524,8 @@ def _bucket_list(title: str, rows: list[dict]) -> str:
         "delta": f"{(r.get('avg_delta_pct') or 0) * 100:+.1f}%p",
         "direction": _sign(r.get("avg_delta_pct")),
     } for r in rows]
-    return theme.stock_list_html(items, title=title, meta=f"{len(items)}종목 · 평균 비중 변화", empty="해당 없음")
+    return theme.stock_list_html(items, title=title, meta=f"{len(items)}종목 · 평균 비중 변화", empty="해당 없음",
+                                 scroll=True)
 
 
 def _congress_list(title: str, rows: list[dict]) -> str:
@@ -533,7 +534,8 @@ def _congress_list(title: str, rows: list[dict]) -> str:
         "value": _usd_compact(r.get("total_amount_mid")),
         "delta": f"의원 {r.get('member_count') or 0}명",
     } for r in rows]
-    return theme.stock_list_html(items, title=title, meta="추정금액 합 · 거래 의원수", empty="해당 없음")
+    return theme.stock_list_html(items, title=title, meta="추정금액 합 · 거래 의원수", empty="해당 없음",
+                                 scroll=True)
 
 
 def _screening_section(screen: dict, congress: dict) -> None:

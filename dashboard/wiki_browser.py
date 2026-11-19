@@ -356,13 +356,14 @@ def transform_wiki_body(body: str, pages: Iterable[dict[str, Any]]) -> tuple[str
                     label = token
                     matches = by_title.get(token, [])
                     page = matches[0] if len(matches) == 1 else None
+            escaped_label = re.sub(r"([\\`*_{}\[\]()#+.!|>~-])", r"\\\1", label)
             if page is None:
-                return match.group(0)
+                # 병합·삭제돼 목록에 없는 문서도 해시 대신 제목만 보인다.
+                return escaped_label if "|" in token else match.group(0)
             page_id = str(page.get("id") or "")
             if page_id not in referenced_ids:
                 references.append((page, label))
                 referenced_ids.add(page_id)
-            escaped_label = re.sub(r"([\\`*_{}\[\]()#+.!|>~-])", r"\\\1", label)
             return f"**{escaped_label}**"
 
         rendered_parts.append(_WIKI_BODY_REFERENCE_RE.sub(replace, chunk))
@@ -1101,9 +1102,6 @@ def render_wiki_tab(surface: str, pack: dict[str, Any] | None = None) -> None:
 
     if render_source_note_query(st.query_params):
         return
-
-    st.markdown("##### AI 위키")
-    st.caption("대화와 메모를 카드로 승격해 챗봇이 다시 읽는 지식층입니다.")
 
     stats = _wiki_stats()
     render_wiki_status_metrics(stats)

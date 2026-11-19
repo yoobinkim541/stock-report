@@ -760,7 +760,7 @@ def test_views_risk_no_weights():
     assert "보유 데이터가 없습니다" in views.risk_report_text({})
 
 
-def test_views_screener_assembles(monkeypatch):
+def test_views_screener_assembles(monkeypatch, tmp_path):
     import pandas as pd
     from dashboard import views
     from ml import ranker
@@ -771,6 +771,8 @@ def test_views_screener_assembles(monkeypatch):
     monkeypatch.setattr(ranker, "rank_today",
                         lambda mode="nasdaq100", top_n=20: pd.DataFrame([{"rank": 1, "ticker": "MDLZ", "score": 2.1}]))
     monkeypatch.setattr(ranker, "load_ranker", lambda: _R())
+    # 실제 ~/reports/ml-cache/screener_last.json 을 덮어 운영 랭킹이 MDLZ 1행이 됐던 누수 방지
+    monkeypatch.setattr(views, "_screener_last_path", lambda: tmp_path / "screener_last.json")
     out = views.screener(20)
     assert out["rows"][0]["ticker"] == "MDLZ"
     assert out["meta"]["train_end"] == "2026-04-14"

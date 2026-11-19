@@ -1751,7 +1751,7 @@ def _etf_sections(ticker, etf, price):
             f"<span style='color:{theme.MUTED}'>{k}</span><b>{v}</b></div>",
             unsafe_allow_html=True)
 
-    # ── 보유 비중 (바 + 국내 ETF 는 수량 표) ──
+    # ── 보유 비중 (바 · 국내 ETF 는 수량·평가금액이 있을 때만 전체 표) ──
     top = etf.get("top_holdings") or []
     if top:
         st.subheader("구성종목 Top 10" if is_kr else "보유 비중 Top 10")
@@ -1762,14 +1762,15 @@ def _etf_sections(ticker, etf, price):
                 nm = ticker_names.display_name(h["symbol"], allow_net=False) or nm
             bars.append({"name": nm, "pct": h.get("pct")})
         theme.render(theme.etf_holdings_html(bars, title="구성 비중"))
-        if is_kr:
-            table = [{
-                "구성종목": h.get("name") or h.get("symbol"),
-                "비중": f"{h['pct']:.2f}%" if h.get("pct") is not None else "—",
-                "수량": f"{h['shares']:,.0f}" if h.get("shares") is not None else "—",
-                "평가금액": _f_krw_large(h.get("amount")) if h.get("amount") is not None else "—",
-            } for h in top]
-            st.dataframe(pd.DataFrame(table), hide_index=True, width="stretch")
+        if is_kr and any(h.get("shares") is not None or h.get("amount") is not None for h in top):
+            with st.expander(f"전체 구성 {len(top)}종목 · 수량·평가금액"):
+                table = [{
+                    "구성종목": h.get("name") or h.get("symbol"),
+                    "비중": f"{h['pct']:.2f}%" if h.get("pct") is not None else "—",
+                    "수량": f"{h['shares']:,.0f}" if h.get("shares") is not None else "—",
+                    "평가금액": _f_krw_large(h.get("amount")) if h.get("amount") is not None else "—",
+                } for h in top]
+                st.dataframe(pd.DataFrame(table), hide_index=True, width="stretch")
         raw = etf.get("top_holdings_source") or ("pykrx PDF" if is_kr else "yfinance funds_data")
         friendly = {
             "pykrx PDF": "공시 PDF",

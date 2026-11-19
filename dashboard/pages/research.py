@@ -178,7 +178,7 @@ def _screener_section():
                                else f"color: {theme.GREEN}"
                                if isinstance(v, (int, float)) and v <= 30 else ""),
                     subset=["RSI"]))
-        _smin, _smax = float(df["점수"].min()), float(df["점수"].max())
+        _smin, _smax = score_bounds(df["점수"])
         event = st.dataframe(
             sty, hide_index=True, width="stretch",
             height=min(302, 44 + 35 * len(df)),
@@ -211,6 +211,19 @@ def _screener_section():
     _pa = sc.get("prev_asof")
     st.caption("⚠️ 생존편향(⚠️) + 검증상 종목선택 무엣지 — 정보·표시용, 매매신호 아님 · "
                "행 클릭 = 상세" + (f" · 변동 기준 = 직전 실행 {_pa}" if _pa else ""))
+
+
+def score_bounds(scores: pd.Series) -> tuple[float, float]:
+    """ProgressColumn 범위 — 유한값만 쓰고 max>min 을 보장한다.
+    1행이거나 점수가 모두 같으면 min==max 가 되어 셀이 'Invalid min/max parameters' 로 깨졌다."""
+    vals = pd.to_numeric(scores, errors="coerce").dropna()
+    vals = vals[vals.abs() != float("inf")]
+    if vals.empty:
+        return 0.0, 1.0
+    lo, hi = float(vals.min()), float(vals.max())
+    if hi <= lo:
+        return lo - 0.5, hi + 0.5
+    return lo, hi
 
 
 def _chip(text, color):

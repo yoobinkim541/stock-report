@@ -492,14 +492,17 @@ def stock_list_row_html(row: dict, link: bool = True) -> str:
 
 
 def stock_list_html(rows: list[dict], *, title: str = "", meta: str = "",
-                    empty: str = "해당 종목이 없습니다.", link: bool = True) -> str:
-    """토스식 종목 리스트 카드 — 머리줄(제목·보조) + 행들. 행이 없으면 empty 문구."""
+                    empty: str = "해당 종목이 없습니다.", link: bool = True, scroll: bool = False) -> str:
+    """토스식 종목 리스트 카드 — 머리줄(제목·보조) + 행들. 행이 없으면 empty 문구.
+    scroll=True 면 6행이 넘을 때 본문만 카드 안에서 스크롤한다 (머리줄 고정, 행은 숨기지 않음)."""
     head = ""
     if title or meta:
         head = (f'<div class="tn-sl-head"><b>{_html_esc(title)}</b>'
                 f'<span>{_html_esc(meta)}</span></div>')
     body = ("".join(stock_list_row_html(r, link=link) for r in rows or [])
             or f'<div class="tn-sl-empty">{_html_esc(empty)}</div>')
+    if scroll and len(rows or []) > 6:
+        body = f'<div class="tn-sl-body">{body}</div>'
     return f'<div class="tn-sl">{head}{body}</div>'
 
 
@@ -937,6 +940,7 @@ a.tn-sl-row:focus-visible {{ outline: 2px solid {BLUE}; outline-offset: -2px; }}
   letter-spacing: -0.02em; white-space: nowrap; }}
 .tn-sl-delta {{ font-size: .84rem; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }}
 .tn-sl-empty {{ padding: 22px 20px; color: {MUTED}; font-size: .86rem; text-align: center; }}
+.tn-sl-body {{ max-height: 420px; overflow-y: auto; }}
 .tn-h {{ display: flex; flex-direction: column; gap: 2px; margin: 26px 0 10px; }}
 .tn-h-title {{ font-size: 1.22rem; font-weight: 700; color: {TEXT}; letter-spacing: -0.03em; }}
 .tn-h-sub {{ font-size: .8rem; color: {MUTED}; }}
@@ -961,6 +965,8 @@ a.tn-sl-row:focus-visible {{ outline: 2px solid {BLUE}; outline-offset: -2px; }}
 .tn-hold-bar {{ height: 100%; border-radius: 99px; background: {BLUE}; }}
 
 [data-testid="stCaptionContainer"] {{ color: {MUTED} !important; }}
+/* 해시·URL 같은 끊김 없는 긴 토큰이 컬럼 밖으로 넘쳐 옆 컬럼과 겹치지 않게 */
+[data-testid="stMarkdownContainer"], [data-testid="stCaptionContainer"] {{ overflow-wrap: anywhere; }}
 footer {{ display: none !important; }}
 [data-testid="stAppDeployButton"], .stDeployButton {{ display: none !important; }}
 [data-testid="stDecoration"] {{ display: none !important; }}

@@ -132,7 +132,7 @@ new ResizeObserver(fit).observe(box);
 </script></body></html>"""
 
 
-def render_section(pages_all: list[dict]) -> None:
+def render_section(pages_all: list[dict], *, on_open) -> None:
     """AI 위키 페이지의 '온톨로지·인사이트' 구역."""
     import pandas as pd
     import streamlit as st
@@ -170,7 +170,7 @@ def render_section(pages_all: list[dict]) -> None:
                 st.caption(f"근거 claim {len(meta.get('cited') or [])}건 · 신뢰도 {float(page.get('confidence') or 0):.2f} · "
                            f"갱신 {str(page.get('updated_at') or '')[:10]}")
                 if st.button("문서 열기", key=f"onto_open_{page.get('id')}"):
-                    st.session_state["wiki_selected_page_id"] = page.get("id")
+                    on_open(str(page.get("id") or ""))
                     st.rerun()
     with tab_entity:
         f1, f2 = st.columns([1, 2])

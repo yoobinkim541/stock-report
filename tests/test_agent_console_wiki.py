@@ -1572,33 +1572,3 @@ def test_wiki_curation_api_lists_applies_and_rejects_proposals(monkeypatch, tmp_
                                          surface="portfolio", question="q", target_id=page["id"], source="llm")
     assert client.post(f"/api/wiki/curation/{prop2['id']}/apply").json["result"]["action"] == "delete"
     assert wiki.get_page(page["id"]) is None
-
-
-def test_wiki_picker_open_wins_over_sticky_label():
-    """분할 문서 읽기는 선택 상자에 남은 이전 라벨보다 우선한다."""
-    from dashboard.pages.ai_wiki import resolve_wiki_picker
-
-    parent = {"id": "parent", "title": "원본", "status": "reviewed", "surface": "market"}
-    child = {"id": "child", "title": "세부", "status": "draft", "surface": "market"}
-    pages = [parent, child]
-    sticky = "원본 · reviewed · market"
-
-    stuck, forced = resolve_wiki_picker(
-        pages, selected_id="child", picker_label=sticky, sync_id=None,
-    )
-    assert stuck["id"] == "parent"
-    assert forced is None
-
-    opened, forced = resolve_wiki_picker(
-        pages, selected_id="child", picker_label=sticky, sync_id="child",
-    )
-    assert opened["id"] == "child"
-    assert forced == "세부 · draft · market"
-
-    missing, forced = resolve_wiki_picker(
-        pages, selected_id="parent", picker_label=sticky, sync_id="gone",
-    )
-    assert missing["id"] == "parent"
-    assert forced is None
-
-    assert resolve_wiki_picker([], selected_id="child", picker_label=sticky, sync_id="child") == (None, None)

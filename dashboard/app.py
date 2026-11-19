@@ -195,6 +195,7 @@ _watchlist_pg = st.Page(watchlist.render, title="관심종목", icon="⭐", url_
 st.session_state["_ticker_page"] = _ticker_pg
 st.session_state["_kr_etf_page"] = _kr_etf_pg
 st.session_state["_chart_page"] = _chart_pg          # ⛶ 전체화면 풀차트 왕복용
+st.session_state["_portfolio_page"] = _portfolio_pg  # 홈 → 포트폴리오 전체 보기 링크
 _wiki_pg = st.Page(ai_wiki.render, title="AI 위키", icon="🗂️", url_path="wiki")
 st.session_state["_wiki_page"] = _wiki_pg        # AI 콘솔 위키 카드 → 위키 페이지 이동용
 

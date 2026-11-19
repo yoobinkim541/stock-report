@@ -1,5 +1,5 @@
-"""홈 — 글랜스 랜딩 (포트폴리오 중심). 히어로 KPI(예수금 포함 NAV) + USD 배분 도넛(클릭 보유표)
-+ 국내 배분 도넛(보유표, 2026-07-25 추가) + Phase + 오늘 일정."""
+"""홈 — 글랜스 랜딩 (포트폴리오 중심). 히어로 KPI(예수금 포함 NAV) + USD 배분 도넛·비중 상위 보유
++ 국내 보유 요약 + Phase + 오늘 일정. 전체 보유표·평단·리스크는 포트폴리오 페이지."""
 from __future__ import annotations
 
 import os
@@ -46,44 +46,51 @@ def render():
             st.plotly_chart(charts.allocation_donut(rows), width="stretch",
                             config={"displayModeBar": False})
         with right:
-            st.caption("보유 종목 &nbsp;·&nbsp; 🔍 **행을 클릭**하면 해당 종목 상세 분석으로 이동", unsafe_allow_html=True)
+            top = sorted(rows, key=lambda r: r.get("weight") or 0, reverse=True)[:_TOP_N]
+            st.caption(f"비중 상위 {len(top)} / 전체 {len(rows)}종목 &nbsp;·&nbsp; 🔍 **행 클릭** = 종목 분석",
+                       unsafe_allow_html=True)
             df = pd.DataFrame([{
                 "종목": r["ticker"], "이름": (r["name"] or "")[:18],
-                "평가액($)": round(r["value"]), "손익%": round(r["ret"], 1), "비중%": round(r["weight"], 1),
-            } for r in rows])
+                "손익%": round(r["ret"], 1), "비중%": round(r["weight"], 1),
+            } for r in top])
             ev = st.dataframe(df, hide_index=True, width="stretch",
                               on_select="rerun", selection_mode="single-row")
             sel = ev.selection.rows if hasattr(ev, "selection") else []
             if sel:
                 picked = df.iloc[sel[0]]["종목"]
                 ui_actions.open_ticker(str(picked), toast=f"종목 분석 → {picked}")
+            _portfolio_link("전체 보유·평단·리스크는 포트폴리오에서 →")
     else:
         st.warning("보유 데이터가 없습니다. 잔고를 동기화한 뒤 다시 열어 주세요.")
 
     kr = cached.kr_holdings()
     if kr.get("rows"):
         st.divider()
-        kleft, kright = st.columns([1, 1.3])
         krows = kr["rows"]
         ktotal = kr.get("total") or 0
-        with kleft:
-            st.caption("🇰🇷 국내 배분")
-            # 국내 티커(6자리 코드)는 웨지 라벨로 못 알아봐서 display(이름 우선)를 넣는다
-            # — allocation_donut 은 공용(해외 도넛도 씀)이라 함수 자체는 안 건드림.
-            kr_chart_rows = [{"ticker": r["display"], "value": r["value"], "name": r["name"]}
-                             for r in krows]
-            st.plotly_chart(charts.allocation_donut(kr_chart_rows), width="stretch",
-                            config={"displayModeBar": False})
+        caption = (f"🇰🇷 국내 보유 {len(krows)}종목 &nbsp;·&nbsp; 평가 ₩{round(ktotal):,}"
+                   f" &nbsp;·&nbsp; 예수금 ₩{kr.get('cash', 0):,.0f}"
+                   "&nbsp;·&nbsp; 🔍 **행 클릭** = 종목 분석")
+        kdf = pd.DataFrame([{
+            "종목": r["display"],
+            "평가액(₩)": f"₩{round(r['value'] or 0):,}",
+            "손익%": round(r["ret"] or 0, 1),
+            "비중%": round(r["value"] / ktotal * 100, 1) if ktotal else 0.0,
+        } for r in krows])
+        # 한 종목뿐이면 도넛은 100% 한 조각이라 정보가 없다 — 표만 둔다.
+        if len(krows) > 1:
+            kleft, kright = st.columns([1, 1.3])
+            with kleft:
+                st.caption("🇰🇷 국내 배분")
+                # 국내 티커(6자리 코드)는 웨지 라벨로 못 알아봐서 display(이름 우선)를 넣는다.
+                kr_chart_rows = [{"ticker": r["display"], "value": r["value"], "name": r["name"]}
+                                 for r in krows]
+                st.plotly_chart(charts.allocation_donut(kr_chart_rows), width="stretch",
+                                config={"displayModeBar": False})
+        else:
+            kright = st.container()
         with kright:
-            st.caption(f"국내 보유 종목 &nbsp;·&nbsp; 예수금 ₩{kr.get('cash', 0):,.0f}"
-                      "&nbsp;·&nbsp; 🔍 **행을 클릭**하면 해당 종목 상세 분석으로 이동",
-                      unsafe_allow_html=True)
-            kdf = pd.DataFrame([{
-                "종목": r["display"],
-                "평가액(₩)": f"₩{round(r['value'] or 0):,}",
-                "손익%": round(r["ret"] or 0, 1),
-                "비중%": round(r["value"] / ktotal * 100, 1) if ktotal else 0.0,
-            } for r in krows])
+            st.caption(caption, unsafe_allow_html=True)
             kev = st.dataframe(kdf, hide_index=True, width="stretch",
                                on_select="rerun", selection_mode="single-row")
             ksel = kev.selection.rows if hasattr(kev, "selection") else []
@@ -127,6 +134,16 @@ def render():
             st.write(f"{e['marker']} `{e['date_str']}` {e['title']}")
 
     st.caption("표시·정보용 · 주문 집행 없음 · 과거 기반, 미래 보장 아님")
+
+
+_TOP_N = 5
+
+
+def _portfolio_link(label: str) -> None:
+    """app.py 가 등록한 포트폴리오 페이지로 가는 링크 (단독 렌더·테스트에선 생략)."""
+    page = st.session_state.get("_portfolio_page")
+    if page is not None:
+        st.page_link(page, label=label, icon="💼")
 
 
 def _ai_briefing_card():
