@@ -50,7 +50,7 @@ def sidebar_rail() -> None:
         head = (
             f'<div style="display:flex;justify-content:space-between;padding:0 2px">'
             f'<span style="color:{theme.MUTED};font-size:0.78rem">오늘 배분</span>'
-            f'<b style="font-family:JetBrains Mono,monospace">{_f_krw(plan.get("total_krw"))}'
+            f'<b style="font-family:{theme._NUM_FONT};font-variant-numeric:tabular-nums">{_f_krw(plan.get("total_krw"))}'
             f' · {len(plan["rows"])}종목 · {plan.get("emoji", "")} {mult:g}×</b></div>')
     # 🔁 자동 기록 플랜 — 모으는 중인 종목·금액·주기 한눈에 (OFF 는 흐리게)
     rows_html = ""
@@ -60,7 +60,7 @@ def sidebar_rail() -> None:
             f'<div style="display:flex;justify-content:space-between;padding:2px 2px;{dim}">'
             f'<span style="font-size:0.78rem">{p_.get("ticker", "")}</span>'
             f'<span style="color:{theme.MUTED};font-size:0.74rem;'
-            f'font-family:JetBrains Mono,monospace">{p_.get("freq", "")} '
+            f'font-variant-numeric:tabular-nums">{p_.get("freq", "")} '
             f'{_fmt_plan_amt(p_)}</span></div>')
     auto = ""
     if rows_html:

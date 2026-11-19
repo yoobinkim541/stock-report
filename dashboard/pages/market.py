@@ -180,7 +180,7 @@ def _ticker_news(groups: dict, ticker: str) -> None:
 
 
 def render():
-    st.title("🗓️ 시장 · 캘린더")
+    st.title("시장 · 캘린더")
     _calendar_section()
     st.divider()
     _news_section()

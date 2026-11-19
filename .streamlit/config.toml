@@ -5,9 +5,9 @@
 [theme]
 base = "dark"
 primaryColor = "#3182f6"
-backgroundColor = "#191f28"
-secondaryBackgroundColor = "#222b36"
-textColor = "#f9fafb"
+backgroundColor = "#17171c"
+secondaryBackgroundColor = "#2c2c35"
+textColor = "#f2f2f5"
 linkColor = "#3182f6"
 
 greenColor = "#f04452"
@@ -22,14 +22,14 @@ codeFont = "JetBrains Mono"
 baseFontSize = 15
 
 baseRadius = "1rem"
-buttonRadius = "0.75rem"
-borderColor = "#333d4b"
-dataframeBorderColor = "#333d4b"
-dataframeHeaderBackgroundColor = "#222b36"
-showWidgetBorder = true
+buttonRadius = "0.875rem"
+borderColor = "#2c2c35"
+dataframeBorderColor = "#2c2c35"
+dataframeHeaderBackgroundColor = "#202027"
+showWidgetBorder = false
 showSidebarBorder = true
 
-chartCategoricalColors = ["#3182f6", "#f04452", "#8b95a1", "#f59e0b", "#7aa7f7", "#4e5968", "#fb8a93", "#191f28"]
+chartCategoricalColors = ["#3182f6", "#f04452", "#8b95a1", "#f59e0b", "#7aa7f7", "#4e5968", "#fb8a93", "#17171c"]
 
 [[theme.fontFaces]]
 family = "Pretendard"
@@ -56,6 +56,6 @@ weight = 700
 style = "normal"
 
 [theme.sidebar]
-backgroundColor = "#191f28"
-secondaryBackgroundColor = "#222b36"
-borderColor = "#333d4b"
+backgroundColor = "#17171c"
+secondaryBackgroundColor = "#2c2c35"
+borderColor = "#2c2c35"

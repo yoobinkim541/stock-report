@@ -125,7 +125,7 @@ def test_apply_plotly_theme():
     import plotly.graph_objects as go
     fig = theme.apply_plotly_theme(go.Figure())
     assert fig.layout.paper_bgcolor == "rgba(0,0,0,0)"
-    assert "JetBrains" in fig.layout.font.family
+    assert "Pretendard" in fig.layout.font.family
     assert fig.layout.xaxis.gridcolor == theme.AXIS_GRID
 
 
@@ -434,7 +434,8 @@ def test_light_dark_surface_vars():
     """표면 CSS 변수 — 모드별 값 주입·plotly 중립 그레이 분리 (라이트모드 W)."""
     dark = theme._surface_vars(False)
     light = theme._surface_vars(True)
-    assert "--tn-bg:#191f28" in dark and "--tn-panel:#222b36" in dark
+    assert "--tn-bg:#17171c" in dark and "--tn-panel:#202027" in dark
+    assert "--tn-chip:" in dark and "--tn-chip:" in light
     assert "--tn-bg:#f2f4f6" in light and "--tn-panel:#ffffff" in light
     assert "--tn-text:#191f28" in light
     # 표면 상수는 var 참조 (HTML 자동 전환) — plotly 는 별도 중립 hex

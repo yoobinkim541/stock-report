@@ -76,7 +76,7 @@ def _gate_headline(value) -> str:
 
 
 def render():
-    st.title("🔬 리서치")
+    st.title("리서치")
     sec = st.segmented_control("섹션", _SECTIONS, default="종목 랭킹",
                                key="research_section", label_visibility="collapsed") or "종목 랭킹"
     if sec == "전략 스튜디오":
@@ -251,9 +251,9 @@ def score_bounds(scores: pd.Series) -> tuple[float, float]:
 
 
 def _chip(text, color):
-    return (f'<span style="display:inline-block;margin:2px 6px 2px 0;padding:3px 11px;'
-            f'border:1px solid {color}44;border-radius:999px;color:{color};'
-            f'font-size:0.78rem;background:{color}14">{text}</span>')
+    return (f'<span style="display:inline-block;margin:2px 6px 2px 0;padding:4px 11px;'
+            f'border-radius:999px;color:{color};font-weight:600;'
+            f'font-size:0.78rem;background:{color}1f">{text}</span>')
 
 
 def _screener_detail(event, rows, feats, importance):
@@ -275,8 +275,7 @@ def _screener_detail(event, rows, feats, importance):
     rating = r.get("tech_rating") or "—"
     r_col = theme.GREEN if "매수" in rating else theme.RED if "매도" in rating else theme.MUTED
     st.markdown(
-        f'<div style="background:{theme.PANEL};border:1px solid {theme.BORDER};'
-        f'border-left:4px solid {theme.BLUE};border-radius:12px;padding:12px 16px">'
+        f'<div style="background:{theme.PANEL};border-radius:20px;padding:16px 20px">'
         f'<div style="display:flex;gap:14px;align-items:baseline;flex-wrap:wrap">'
         f'<b style="font-size:1.15rem">🔎 {r.get("name") or t} ({t})</b>'
         f'<span style="color:{theme.MUTED};font-size:0.82rem">랭킹 {r.get("rank")}위 · '

@@ -96,7 +96,7 @@ def render():
     ctitle.markdown(
         f'<div style="display:flex;gap:12px;align-items:baseline;flex-wrap:wrap">'
         f'<b style="font-size:1.15rem">{ticker_names.label(t)}</b>'
-        f'<span style="font-family:JetBrains Mono,monospace;font-size:1rem">'
+        f'<span style="font-size:1rem;font-weight:700;font-variant-numeric:tabular-nums">'
         f'{_fmt_header_price(t, price)}</span>'
         f'<span style="color:{col};font-size:0.88rem">'
         f'{_fmt_header_delta(t, chg, prev)}</span>'

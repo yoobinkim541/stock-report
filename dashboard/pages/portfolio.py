@@ -16,7 +16,7 @@ _FAC_LABEL = {"mkt": "시장β(QQQ)", "rate": "금리β(TLT)"}
 
 
 def render():
-    st.title("💼 포트폴리오")
+    st.title("포트폴리오")
     st.caption("달러 해외 장부 · 표시 전용 · 배분 변경 아님 · 실계좌 주문 없음")
 
     hist = cached.port_history()

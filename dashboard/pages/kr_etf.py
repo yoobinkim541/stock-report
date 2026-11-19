@@ -32,7 +32,7 @@ def _default_ticker() -> str:
 
 
 def render():
-    st.title("🇰🇷 국내 ETF")
+    st.title("국내 ETF")
     st.caption("국내 ETF 전용 · 상장 ETF만 원화 기준으로 봅니다. 표시 전용 · 주문 0")
 
     if not _KR_TICKERS:

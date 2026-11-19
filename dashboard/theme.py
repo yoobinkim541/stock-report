@@ -35,12 +35,14 @@ BLUE = "#3182f6"
 AMBER = "#f59e0b"
 VIOLET = "#8b95a1"
 
-# 표면 실제값 (inject_global_css 가 CSS 변수로 주입)
+# 표면 실제값 (inject_global_css 가 CSS 변수로 주입) — 토스증권 다크(#17171c 바탕·#202027 카드)와
+# 라이트(#f2f4f6 바탕·흰 카드). 카드는 테두리 없이 바탕과의 명도 차이로만 구분한다.
+# chip = 세그먼트 컨트롤에서 선택된 칸(트랙=panel2 위에 떠 보이는 면).
 _SURF = {
-    "dark":  {"bg": "#191f28", "panel": "#222b36", "panel2": "#2a3340",
-              "border": "#333d4b", "grid": "#2a3340", "text": "#f9fafb", "muted": "#8b95a1"},
-    "light": {"bg": "#f2f4f6", "panel": "#ffffff", "panel2": "#f9fafb",
-              "border": "#e5e8eb", "grid": "#f2f4f6", "text": "#191f28", "muted": "#6b7684"},
+    "dark":  {"bg": "#17171c", "panel": "#202027", "panel2": "#2c2c35", "chip": "#45454f",
+              "border": "#2c2c35", "grid": "#26262e", "text": "#f2f2f5", "muted": "#9e9ea7"},
+    "light": {"bg": "#f2f4f6", "panel": "#ffffff", "panel2": "#eceef1", "chip": "#ffffff",
+              "border": "#eaedf0", "grid": "#f2f4f6", "text": "#191f28", "muted": "#6b7684"},
 }
 
 # plotly 축·주석 — **테마 중립 그레이**(hex). 투명 paper 로 배경은 페이지를 따르고,
@@ -52,7 +54,8 @@ AXIS_STRONG = "#6b7385"               # 현재가선 등 강조 라벨
 HOVER_BG = "rgba(24,28,38,0.94)"      # 툴팁 — 자체 배경(다크 툴팁은 라이트서도 OK)
 HOVER_BORDER = "rgba(128,135,150,0.4)"
 
-_MONO = "'JetBrains Mono', ui-monospace, monospace"
+# 숫자 글꼴 — 토스처럼 본문과 같은 Pretendard 에 등폭 숫자(tnum)만 켠다.
+_NUM_FONT = "'Pretendard', -apple-system, BlinkMacSystemFont, sans-serif"
 
 
 # ── plotly 테마 (순수·plotly lazy) ───────────────────────────────────────────
@@ -63,17 +66,17 @@ def apply_plotly_theme(fig):
     양쪽서 읽힘(모드 전달 불필요·차트는 순수 유지)."""
     fig.update_layout(
         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-        font=dict(family=_MONO, size=12, color=AXIS_TEXT),
+        font=dict(family=_NUM_FONT, size=12, color=AXIS_TEXT),
         colorway=[BLUE, GREEN, RED, AMBER, VIOLET, "#00bcd4", "#ff7043", "#66bb6a"],
         hovermode="x unified",
-        hoverlabel=dict(bgcolor=HOVER_BG, bordercolor=HOVER_BORDER, font_family=_MONO,
+        hoverlabel=dict(bgcolor=HOVER_BG, bordercolor=HOVER_BORDER, font_family=_NUM_FONT,
                         font_size=12, font_color="#e8eaf0"),
         legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(color=AXIS_TEXT, size=11)),
     )
     fig.update_xaxes(gridcolor=AXIS_GRID, zerolinecolor=AXIS_GRID, linecolor=AXIS_LINE,
-                     tickfont=dict(color=AXIS_TEXT, family=_MONO), title_font=dict(color=AXIS_TEXT))
+                     tickfont=dict(color=AXIS_TEXT, family=_NUM_FONT), title_font=dict(color=AXIS_TEXT))
     fig.update_yaxes(gridcolor=AXIS_GRID, zerolinecolor=AXIS_GRID, linecolor=AXIS_LINE,
-                     tickfont=dict(color=AXIS_TEXT, family=_MONO), title_font=dict(color=AXIS_TEXT))
+                     tickfont=dict(color=AXIS_TEXT, family=_NUM_FONT), title_font=dict(color=AXIS_TEXT))
     return fig
 
 
@@ -112,7 +115,7 @@ def _hero_money(value, currency: str = "USD", *, signed: bool = False) -> str:
 
 def ticker_hero_html(symbol, name="", price=None, change=None, change_pct=None,
                      asof="", currency="USD") -> str:
-    """원형 심볼 뱃지 + 대형 등폭 가격 + 등락 pill (TradingView 히어로)."""
+    """원형 심볼 뱃지 + 큰 가격 + 색으로만 구분한 등락 (토스증권 종목 헤더)."""
     up = (change_pct or 0) >= 0
     col = UP if up else DOWN
     arrow = "▲" if up else "▼"
@@ -130,13 +133,12 @@ def ticker_hero_html(symbol, name="", price=None, change=None, change_pct=None,
     row = [f'<span class="tn-price">{price_html}</span>']
     if cur_html:
         row.append(cur_html)
-    row.append(
-        f'<span class="tn-delta" style="color:{col};background:{col}1a">{delta}</span>')
+    row.append(f'<span class="tn-delta" style="color:{col}">{delta}</span>')
     # 한 줄로 붙인다. 빈 {cur_html} 줄 + 4칸 이상 들여쓰기는 st.markdown 이
     # 코드블록으로 그려 등락·기준시각 HTML 이 그대로 보인다.
     return (
         f'<div class="tn-hero">'
-        f'<div class="tn-badge" style="color:{col};background:{col}1f;border-color:{col}66">{badge}</div>'
+        f'<div class="tn-badge" style="color:{col};background:{col}1f">{badge}</div>'
         f'<div class="tn-hero-main">'
         f'<div class="tn-hero-name">{name or symbol}</div>'
         f'<div class="tn-hero-sym">{symbol}</div>'
@@ -202,8 +204,8 @@ def rating_gauge_html(score, verdict="", sub="", *, title="",
     {arcs}
     <line x1="{cx}" y1="{cy}" x2="{nx:.1f}" y2="{ny:.1f}" stroke="{TEXT}" stroke-width="3" stroke-linecap="round"/>
     <circle cx="{cx}" cy="{cy}" r="6" fill="{TEXT}"/>
-    <text x="{cx - R}" y="{ly}" fill="{MUTED}" font-size="10" font-family="{_MONO}" text-anchor="middle">{end_labels[0]}</text>
-    <text x="{cx + R}" y="{ly}" fill="{MUTED}" font-size="10" font-family="{_MONO}" text-anchor="middle">{end_labels[1]}</text>
+    <text x="{cx - R}" y="{ly}" fill="{MUTED}" font-size="10" font-family="{_NUM_FONT}" text-anchor="middle">{end_labels[0]}</text>
+    <text x="{cx + R}" y="{ly}" fill="{MUTED}" font-size="10" font-family="{_NUM_FONT}" text-anchor="middle">{end_labels[1]}</text>
   </svg>
   <div class="tn-gauge-verdict" style="color:{vcol}">{verdict}</div>
   {f'<div class="tn-gauge-sub">{sub}</div>' if sub else ''}
@@ -229,7 +231,7 @@ def position_band_html(cells) -> str:
     items = "".join(
         f'<div style="flex:1;min-width:104px;text-align:center;padding:2px 6px">'
         f'<span style="color:{MUTED};font-size:0.72rem">{lab}</span><br>'
-        f'<b style="font-size:1.02rem;color:{col or TEXT};font-family:{_MONO}">{val}</b></div>'
+        f'<b style="font-size:1.02rem;color:{col or TEXT};font-family:{_NUM_FONT}">{val}</b></div>'
         for lab, val, col in cells)
     return (f'<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;'
             f'padding:7px 10px;background:{PANEL};border:1px solid {BORDER};'
@@ -273,10 +275,10 @@ def _gauge_svg(value, vmin, vmax, zones, big=None, big_col=None, sub=None) -> st
         parts.append(f'<circle cx="{cx}" cy="{cy}" r="5" fill="{TEXT}"/>')
     bigtxt = big if big is not None else (f"{value:.0f}" if ok else "—")
     parts.append(f'<text x="{cx}" y="80" text-anchor="middle" fill="{big_col or TEXT}" '
-                 f'font-size="27" font-weight="700" font-family="{_MONO}">{bigtxt}</text>')
+                 f'font-size="27" font-weight="700" font-family="{_NUM_FONT}">{bigtxt}</text>')
     if sub:
         parts.append(f'<text x="{cx}" y="118" text-anchor="middle" fill="{MUTED}" '
-                     f'font-size="11" font-family="{_MONO}">{sub}</text>')
+                     f'font-size="11" font-family="{_NUM_FONT}">{sub}</text>')
     return (f'<svg viewBox="0 0 200 126" width="100%" preserveAspectRatio="xMidYMid meet">'
             f'{"".join(parts)}</svg>')
 
@@ -332,7 +334,7 @@ def index_rsi_gauges_html(name, price=None, chg=None, rsi_d=None, rsi_w=None) ->
     return f'''<div style="padding:10px 12px;background:{PANEL};border:1px solid {BORDER};border-radius:10px;min-height:340px;display:flex;flex-direction:column;">
   <div style="display:flex;justify-content:space-between;align-items:baseline">
     <b style="color:{TEXT}">{name}</b>
-    <span style="font-family:{_MONO};color:{MUTED};font-size:0.82rem">{pxs} <span style="color:{ccol}">{chgs}</span></span></div>
+    <span style="font-family:{_NUM_FONT};color:{MUTED};font-size:0.82rem">{pxs} <span style="color:{ccol}">{chgs}</span></span></div>
   <div style="flex:1;display:flex;align-items:center">
     <div style="display:flex;gap:6px;width:100%">{g("일봉 RSI", rsi_d)}{g("주봉 RSI", rsi_w)}</div>
   </div>
@@ -364,10 +366,10 @@ def macro_card_html(item: dict, link: bool = True) -> str:
     body = (
         f'<div style="color:{MUTED};font-size:.74rem;white-space:nowrap;overflow:hidden;'
         f'text-overflow:ellipsis">{item.get("emoji", "")} {item.get("label", "")}</div>'
-        f'<div style="font-family:{_MONO};color:{TEXT};font-size:1.02rem;font-weight:600">'
+        f'<div style="font-family:{_NUM_FONT};color:{TEXT};font-size:1.02rem;font-weight:600">'
         f'{pstr}{suffix}</div>'
         f'<div style="display:flex;justify-content:space-between;align-items:center;gap:4px">'
-        f'<span style="font-family:{_MONO};color:{col};font-size:.72rem;white-space:nowrap">'
+        f'<span style="font-family:{_NUM_FONT};color:{col};font-size:.72rem;white-space:nowrap">'
         f'{"▲" if up else "▼"}{chg_s} ({pct_s})</span>'
         f'{sparkline_svg(item.get("spark"), w=58, h=20)}</div>')
     tk = item.get("ticker")
@@ -694,7 +696,7 @@ def econ_calendar_html(events: list, start=None, weeks: int = 3) -> str:
         f".ec-today{{border-color:{BLUE};box-shadow:inset 0 0 0 1px {BLUE}}}"
         f".ec-dim .ec-date{{color:{MUTED}}}"
         ".ec-past{opacity:.55}"
-        f".ec-date{{font-family:{_MONO};font-size:.72rem;color:{TEXT};margin-bottom:2px}}"
+        f".ec-date{{font-family:{_NUM_FONT};font-size:.72rem;color:{TEXT};margin-bottom:2px}}"
         f".ec-mon{{color:{AMBER};font-weight:700}}"
         f".ec-ev{{font-size:.68rem;color:{TEXT};white-space:nowrap;overflow:hidden;"
         "text-overflow:ellipsis;line-height:1.55;cursor:default}"
@@ -710,8 +712,8 @@ def _surface_vars(light: bool) -> str:
     """모드별 표면 CSS 변수 정의 (.stApp 에 주입 — 모든 var(--tn-*) 소비자 자동 전환)."""
     s = _SURF["light"] if light else _SURF["dark"]
     return ("  --tn-bg:%(bg)s; --tn-panel:%(panel)s; --tn-panel2:%(panel2)s;"
-            " --tn-border:%(border)s; --tn-grid:%(grid)s; --tn-text:%(text)s;"
-            " --tn-muted:%(muted)s;" % s)
+            " --tn-chip:%(chip)s; --tn-border:%(border)s; --tn-grid:%(grid)s;"
+            " --tn-text:%(text)s; --tn-muted:%(muted)s;" % s)
 
 
 # 라이트 모드 — 네이티브 Streamlit 표면(config.toml=dark 로 칠해진 것)을 덮는 오버라이드.
@@ -721,45 +723,24 @@ _LIGHT_OVERRIDE = """
 <style>
 .stApp { background: #f2f4f6 !important; }
 [data-testid="stHeader"] { background: transparent !important; }
-[data-testid="stSidebar"] { background: #ffffff !important; border-right: 1px solid #e5e8eb !important; }
-[data-testid="stMetric"], [data-testid="stExpander"] { background: #ffffff !important; border-color: #e5e8eb !important; }
+[data-testid="stSidebar"] { background: #ffffff !important; }
+[data-testid="stMetric"], [data-testid="stExpander"] { background: #ffffff !important; }
 [data-testid="stMetricValue"] { color: #191f28 !important; }
-[data-testid="stDataFrame"], [data-testid="stTable"] { border-color: #e5e8eb !important; }
-.stTabs [data-baseweb="tab-list"] { background: #f2f4f6 !important; }
-.stTabs [aria-selected="true"] { background: #ffffff !important; }
-/* 입력·선택·버튼 (baseweb) */
-[data-baseweb="select"] > div, [data-baseweb="input"] > div, [data-baseweb="base-input"],
-.stTextInput input, .stNumberInput input, [data-baseweb="popover"] [role="listbox"],
-[data-testid="stChatInput"], [data-testid="stTextInputRootElement"] {
-  background: #ffffff !important; border-color: #e5e8eb !important; }
+[data-testid="stDataFrame"], [data-testid="stTable"] { background: #ffffff; }
+/* 드롭다운 글자 — baseweb 가 다크 config 색을 인라인으로 박는다 */
 [data-baseweb="select"] div, [data-baseweb="select"] input,
 [data-baseweb="select"] svg, [data-baseweb="input"] input,
 [data-baseweb="popover"] [role="option"] {
   color: #191f28 !important; -webkit-text-fill-color: #191f28 !important; }
+[data-baseweb="popover"] [role="listbox"], [data-baseweb="popover"] [data-testid="stPopoverBody"],
+[data-baseweb="menu"] { background: #ffffff !important; }
 [data-testid="stWidgetLabel"] p, .stRadio label, .stCheckbox label { color: #4e5968 !important; }
-/* 버튼·세그먼트·라디오 pill·팝오버 트리거 — 다크 표면 → 라이트 (primary 파랑은 유지) */
-.stButton button:not([kind="primary"]):not([data-testid="stBaseButton-primary"]),
-[data-testid="stBaseButton-secondary"], [data-testid="stBaseButton-tertiary"],
-[data-testid="stBaseButton-borderless"], [data-testid="stFormSubmitButton"] button,
-[data-testid="stPopover"] button, [data-testid="stButtonGroup"] button,
-[data-baseweb="segmented-control"] button, [data-testid="stRadio"] label {
-  background: #ffffff !important; color: #191f28 !important; border-color: #e5e8eb !important; }
-[data-testid="stButtonGroup"] button[aria-checked="true"],
-[data-testid="stButtonGroup"] button[aria-selected="true"],
-[data-testid="stRadio"] label[data-checked="true"],
-[data-testid="stButtonGroup"] button[data-testid="stBaseButton-pillsActive"],
-[data-testid="stButtonGroup"] button[data-testid="stBaseButton-segmented_controlActive"] {
-  background: #e8f3ff !important; color: #3182f6 !important; border-color: #3182f6 !important; }
-/* 팝오버/드롭다운 내용 배경 */
-[data-baseweb="popover"] [data-testid="stPopoverBody"], [data-baseweb="menu"] {
-  background: #ffffff !important; }
 /* 본문 텍스트 — !important 없이(인라인 시맨틱 색 보존) 특이도로 다크 기본색만 교체 */
 .stApp p, .stApp li, .stApp label, .stMarkdown, [data-testid="stMarkdownContainer"],
-.stApp h1, .stApp h2, .stApp h3, .stApp h4, [data-testid="stMetricLabel"] p { color: #191f28; }
+.stApp h1, .stApp h2, .stApp h3, .stApp h4, .stApp h5, [data-testid="stMetricLabel"] p { color: #191f28; }
 [data-testid="stCaptionContainer"], .stApp small { color: #6b7684; }
 .stCode, pre, code { background: #f2f4f6 !important; color: #191f28 !important; }
-[data-testid="stAlert"] { background: #e8f3ff !important; }
-::-webkit-scrollbar-track { background: #f2f4f6; }
+[data-testid="stButtonGroup"] [data-testid$="Active"] { box-shadow: 0 1px 3px rgba(0,23,51,.08); }
 ::-webkit-scrollbar-thumb { background: #d1d6db; }
 ::-webkit-scrollbar-thumb:hover { background: #b0b8c1; }
 </style>
@@ -773,10 +754,16 @@ def inject_global_css(light: bool | None = None):
     import streamlit as st
     if light is None:
         light = is_light()
-    st.markdown(f"<style>.stApp {{\n{_surface_vars(light)}\n}}</style>" + _CSS,
+    st.markdown(_FONT_LINKS + f"<style>.stApp {{\n{_surface_vars(light)}\n}}</style>" + _CSS,
                 unsafe_allow_html=True)
     if light:
         st.markdown(_LIGHT_OVERRIDE, unsafe_allow_html=True)
+
+
+# 토스페이스 — 토스가 공개한 이모지 글꼴. 이모지 코드포인트에만 unicode-range 가 걸려 있어
+# 본문 글꼴(Pretendard) 뒤에 두면 이모지만 토스 모양으로 바뀐다.
+_FONT_LINKS = ('<style>@import url("https://cdn.jsdelivr.net/gh/toss/tossface@v1.6.1/dist/tossface.css");'
+               '</style>')
 
 
 def is_light() -> bool:
@@ -802,15 +789,18 @@ def render(html: str):
     st.markdown(text, unsafe_allow_html=True)
 
 
+_CHIP = "var(--tn-chip)"
+
 _CSS = f"""
 <style>
 html, body, .stApp {{ overscroll-behavior: none; }}
 .stApp {{ background: {BG}; }}
 [data-testid="stHeader"] {{ background: transparent; }}
-.block-container {{ padding-top: 1.6rem; padding-bottom: 3.2rem; max-width: 1280px; }}
+.block-container {{ padding-top: 1.8rem; padding-bottom: 3.6rem; max-width: 1240px; }}
 
-html, body, [class*="st-"], .stApp, p, span, div, label, input, button {{
-  font-family: 'Pretendard', -apple-system, BlinkMacSystemFont, sans-serif;
+/* ── 글꼴: 본문 Pretendard, 이모지는 토스페이스 ── */
+html, body, [class*="st-"], .stApp, p, span, div, label, input, button, textarea {{
+  font-family: 'Pretendard', 'Tossface', -apple-system, BlinkMacSystemFont, sans-serif;
   -webkit-font-smoothing: antialiased;
 }}
 [data-testid="stIconMaterial"], .material-symbols-rounded, .material-symbols-outlined,
@@ -822,7 +812,7 @@ html, body, [class*="st-"], .stApp, p, span, div, label, input, button {{
   background: linear-gradient(90deg, {PANEL} 25%, {PANEL2} 38%, {PANEL} 55%) !important;
   background-size: 400% 100% !important;
   animation: tn-shimmer 1.3s ease-in-out infinite;
-  border-radius: 16px;
+  border-radius: 20px;
 }}
 @keyframes tn-shimmer {{
   0% {{ background-position: 100% 50%; }}
@@ -831,96 +821,149 @@ html, body, [class*="st-"], .stApp, p, span, div, label, input, button {{
 /* rerun 중 이전 화면을 펄스하지 않는다 — 투명도 애니메이션이 화면 떨림으로 보인다 */
 [data-stale="true"] {{ animation: none !important; opacity: 1 !important; }}
 .stSpinner > div {{ border-top-color: {BLUE} !important; }}
-h1, h2, h3 {{ letter-spacing: -0.03em; font-weight: 700; }}
-h1 {{ font-size: 1.55rem !important; }}
-[data-testid="stMetricValue"], code, .tn-price, .tn-delta, .tn-wl-last,
-.tn-wl-chg, .tn-gauge text {{
+
+/* ── 타이포: 굵고 촘촘한 제목, 숫자는 등폭 숫자 ── */
+h1, h2, h3, h4, h5 {{ letter-spacing: -0.035em; font-weight: 700; color: {TEXT}; }}
+h1 {{ font-size: 1.75rem !important; font-weight: 800 !important; padding-bottom: .4rem !important; }}
+h2 {{ font-size: 1.4rem !important; }}
+h3 {{ font-size: 1.22rem !important; padding-top: 1.1rem !important; }}
+h4 {{ font-size: 1.1rem !important; padding-top: .9rem !important; }}
+h5 {{ font-size: 1rem !important; padding-top: .6rem !important; }}
+[data-testid="stMetricValue"], code, .tn-price, .tn-delta, .tn-wl-last, .tn-wl-chg,
+.tn-gauge text, .tn-sl-val, .tn-sl-delta, [data-testid="stDataFrame"] {{
   font-variant-numeric: tabular-nums; font-feature-settings: "tnum" 1; }}
-.tn-price, .tn-delta, .tn-wl-last, .tn-wl-chg {{ font-family: {_MONO}; }}
+.tn-price, .tn-delta, .tn-wl-last, .tn-wl-chg {{ font-family: {_NUM_FONT}; }}
+[data-testid="stCaptionContainer"] {{ color: {MUTED} !important; font-size: .8rem; line-height: 1.5; }}
+/* 해시·URL 같은 끊김 없는 긴 토큰이 컬럼 밖으로 넘쳐 옆 컬럼과 겹치지 않게 */
+[data-testid="stMarkdownContainer"], [data-testid="stCaptionContainer"] {{ overflow-wrap: anywhere; }}
 
+/* ── 카드: 테두리 없이 바탕 명도 차이 + 큰 라운드 ── */
 [data-testid="stMetric"] {{
-  background: {PANEL};
-  border: 1px solid {BORDER};
-  border-radius: 16px;
-  padding: 16px 18px 14px;
-  box-shadow: none;
-}}
+  background: {PANEL}; border: none; border-radius: 20px;
+  padding: 18px 20px 16px; box-shadow: none; }}
 [data-testid="stMetricLabel"] p {{
-  color: {MUTED} !important; font-size: .78rem !important;
+  color: {MUTED} !important; font-size: .8rem !important;
   text-transform: none; letter-spacing: -0.01em; font-weight: 500; }}
-[data-testid="stMetricValue"] {{ font-size: 1.55rem !important; color: {TEXT}; letter-spacing: -0.03em; }}
+[data-testid="stMetricValue"] {{ font-size: 1.5rem !important; font-weight: 700; color: {TEXT};
+  letter-spacing: -0.035em; }}
+[data-testid="stMetricDelta"] {{ font-weight: 600; }}
+[data-testid="stExpander"] {{ border: none; border-radius: 20px; background: {PANEL}; }}
+[data-testid="stExpander"] details {{ border: none !important; border-radius: 20px; }}
+[data-testid="stExpander"] summary {{ padding: 14px 20px; font-weight: 600; border-radius: 20px; }}
+[data-testid="stExpander"] summary:hover {{ color: {TEXT}; background: {PANEL2}; }}
+[class*="st-key-tn-card"] {{ background: {PANEL}; border-color: transparent !important; border-radius: 20px !important; }}
+[data-testid="stDataFrame"], [data-testid="stTable"] {{ border: none; border-radius: 16px; overflow: hidden; }}
+[data-testid="stAlertContainer"] {{ border-radius: 16px; border: none; }}
+[data-testid="stAlertContainer"]:has([data-testid="stAlertContentInfo"]) {{ background: rgba(49,130,246,.12); }}
+[data-testid="stAlertContainer"]:has([data-testid="stAlertContentWarning"]) {{ background: rgba(255,149,0,.13); }}
+[data-testid="stAlertContainer"]:has([data-testid="stAlertContentError"]) {{ background: rgba(240,68,82,.13); }}
+[data-testid="stAlertContainer"]:has([data-testid="stAlertContentSuccess"]) {{ background: rgba(0,180,110,.13); }}
+hr {{ border-color: {BORDER} !important; margin: 1.6rem 0 !important; }}
 
+/* ── 탭·세그먼트: 회색 트랙 위 떠 있는 칸 ── */
 .stTabs [data-baseweb="tab-list"] {{
-  gap: 4px; border-bottom: none; background: {PANEL2};
+  gap: 2px; border-bottom: none; background: {PANEL2};
   border-radius: 14px; padding: 4px; width: fit-content; max-width: 100%; }}
 .stTabs [data-baseweb="tab"] {{
   color: {MUTED}; font-weight: 600; padding: 8px 14px; border-radius: 10px; }}
-.stTabs [aria-selected="true"] {{ color: {TEXT} !important; background: {PANEL}; }}
-.stTabs [data-baseweb="tab-highlight"] {{ display: none; }}
+.stTabs [aria-selected="true"] {{ color: {TEXT} !important; background: {_CHIP}; }}
+.stTabs [data-baseweb="tab-highlight"], .stTabs [data-baseweb="tab-border"] {{ display: none; }}
+[data-testid="stButtonGroup"] div:has(> [data-testid^="stBaseButton-segmented_control"]) {{
+  background: {PANEL2}; border-radius: 14px; padding: 4px; gap: 2px; width: fit-content; max-width: 100%; }}
+[data-testid="stButtonGroup"] [data-testid^="stBaseButton-segmented_control"] {{
+  border: none !important; border-radius: 10px !important; background: transparent !important;
+  color: {MUTED} !important; font-weight: 600; min-height: 34px; padding: 4px 14px; }}
+[data-testid="stButtonGroup"] [data-testid="stBaseButton-segmented_controlActive"] {{
+  background: {_CHIP} !important; color: {TEXT} !important; font-weight: 700; }}
+[data-testid="stButtonGroup"] [data-testid^="stBaseButton-pills"] {{
+  border: none !important; border-radius: 999px !important; background: {PANEL2} !important;
+  color: {TEXT} !important; font-weight: 600; }}
+[data-testid="stButtonGroup"] [data-testid="stBaseButton-pillsActive"] {{
+  background: {BLUE}24 !important; color: {BLUE} !important; }}
 
-.stButton button, [data-testid="stBaseButton-secondary"],
-[data-testid="stBaseButton-primary"] {{
-  border-radius: 12px !important; font-weight: 600; min-height: 40px; }}
-[data-baseweb="input"] > div, [data-baseweb="select"] > div {{ border-radius: 12px !important; }}
+/* ── 버튼: 주요=토스 블루, 보조=회색 면 ── */
+.stButton button, [data-testid="stBaseButton-secondary"], [data-testid="stBaseButton-primary"],
+[data-testid="stFormSubmitButton"] button, [data-testid="stDownloadButton"] button,
+[data-testid="stPopover"] > div > button {{
+  border-radius: 14px !important; font-weight: 600; min-height: 42px;
+  transition: background .12s, transform .06s; }}
+[data-testid="stBaseButton-secondary"], [data-testid="stPopover"] > div > button,
+[data-testid="stDownloadButton"] button {{
+  background: {PANEL2} !important; border: none !important; color: {TEXT} !important; }}
+[data-testid="stBaseButton-secondary"]:hover, [data-testid="stPopover"] > div > button:hover,
+[data-testid="stDownloadButton"] button:hover {{ background: {_CHIP} !important; }}
+[data-testid="stBaseButton-primary"] {{ background: {BLUE} !important; border: none !important; color: #fff !important; }}
+[data-testid="stBaseButton-primary"]:hover {{ background: #1b64da !important; }}
+.stButton button:active, [data-testid="stBaseButton-primary"]:active {{ transform: scale(.98); }}
+[data-testid="stBaseButton-tertiary"], [data-testid="stBaseButton-borderless"] {{ color: {BLUE} !important; }}
 
-[data-testid="stDataFrame"] {{ border: 1px solid {BORDER}; border-radius: 16px; overflow: hidden; }}
+/* ── 입력: 테두리 없는 회색 면, 포커스 때만 파랑 ── */
+[data-baseweb="input"] > div, [data-baseweb="select"] > div, [data-baseweb="textarea"],
+[data-baseweb="base-input"], [data-testid="stChatInput"] > div {{
+  border-radius: 14px !important; background: {PANEL2} !important; border-color: transparent !important; }}
+[data-baseweb="input"] input, [data-baseweb="textarea"] textarea, [data-baseweb="base-input"] input {{
+  background: transparent !important; }}
+[data-baseweb="input"]:focus-within > div, [data-baseweb="select"]:focus-within > div,
+[data-baseweb="textarea"]:focus-within {{ border-color: {BLUE} !important; }}
+[data-testid="stWidgetLabel"] p {{ font-weight: 500; }}
 
-[data-testid="stSidebar"] {{ border-right: 1px solid {BORDER}; }}
-[data-testid="stSidebar"] h3 {{ font-size: .95rem; color: {TEXT}; letter-spacing: -0.02em; }}
+/* ── 사이드바: 바탕과 같은 면, 선택 메뉴는 회색 칸 ── */
+[data-testid="stSidebar"] {{ border-right: 1px solid {BORDER}; background: {BG}; }}
+[data-testid="stSidebar"] h3 {{ font-size: .95rem !important; color: {TEXT}; letter-spacing: -0.02em; padding-top: 0 !important; }}
 [data-testid="stSidebarNav"] ul {{ padding: 4px 8px 8px; }}
 [data-testid="stSidebarNav"] a {{
-  border-radius: 12px; margin: 2px 0; font-weight: 600; letter-spacing: -0.02em; }}
-[data-testid="stSidebarNav"] a[aria-current="page"] {{
-  background: {BLUE}1f; color: {BLUE}; }}
-
-[data-testid="stExpander"] {{ border: 1px solid {BORDER}; border-radius: 16px; background: {PANEL}; }}
+  border-radius: 12px; margin: 1px 0; font-weight: 600; letter-spacing: -0.02em; }}
+[data-testid="stSidebarNav"] a:hover {{ background: {PANEL2}; }}
+[data-testid="stSidebarNav"] a span {{ color: {MUTED}; }}
+[data-testid="stSidebarNav"] a[aria-current="page"] {{ background: {PANEL2}; }}
+[data-testid="stSidebarNav"] a[aria-current="page"] span {{ color: {TEXT}; font-weight: 700; }}
 
 ::-webkit-scrollbar {{ width: 8px; height: 8px; }}
 ::-webkit-scrollbar-track {{ background: transparent; }}
 ::-webkit-scrollbar-thumb {{ background: {BORDER}; border-radius: 8px; }}
 
-.tn-hero {{ display: flex; align-items: center; gap: 16px; margin: 2px 0 16px; }}
+.tn-hero {{ display: flex; align-items: center; gap: 16px; margin: 2px 0 18px; }}
 .tn-badge {{
-  width: 56px; height: 56px; border-radius: 18px; border: 1px solid;
+  width: 56px; height: 56px; border-radius: 50%; border: none !important;
   display: flex; align-items: center; justify-content: center;
   font-weight: 800; font-size: 1rem; letter-spacing: -.03em; flex: 0 0 auto; }}
-.tn-hero-name {{ font-size: 1.35rem; font-weight: 700; color: {TEXT}; line-height: 1.15; letter-spacing: -0.03em; }}
+.tn-hero-name {{ font-size: 1.3rem; font-weight: 700; color: {TEXT}; line-height: 1.2; letter-spacing: -0.035em; }}
 .tn-hero-sym {{ color: {MUTED}; font-size: .8rem; margin-top: 2px; }}
-.tn-hero-row {{ display: flex; align-items: baseline; gap: 8px; margin-top: 4px; flex-wrap: wrap; }}
-.tn-price {{ font-size: 2.15rem; font-weight: 700; color: {TEXT}; line-height: 1; letter-spacing: -0.04em; }}
+.tn-hero-row {{ display: flex; align-items: baseline; gap: 10px; margin-top: 6px; flex-wrap: wrap; }}
+.tn-price {{ font-size: 2.1rem; font-weight: 800; color: {TEXT}; line-height: 1; letter-spacing: -0.045em; }}
 .tn-cur {{ color: {MUTED}; font-size: .85rem; }}
-.tn-delta {{ font-size: .92rem; font-weight: 600; padding: 2px 8px; border-radius: 8px; }}
-.tn-asof {{ color: {MUTED}; font-size: .72rem; margin-top: 6px; }}
+.tn-delta {{ font-size: .95rem; font-weight: 700; padding: 0; background: none !important; }}
+.tn-asof {{ color: {MUTED}; font-size: .74rem; margin-top: 8px; }}
 
-.tn-gauge {{ background: {PANEL}; border: 1px solid {BORDER}; border-radius: 16px;
-  padding: 16px 14px 18px; text-align: center; }}
-.tn-gauge-verdict {{ font-size: 1.2rem; font-weight: 700; margin-top: -6px; letter-spacing: -0.02em; }}
+.tn-gauge {{ background: {PANEL}; border: none; border-radius: 20px;
+  padding: 18px 14px 18px; text-align: center; }}
+.tn-gauge-verdict {{ font-size: 1.2rem; font-weight: 700; margin-top: -6px; letter-spacing: -0.03em; }}
 .tn-gauge-sub {{ color: {MUTED}; font-size: .76rem; margin-top: 2px; }}
 
-.tn-wl {{ background: {PANEL}; border: 1px solid {BORDER}; border-radius: 16px; overflow: hidden; }}
-.tn-wl-head {{ padding: 12px 14px 8px; font-size: .78rem; font-weight: 600; color: {MUTED};
+.tn-wl {{ background: {PANEL}; border: none; border-radius: 20px; overflow: hidden; }}
+.tn-wl-head {{ padding: 14px 16px 6px; font-size: .78rem; font-weight: 600; color: {MUTED};
   letter-spacing: -0.01em; }}
 .tn-wl-row {{ display: grid; grid-template-columns: 1fr auto auto; align-items: center;
-  gap: 10px; padding: 11px 14px; border-top: 1px solid {BORDER}; }}
+  gap: 10px; padding: 10px 16px; border-top: none; }}
 a.tn-wl-row {{ color: inherit; text-decoration: none; cursor: pointer; }}
 a.tn-wl-row:focus-visible {{ outline: 2px solid {BLUE}; outline-offset: -2px; }}
 .tn-wl-row:hover {{ background: {PANEL2}; }}
 .tn-wl-sym {{ font-weight: 600; color: {TEXT}; font-size: .9rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
-.tn-wl-last {{ font-family: {_MONO}; color: {TEXT}; font-size: .82rem; white-space: nowrap; }}
-.tn-wl-chg {{ font-family: {_MONO}; font-size: .82rem; font-weight: 600; text-align: right; white-space: nowrap; }}
+.tn-wl-last {{ font-family: {_NUM_FONT}; color: {TEXT}; font-size: .86rem; font-weight: 600; white-space: nowrap; }}
+.tn-wl-chg {{ font-family: {_NUM_FONT}; font-size: .84rem; font-weight: 600; text-align: right; white-space: nowrap; }}
 .tn-spark {{ display: block; }}
 
-.tn-sec {{ border-left: 3px solid {BLUE}; padding-left: 10px; margin: 18px 0 10px; }}
-.tn-sec span {{ font-size: .84rem; font-weight: 700; color: {TEXT}; letter-spacing: -0.02em; }}
+.tn-sec {{ border-left: none; padding-left: 0; margin: 22px 0 10px; }}
+.tn-sec span {{ font-size: 1rem; font-weight: 700; color: {TEXT}; letter-spacing: -0.03em; }}
 
-.tn-sl {{ background: {PANEL}; border: 1px solid {BORDER}; border-radius: 20px; overflow: hidden;
-  margin-bottom: 12px; }}
+.tn-sl {{ background: {PANEL}; border: none; border-radius: 20px; overflow: hidden;
+  margin-bottom: 14px; padding-bottom: 6px; }}
 .tn-sl-head {{ display: flex; justify-content: space-between; align-items: baseline; gap: 12px;
-  padding: 16px 20px 10px; }}
-.tn-sl-head b {{ font-size: 1rem; font-weight: 700; color: {TEXT}; letter-spacing: -0.02em; }}
+  padding: 18px 20px 8px; }}
+.tn-sl-head b {{ font-size: 1.05rem; font-weight: 700; color: {TEXT}; letter-spacing: -0.03em; }}
 .tn-sl-head span {{ font-size: .78rem; color: {MUTED}; text-align: right; }}
 .tn-sl-row {{ display: grid; grid-template-columns: 40px minmax(0, 1fr) auto; align-items: center;
-  gap: 14px; padding: 12px 20px; }}
+  gap: 14px; padding: 11px 20px; }}
 a.tn-sl-row {{ color: inherit; text-decoration: none !important; cursor: pointer; transition: background .12s; }}
 a.tn-sl-row:hover {{ background: {PANEL2}; }}
 a.tn-sl-row:focus-visible {{ outline: 2px solid {BLUE}; outline-offset: -2px; }}
@@ -932,8 +975,8 @@ a.tn-sl-row:focus-visible {{ outline: 2px solid {BLUE}; outline-offset: -2px; }}
 .tn-sl-sub {{ display: flex; align-items: center; gap: 6px; min-width: 0; font-size: .78rem; color: {MUTED};
   white-space: nowrap; overflow: hidden; }}
 .tn-sl-tk {{ font-weight: 600; }}
-.tn-sl-chip {{ flex: none; padding: 1px 7px; border-radius: 6px; background: {PANEL2};
-  border: 1px solid {BORDER}; font-size: .7rem; }}
+.tn-sl-chip {{ flex: none; padding: 2px 8px; border-radius: 8px; background: {PANEL2};
+  border: none; font-size: .7rem; font-weight: 600; }}
 .tn-sl-memo {{ overflow: hidden; text-overflow: ellipsis; }}
 .tn-sl-side {{ display: flex; flex-direction: column; align-items: flex-end; gap: 3px; }}
 .tn-sl-val {{ font-size: 1rem; font-weight: 700; color: {TEXT}; font-variant-numeric: tabular-nums;
@@ -941,32 +984,24 @@ a.tn-sl-row:focus-visible {{ outline: 2px solid {BLUE}; outline-offset: -2px; }}
 .tn-sl-delta {{ font-size: .84rem; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }}
 .tn-sl-empty {{ padding: 22px 20px; color: {MUTED}; font-size: .86rem; text-align: center; }}
 .tn-sl-body {{ max-height: 420px; overflow-y: auto; }}
-.tn-h {{ display: flex; flex-direction: column; gap: 2px; margin: 26px 0 10px; }}
-.tn-h-title {{ font-size: 1.22rem; font-weight: 700; color: {TEXT}; letter-spacing: -0.03em; }}
+.tn-h {{ display: flex; flex-direction: column; gap: 3px; margin: 30px 0 12px; }}
+.tn-h-title {{ font-size: 1.3rem; font-weight: 700; color: {TEXT}; letter-spacing: -0.035em; }}
 .tn-h-sub {{ font-size: .8rem; color: {MUTED}; }}
-[class*="st-key-tn-card"] {{ background: {PANEL}; border-color: {BORDER} !important; border-radius: 20px !important; }}
-
-[data-testid="stButtonGroup"] button[aria-pressed="true"],
-[data-testid="stButtonGroup"] button[aria-checked="true"] {{
-  background: {BLUE}1a !important; border-color: {BLUE} !important; color: {BLUE} !important; }}
 
 .tn-etf-rets {{ display: flex; gap: 8px; flex-wrap: wrap; margin: 4px 0 12px; }}
-.tn-etf-chip {{ flex: 1 1 92px; background: {PANEL}; border: 1px solid {BORDER};
-  border-radius: 14px; padding: 10px 12px; }}
+.tn-etf-chip {{ flex: 1 1 92px; background: {PANEL}; border: none;
+  border-radius: 16px; padding: 12px 14px; }}
 .tn-etf-chip span {{ display: block; color: {MUTED}; font-size: .72rem; font-weight: 600; }}
 .tn-etf-chip b {{ font-size: 1.05rem; letter-spacing: -.03em; font-variant-numeric: tabular-nums; }}
-.tn-hold {{ background: {PANEL}; border: 1px solid {BORDER}; border-radius: 16px; padding: 4px 12px 8px; }}
+.tn-hold {{ background: {PANEL}; border: none; border-radius: 20px; padding: 6px 16px 10px; }}
 .tn-hold-head {{ padding: 10px 0 4px; color: {MUTED}; font-size: .78rem; font-weight: 600; }}
 .tn-hold-row {{ display: grid; grid-template-columns: minmax(0,1.1fr) 64px minmax(72px,1fr);
-  gap: 8px; align-items: center; padding: 7px 0; border-top: 1px solid {BORDER}; }}
+  gap: 8px; align-items: center; padding: 7px 0; border-top: none; }}
 .tn-hold-name {{ overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; color: {TEXT}; }}
 .tn-hold-pct {{ text-align: right; font-variant-numeric: tabular-nums; color: {TEXT}; font-size: .82rem; }}
 .tn-hold-track {{ height: 6px; border-radius: 99px; background: {PANEL2}; overflow: hidden; }}
 .tn-hold-bar {{ height: 100%; border-radius: 99px; background: {BLUE}; }}
 
-[data-testid="stCaptionContainer"] {{ color: {MUTED} !important; }}
-/* 해시·URL 같은 끊김 없는 긴 토큰이 컬럼 밖으로 넘쳐 옆 컬럼과 겹치지 않게 */
-[data-testid="stMarkdownContainer"], [data-testid="stCaptionContainer"] {{ overflow-wrap: anywhere; }}
 footer {{ display: none !important; }}
 [data-testid="stAppDeployButton"], .stDeployButton {{ display: none !important; }}
 [data-testid="stDecoration"] {{ display: none !important; }}
@@ -981,35 +1016,35 @@ footer {{ display: none !important; }}
   .tn-tape {{ font-size: 0.7rem; }}
   .block-container {{ padding-top: 1.1rem; padding-left: .7rem; padding-right: .7rem;
                       padding-bottom: 1.6rem; }}
-  h1 {{ font-size: 1.4rem !important; }}
-  h2, h3 {{ font-size: 1.08rem !important; }}
+  h1 {{ font-size: 1.45rem !important; }}
+  h2, h3 {{ font-size: 1.1rem !important; }}
   .tn-hero {{ gap: 12px; margin: 2px 0 12px; }}
-  .tn-badge {{ width: 46px; height: 46px; font-size: .95rem; border-radius: 14px; }}
-  .tn-hero-name {{ font-size: 1.2rem; }}
-  .tn-price {{ font-size: 1.6rem; }}
+  .tn-badge {{ width: 46px; height: 46px; font-size: .95rem; }}
+  .tn-hero-name {{ font-size: 1.15rem; }}
+  .tn-price {{ font-size: 1.65rem; }}
   .tn-gauge {{ padding: 12px 10px 14px; }}
   .tn-wl-row {{ grid-template-columns: 1fr auto auto; gap: 8px; }}
   .tn-wl-spark {{ display: none; }}
-  [data-testid="stMetric"] {{ padding: 9px 12px 8px !important; }}
+  [data-testid="stMetric"] {{ padding: 11px 14px 10px !important; border-radius: 16px; }}
   [data-testid="stMetricValue"] {{ font-size: 1.25rem !important; }}
-  [data-testid="stMetricLabel"] p {{ font-size: .66rem !important; }}
+  [data-testid="stMetricLabel"] p {{ font-size: .68rem !important; }}
   [data-testid="stMetricDelta"] {{ font-size: .78rem !important; }}
-  [data-testid="stVerticalBlock"] {{ gap: .55rem !important; }}
+  [data-testid="stVerticalBlock"] {{ gap: .6rem !important; }}
   [data-testid="stHorizontalBlock"] {{ gap: .5rem !important; }}
   .stTabs [data-baseweb="tab"] {{ padding: 7px 10px; font-size: .84rem; }}
   .tn-etf-rets {{ gap: 6px; }}
   .tn-hold-row {{ grid-template-columns: minmax(0,1fr) 58px; }}
   .tn-hold-track {{ display: none; }}
-  .tn-sl-row {{ grid-template-columns: 36px minmax(0, 1fr) auto; gap: 10px; padding: 11px 14px; }}
+  .tn-sl-row {{ grid-template-columns: 36px minmax(0, 1fr) auto; gap: 10px; padding: 10px 14px; }}
   .tn-sl-ava {{ width: 36px; height: 36px; font-size: .9rem; }}
-  .tn-sl-head {{ padding: 14px 14px 8px; }}
+  .tn-sl-head {{ padding: 14px 14px 6px; }}
   .tn-sl-memo {{ display: none; }}
 }}
 
 @media (max-width: 430px) {{
   [data-testid="stMetricValue"] {{ font-size: 1.12rem !important; }}
-  [data-testid="stMetric"] {{ padding: 8px 10px 7px !important; }}
-  .tn-price {{ font-size: 1.4rem; }}
+  [data-testid="stMetric"] {{ padding: 9px 11px 8px !important; }}
+  .tn-price {{ font-size: 1.45rem; }}
   .tn-badge {{ width: 40px; height: 40px; font-size: .85rem; }}
   .block-container {{ padding-left: .55rem; padding-right: .55rem; }}
 }}
@@ -1043,7 +1078,7 @@ def orderbook_ladder_html(bids, asks, *, prev_close=None, price=None,
         bar_color = "#3182f6" if side == "ask" else "#f04452"
         qty = f"{q:,.0f}"
         px_cell = (f"<td style='width:38%;text-align:center;padding:1px 4px;"
-                   f"font-family:{_MONO};font-size:12px'>{px:,.0f}{_pct(px)}</td>")
+                   f"font-family:{_NUM_FONT};font-size:12px'>{px:,.0f}{_pct(px)}</td>")
         # 바 = 배경 absolute 레이어, 텍스트 = 전폭 오버레이 → 바가 좁아도 숫자는 절대 안 꺾임
         anchor = "right" if side == "ask" else "left"
         border = "left" if side == "ask" else "right"
@@ -1051,7 +1086,7 @@ def orderbook_ladder_html(bids, asks, *, prev_close=None, price=None,
                 f"<div style='position:absolute;top:1px;bottom:1px;{anchor}:0;width:{w}%;"
                 f"background:{bar_color}26;border-{border}:2px solid {bar_color}'></div>"
                 f"<div style='position:relative;text-align:{anchor};padding:1px 6px;"
-                f"font-family:{_MONO};font-size:10.5px;color:{bar_color};"
+                f"font-family:{_NUM_FONT};font-size:10.5px;color:{bar_color};"
                 f"white-space:nowrap'>{qty}</div></div></td>")
         if side == "ask":
             return f"<tr>{cell}{px_cell}<td style='width:31%'></td></tr>"
@@ -1060,7 +1095,7 @@ def orderbook_ladder_html(bids, asks, *, prev_close=None, price=None,
     rows = [_row(p, q, "ask") for p, q in sorted(asks, key=lambda x: -x[0])]
     if price:
         rows.append(f"<tr><td></td><td style='text-align:center;border:1px solid #e5e8ee55;"
-                    f"border-radius:6px;padding:2px;font-family:{_MONO};font-weight:700;"
+                    f"border-radius:6px;padding:2px;font-family:{_NUM_FONT};font-weight:700;"
                     f"font-size:13px'>{float(price):,.0f}{_pct(float(price))}</td><td></td></tr>")
     rows += [_row(p, q, "bid") for p, q in bids]
 
@@ -1070,7 +1105,7 @@ def orderbook_ladder_html(bids, asks, *, prev_close=None, price=None,
         c = f"color:{color}" if color else ""
         stat_rows.append(f"<div style='display:flex;justify-content:space-between;"
                          f"font-size:12px;padding:2px 0'><span style='color:{MUTED}'>{k}</span>"
-                         f"<span style='font-family:{_MONO};{c}'>{vv}</span></div>")
+                         f"<span style='font-family:{_NUM_FONT};{c}'>{vv}</span></div>")
     if week52:
         _stat("52주 최고", week52.get("high")); _stat("52주 최저", week52.get("low"))
     if day:
@@ -1113,8 +1148,8 @@ def market_tape_html(items: list[dict]) -> str:
         spans.append(
             f"<span style='margin:0 18px;white-space:nowrap'>"
             f"<b style='color:{TEXT}'>{it['label']}</b> "
-            f"<span style='font-family:{_MONO}'>{it['value']:,}</span> "
-            f"<span style='color:{color};font-family:{_MONO};font-size:11px'>"
+            f"<span style='font-family:{_NUM_FONT}'>{it['value']:,}</span> "
+            f"<span style='color:{color};font-family:{_NUM_FONT};font-size:11px'>"
             f"{arrow}{abs(chg):,} ({pct:+.2f}%)</span></span>")
     seq = "".join(spans)
     return f"""
@@ -1298,7 +1333,7 @@ def valuation_strip_html(v: dict) -> str:
         return (f'<div style="flex:1;min-width:150px;padding:4px 10px">'
                 f'<div style="color:{MUTED};font-size:0.72rem">{label}</div>'
                 f'<div style="font-size:1.35rem;font-weight:700;color:{col};'
-                f'font-family:{_MONO}">{val}</div>{extra}</div>')
+                f'font-family:{_NUM_FONT}">{val}</div>{extra}</div>')
 
     chip = ""
     if pct is not None:

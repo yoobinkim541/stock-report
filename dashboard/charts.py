@@ -517,7 +517,7 @@ def market_treemap(rows: list[dict], height: int | None = None):
     fig = go.Figure(go.Treemap(
         ids=ids, labels=labels, parents=parents, values=values, branchvalues="total",
         text=texts, textinfo="text", textposition="middle center",
-        textfont=dict(size=11, color="white", family=theme._MONO),
+        textfont=dict(size=11, color="white", family=theme._NUM_FONT),
         customdata=names, hovertext=pcts,
         marker=dict(colors=colors,
                     colorscale=[[0.0, _RED], [0.5, "#1a1d26"], [1.0, _GREEN]],

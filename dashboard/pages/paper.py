@@ -101,7 +101,7 @@ def _order_label(raw) -> str:
 
 
 def render():
-    st.title("🧪 자동 모의투자")
+    st.title("자동 모의투자")
     st.caption("신호 기반 자동 모의매매 — 모의 도메인 하드락 · 표시 전용 · **실거래 아님**")
     mk = st.segmented_control("시장", _SURFACES, default="kr_mock", key="paper_market",
                               format_func=lambda s: _SURF_LABEL.get(s, s),
