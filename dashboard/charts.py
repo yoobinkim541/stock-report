@@ -343,8 +343,8 @@ def _add_trade_markers(fig, hist, trades):
         return
     go = _go()
     for side, color, symbol, name, label in (
-        ("buy", _GREEN, "triangle-up", "Buy", "매수"),
-        ("sell", _RED, "triangle-down", "Sell", "매도"),
+        ("buy", _UP, "triangle-up", "Buy", "매수"),       # 토스증권 규약: 매수 빨강·매도 파랑
+        ("sell", _DOWN, "triangle-down", "Sell", "매도"),
         ("alert", "#f59e0b", "diamond", "Alert", "알림"),
     ):
         rows = [t for t in trades if str(t.get("side", "")).lower() == side]

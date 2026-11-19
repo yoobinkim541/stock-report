@@ -143,8 +143,8 @@ def _marker_payload(frame: pd.DataFrame, position: int, record: Mapping[str, Any
 def _add_sequence_trade_markers(figure, frame: pd.DataFrame, records: Sequence[Mapping[str, Any]]) -> None:
     go = charts._go()
     definitions = {
-        "buy": (charts._GREEN, "triangle-up", "Buy"),
-        "sell": (charts._RED, "triangle-down", "Sell"),
+        "buy": (charts._UP, "triangle-up", "Buy"),       # 매수 빨강·매도 파랑 (charts 와 동일)
+        "sell": (charts._DOWN, "triangle-down", "Sell"),
         "alert": ("#f59e0b", "diamond", "Alert"),
     }
     for side, (color, symbol, name) in definitions.items():
