@@ -15,14 +15,16 @@ from dashboard import cached, charts, data, theme, ui_actions
 
 
 def render():
-    summ = cached.portfolio_summary()
-    ph = data.phase_badge()
     rows = cached.holdings()
+    # 보유표·포트폴리오 총 자산과 같은 실시간 평가액(예수금 포함)
+    summ = data.with_live_holdings(cached.portfolio_summary(), rows)
+    ph = data.phase_badge()
 
     theme.render(theme.ticker_hero_html(
         symbol="PORT", name="내 포트폴리오", price=summ["total_usd"],
         change=summ.get("pnl_usd"), change_pct=summ["return_pct"],
-        asof=f"USD 해외북 · 예수금 ${summ.get('cash_usd', 0):,.0f} 포함 · 스냅샷 기준",
+        asof=(f"USD 해외북 · 예수금 ${summ.get('cash_usd', 0):,.0f} 포함 · "
+              + ("실시간 시세" if summ.get("live") else "스냅샷 기준")),
         currency="USD"))
 
     c1, c2, c3 = st.columns(3)

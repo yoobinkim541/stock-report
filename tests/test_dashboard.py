@@ -51,6 +51,19 @@ def test_portfolio_summary_includes_cash_in_total_not_return(tmp_path):
     assert abs(s["return_pct"] - (240 / 200 - 1) * 100) < 1e-6   # 예수금 미포함
 
 
+def test_with_live_holdings_matches_holdings_table_plus_cash():
+    """홈 히어로 총액 = 보유표(실시간 오버레이) 합계 + 예수금 — 스냅샷 가격으로 어긋나지 않게."""
+    snap_summary = {"total_usd": 309.78, "holdings_usd": 240, "cash_usd": 69.78,
+                    "cost_usd": 200, "pnl_usd": 40, "return_pct": 20.0, "n_holdings": 1}
+    rows = [{"ticker": "MSFT", "value": 180.0, "cost": 200.0, "rt": True}]
+    s = data.with_live_holdings(snap_summary, rows)
+    assert s["total_usd"] == pytest.approx(180.0 + 69.78)
+    assert s["pnl_usd"] == pytest.approx(-20.0)
+    assert s["return_pct"] == pytest.approx(-10.0)
+    assert s["live"] is True
+    assert data.with_live_holdings(snap_summary, []) is snap_summary
+
+
 def test_holding_position(tmp_path):
     """보유 포지션 조회 — 평단·주수·손익 (J2 · 해외 general)."""
     snap = tmp_path / "portfolio_snapshot.json"

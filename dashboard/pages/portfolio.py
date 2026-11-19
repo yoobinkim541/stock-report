@@ -40,10 +40,11 @@ def _headline(hist, rows, summary=None):
     """총액($·₩) + 예수금 + 기간 수익 분해 (환율 기여 — 원화 투자자 관점)."""
     fx = data.fx_attribution(hist, days=30)
     cash_usd = (summary or cached.portfolio_summary()).get("cash_usd", 0) or 0
-    total = sum((r.get("value") or 0) for r in rows)
+    held = sum((r.get("value") or 0) for r in rows)
     last = hist[-1] if hist else {}
     m = st.columns(5)
-    m[0].metric("총 평가액 ($)", data.f_usd(total, 0))
+    m[0].metric("총 자산 ($)", data.f_usd(held + cash_usd, 0),
+                help=f"보유 평가 {data.f_usd(held, 0)} + 예수금 {data.f_usd(cash_usd, 0)} — 홈 상단과 같은 값")
     m[1].metric("예수금 ($)", data.f_usd(cash_usd, 0))
     krw = last.get("total_krw")
     m[2].metric("총 평가액 (₩)", f"₩{krw:,.0f}" if krw else "—",

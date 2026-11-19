@@ -80,6 +80,22 @@ def portfolio_summary(path: str | None = None) -> dict:
             "cost_usd": cost, "pnl_usd": holdings - cost}
 
 
+def with_live_holdings(summary: dict, rows: list[dict]) -> dict:
+    """헤더 요약을 보유표(load_holdings — 실시간 가격 오버레이)와 같은 평가액으로 맞춘다.
+
+    portfolio_summary 는 스냅샷 가격이라 홈 히어로($9,699.60)와 포트폴리오 보유 합계($9,082 +
+    예수금 $553)가 실시간 시세 변동분(약 $64)만큼 어긋났다. 예수금은 스냅샷 값 그대로.
+    """
+    if not rows:
+        return summary
+    holdings = sum(r.get("value") or 0 for r in rows)
+    cost = sum(r.get("cost") or 0 for r in rows)
+    cash = summary.get("cash_usd", 0) or 0
+    return {**summary, "total_usd": holdings + cash, "holdings_usd": holdings, "cost_usd": cost,
+            "pnl_usd": holdings - cost, "return_pct": (holdings / cost - 1) * 100 if cost else 0.0,
+            "live": any(r.get("rt") for r in rows)}
+
+
 def load_holdings(path: str | None = None) -> list[dict]:
     """USD 해외북 보유 정규화 (비중 % 포함) — 표·리스크 가중치용. general+fractional 티커별 합산."""
     snap = _load_snap(path)
