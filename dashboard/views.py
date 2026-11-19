@@ -1332,8 +1332,8 @@ NEWS_SOURCE_LABEL = {
     "fred": "🏛️ FRED 매크로",
     "worldgovernmentbonds": "🏦 국채금리",
     "yahoo_finance": "📈 시장 스냅샷",
-    "polymarket": "🎲 예측시장",
-    "kalshi": "🎲 예측시장",
+    "polymarket": "🎲 예측시장 · Polymarket",
+    "kalshi": "🎲 예측시장 · Kalshi",
     "economic_calendar": "📅 경제 일정",
     "fed": "🏛️ 연준",
 }
