@@ -2425,6 +2425,9 @@ def _institutional(ticker):
         _kr_broker_opinions_section(i.get("broker_opinions"))
         return   # 13F·SEC Form4 는 미국 종목 전용 — 국내는 여기서 끝
 
+    _famous_holders_section(ticker)
+    _congress_ticker_section(ticker)
+
     ins = cached.insider(ticker)
     txs = ins.get("transactions") or []
     if txs:
@@ -2439,6 +2442,78 @@ def _institutional(ticker):
         detail = ui_actions.user_message(ins.get("error"), "")
         st.caption("내부자 거래를 불러오지 못했습니다." if not detail else f"내부자거래: {detail}")
     st.caption("정보·표시용")
+
+
+_INVESTOR_ACTIONS = {"new": ("신규 편입", 1), "added": ("추가 매수", 1), "trimmed": ("일부 매도", -1),
+                     "exited": ("전량 매도", -1), "held": ("보유", 0)}
+
+
+def _usd_short(v) -> str:
+    try:
+        f = float(v or 0)
+    except (TypeError, ValueError):
+        return "—"
+    for div, unit in ((1e9, "B"), (1e6, "M"), (1e3, "K")):
+        if abs(f) >= div:
+            return f"${f / div:,.1f}{unit}"
+    return f"${f:,.0f}"
+
+
+def _famous_holders_section(ticker):
+    """이 종목을 들고 있거나 이번 분기 전량 매도한 유명 투자자(13F)."""
+    holders = cached.famous_holders(ticker) or []
+    rows = []
+    for h in holders:
+        label, direction = _INVESTOR_ACTIONS.get(h.get("action") or "", ("옵션만", 0))
+        exited = h.get("action") == "exited"
+        tags = [label] + [f"{'풋' if o.get('put_call') == 'Put' else '콜'} {_usd_short(o.get('value_usd'))}"
+                          for o in h.get("options") or []]
+        chg = h.get("shares_change_pct")
+        if h.get("action") is None:
+            value, delta = "—", ""
+        elif exited:
+            value, delta = f"직전 {float(h.get('prior_weight_pct') or 0):.1f}%", "전량 매도"
+        else:
+            value = f"{float(h.get('weight_pct') or 0):.1f}%"
+            delta = " · ".join(p for p in (
+                f"{h['rank']}위 / {h.get('holdings_count') or 0}" if h.get("rank") else "",
+                f"주식 수 {chg * 100:+.0f}%" if chg is not None and h.get("action") in ("added", "trimmed") else "",
+            ) if p)
+        rows.append({"ticker": "", "name": h.get("short_name") or h.get("key"), "tags": tags,
+                     "memo": _usd_short(h.get("value_usd")) if not exited and h.get("value_usd") else "",
+                     "value": value, "delta": delta, "direction": direction,
+                     "title": f"{h.get('display_name')} · {h.get('report_date') or ''} 분기말 · "
+                              f"{h.get('filing_date') or ''} 공시"})
+    held = sum(1 for h in holders if h.get("action") not in (None, "exited"))
+    quarter = next((h.get("report_date") for h in holders if h.get("report_date")), None)
+    theme.render(theme.stock_list_html(
+        rows, title="유명 투자자", link=False,
+        meta=f"보유 {held}명" + (f" · {quarter} 분기말 13F" if quarter else " · 최신 13F"),
+        empty="추적 중인 유명 투자자 중 이 종목을 보유한 곳이 없습니다."))
+    st.caption("값은 그 투자자 롱 포트폴리오 안 비중 · 매매는 직전 분기 대비 주식 수 ±5% 이상 · "
+               "13F 는 분기말 보유를 45일 안에 신고하는 지연 자료")
+
+
+_CONGRESS_TX = {"Purchase": "매수", "Sale": "매도", "Exchange": "교환"}
+
+
+def _congress_ticker_section(ticker):
+    """이 종목의 미 하원의원 공시 거래(최근 1년)."""
+    ct = cached.congress_ticker_trades(ticker) or {}
+    rows = ct.get("rows") or []
+    if not rows:
+        st.caption("최근 1년 이 종목의 미 하원의원 공시 거래 없음")
+        return
+    head = (f"매수 {ct.get('buy_members', 0)}명 {_usd_short(ct.get('buy_amount_mid'))} · "
+            f"매도 {ct.get('sell_members', 0)}명 {_usd_short(ct.get('sell_amount_mid'))}")
+    st.markdown("##### 🏛️ 의원 거래 (미 하원 공시 · 최근 1년) — " + head.replace("$", r"\$"))
+    st.dataframe(pd.DataFrame([{
+        "일자": r.get("date"), "의원": r.get("representative"),
+        "구분": _CONGRESS_TX.get(r.get("type"), r.get("type")), "금액(구간)": r.get("amount"),
+        "명의": r.get("owner"), "원문": r.get("source_url"),
+    } for r in rows]), hide_index=True, width="stretch", height=min(320, 38 + 35 * len(rows)),
+        column_config={"원문": st.column_config.LinkColumn("원문", display_text="열기")})
+    st.caption("금액은 신고 구간이고 추정 합계는 구간 중간값 · 거래 후 최대 45일 뒤 공시 · 정보·표시용")
 
 
 def _disclosures(ticker):

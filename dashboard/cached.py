@@ -190,6 +190,21 @@ def congress_top_traded(days=90):
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
+def famous_holders(ticker):
+    return views.famous_holders(ticker)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def watchlist_investor_moves(tickers):
+    return views.watchlist_investor_moves(tickers)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def congress_ticker_trades(ticker):
+    return views.congress_ticker_trades(ticker)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
 def institution_screen_explain(screen, congress):
     return views.institution_screen_explain(screen, congress)
 

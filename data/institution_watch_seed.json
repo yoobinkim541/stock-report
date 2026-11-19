@@ -2,6 +2,7 @@
   {
     "key": "founders_fund",
     "display_name": "Founders Fund (Peter Thiel)",
+    "short_name": "피터 틸",
     "category": "venture_fund",
     "source_kind": "seed",
     "freshness": "proxy",

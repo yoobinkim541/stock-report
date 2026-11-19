@@ -50,6 +50,8 @@ def _stub_investor_data(monkeypatch):
     monkeypatch.setattr(cached, "institution_screener",
                         lambda keys: {"new_buys": [], "increased": [], "decreased": []})
     monkeypatch.setattr(cached, "congress_top_traded", lambda days=90: {"bought": [], "sold": []})
+    monkeypatch.setattr(cached, "watchlist_investor_moves", lambda tickers: {})
+    monkeypatch.setattr(cached, "holdings", lambda: [])
 
 
 def _lists(at) -> list[str]:
@@ -370,3 +372,37 @@ def test_editor_persists_normalized_symbols_and_rejects_invalid_input(monkeypatc
     ]
     assert data.remove_watchlist_ticker("005930.KS")
     assert watchlist.list_watchlist() == []
+
+
+def test_my_stocks_section_buckets_watchlist_and_holdings_by_investor_action(monkeypatch):
+    """관심종목·보유 미국 종목만 13F 로 대조 — 보유자 수 순, 매매는 행동별 칸으로."""
+    monkeypatch.setattr(data, "load_watchlist", lambda: _ROWS + [
+        {"ticker": "005930", "name": "삼성전자", "source": "manual", "added_at": "2026-07-01T00:00:00"}])
+    monkeypatch.setattr(cached, "watchlist_quotes", lambda tickers: {})
+    monkeypatch.setattr(cached, "holdings", lambda: [{"ticker": "AAPL", "name": "애플"}])
+    seen = {}
+
+    def _moves(tickers):
+        seen["tickers"] = tuple(tickers)
+        return {
+            "NVDA": [{"key": "a", "short_name": "투자자A", "action": "added", "weight_pct": 6.0,
+                      "shares_change_pct": 0.5},
+                     {"key": "b", "short_name": "투자자B", "action": "held", "weight_pct": 2.0}],
+            "AAPL": [{"key": "c", "short_name": "투자자C", "action": "held", "weight_pct": 20.0},
+                     {"key": "d", "short_name": "투자자D", "action": "exited", "weight_pct": 0.0,
+                      "prior_weight_pct": 3.0}],
+        }
+    monkeypatch.setattr(cached, "watchlist_investor_moves", _moves)
+
+    at = AppTest.from_string(_RUN_SCRIPT, default_timeout=30)
+    at.run()
+
+    assert not at.exception, str(at.exception)
+    assert set(seen["tickers"]) == {"PLTR", "NVDA", "AAPL"}, "국내 종목은 13F 대조 대상이 아님"
+    lists = _lists(at)
+    holders = next(h for h in lists if "보유 중인 유명 투자자" in h)
+    assert _tickers(holders) == ["NVDA", "AAPL"]
+    added = next(h for h in lists if "<b>추가 매수</b>" in h)
+    exited = next(h for h in lists if "<b>전량 매도</b>" in h and "투자자D" in h)
+    assert _tickers(added) == ["NVDA"] and "+50%" in added
+    assert _tickers(exited) == ["AAPL"] and "직전 최대 3.0%" in exited

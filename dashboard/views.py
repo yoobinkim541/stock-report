@@ -1516,7 +1516,34 @@ def institution_screener(keys) -> dict:
         from reports import institution_watch as iw
         return iw.screen_position_changes(list(keys))
     except Exception:
-        return {"new_buys": [], "increased": [], "decreased": []}
+        return {"new_buys": [], "increased": [], "decreased": [], "exited": []}
+
+
+def famous_holders(ticker: str) -> list[dict]:
+    """이 종목을 보유(또는 이번 분기 전량 매도)한 유명 투자자 — 13F 최신 분기. graceful []."""
+    try:
+        from reports import institution_watch as iw
+        return iw.investor_moves_for_tickers([ticker]).get(str(ticker).strip().upper(), [])
+    except Exception:
+        return []
+
+
+def watchlist_investor_moves(tickers) -> dict:
+    """관심·보유 종목별 유명 투자자 보유·매매 {TICKER: [...]} — graceful {}."""
+    try:
+        from reports import institution_watch as iw
+        return iw.investor_moves_for_tickers(list(tickers))
+    except Exception:
+        return {}
+
+
+def congress_ticker_trades(ticker: str, days: int = 365) -> dict:
+    """이 종목의 하원의원 공시 거래 — graceful 빈 결과."""
+    try:
+        from providers import congress_trading as ct
+        return ct.ticker_transactions(ticker, days=days)
+    except Exception:
+        return {"rows": [], "buy_members": 0, "sell_members": 0, "buy_amount_mid": 0.0, "sell_amount_mid": 0.0}
 
 
 def congress_top_traded(days: int = 90) -> dict:
@@ -1560,6 +1587,7 @@ def institution_watch_summary(keys=None, *, with_llm_summary: bool = False) -> d
             institutions.append({
                 "key": snapshot["institution_key"],
                 "display_name": snapshot["display_name"],
+                "short_name": snapshot.get("short_name") or snapshot["display_name"],
                 "source_kind": snapshot.get("source_kind", ""),
                 "category": snapshot.get("category", ""),
                 "freshness": snapshot.get("freshness", ""),
@@ -1567,6 +1595,16 @@ def institution_watch_summary(keys=None, *, with_llm_summary: bool = False) -> d
                 "availability_flags": dict(snapshot.get("availability_flags") or {}),
                 "top_holdings": list(snapshot.get("top_holdings") or []),
                 "total_value_usd": snapshot.get("total_value_usd"),
+                "portfolio_concentration": snapshot.get("portfolio_concentration"),
+                "options_exposure": snapshot.get("options_exposure"),
+                "put_value_usd": snapshot.get("put_value_usd"),
+                "call_value_usd": snapshot.get("call_value_usd"),
+                "options_top": list(snapshot.get("options_top") or []),
+                "changes": snapshot.get("changes"),
+                "return_proxy": snapshot.get("return_proxy"),
+                "filing_date": snapshot.get("filing_date"),
+                "report_date": snapshot.get("report_date"),
+                "prior_report_date": snapshot.get("prior_report_date"),
                 "notes": list(snapshot.get("notes") or []),
                 "primary_sources": list(snapshot.get("primary_sources") or []),
                 "metric_capabilities": list(snapshot.get("metric_capabilities") or []),

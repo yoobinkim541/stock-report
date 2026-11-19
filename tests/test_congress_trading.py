@@ -156,3 +156,27 @@ def test_load_all_graceful_on_network_failure(monkeypatch, tmp_path):
     monkeypatch.setattr(ct, "_get", _boom)
 
     assert ct._load_all() == []
+
+
+def test_ticker_transactions_aggregates_members_and_drops_future_dates(monkeypatch):
+    from datetime import datetime, timedelta
+
+    def d(days_ago):
+        return (datetime.now() - timedelta(days=days_ago)).strftime("%m/%d/%Y")
+
+    rows = [
+        {"representative": "A", "ticker": "NVDA", "type": "Purchase", "transaction_date": d(10), "amount_mid": 8000.5},
+        {"representative": "A", "ticker": "NVDA", "type": "Purchase", "transaction_date": d(40), "amount_mid": 8000.5},
+        {"representative": "B", "ticker": "nvda", "type": "Sale", "transaction_date": d(5), "amount_mid": 32500.5},
+        {"representative": "C", "ticker": "NVDA", "type": "Purchase", "transaction_date": d(400), "amount_mid": 1e6},
+        {"representative": "D", "ticker": "NVDA", "type": "Purchase", "transaction_date": d(-30), "amount_mid": 1e6},
+        {"representative": "E", "ticker": "AAPL", "type": "Purchase", "transaction_date": d(1), "amount_mid": 1e6},
+    ]
+    monkeypatch.setattr(ct, "_load_all", lambda: rows)
+
+    out = ct.ticker_transactions("NVDA", limit=2)
+
+    assert (out["buy_members"], out["sell_members"]) == (1, 1)
+    assert out["buy_amount_mid"] == 16001.0, "1년 밖·미래 거래일이 합산됨"
+    assert [r["representative"] for r in out["rows"]] == ["B", "A"]
+    assert out["rows"][0]["date"] == (datetime.now() - timedelta(days=5)).date().isoformat()

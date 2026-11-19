@@ -25,7 +25,7 @@ def test_filers_registry_includes_expanded_named_investors():
     expected = {
         "citadel": "0001423053",
         "duquesne": "0001536411",
-        "pershing_square": "0001336528",
+        "pershing_square": "0002026053",   # 2026-Q2 부터 PERSHING SQUARE INC. 가 13F-HR 신고(구 CIK 는 13F-NT)
         "point72": "0001603466",
         "third_point": "0001040273",
         "tudor": "0000923093",
@@ -190,3 +190,102 @@ def test_resolve_tickers_by_cusip_graceful_on_failure(monkeypatch, tmp_path):
 
     out = thirteenf._resolve_tickers_by_cusip(["999999999"])
     assert out == {"999999999": None}
+
+
+class _FakeResp:
+    def __init__(self, body):
+        self._body = body
+
+    def read(self):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def test_parse_info_table_keeps_puts_and_calls_apart_from_shares():
+    """풋·콜은 기초자산 CUSIP 을 그대로 쓴다 — 합산하면 버리의 PLTR 풋이 롱처럼 보인다."""
+    xml = f"""<informationTable xmlns="{_NS}">
+  <infoTable><nameOfIssuer>PALANTIR</nameOfIssuer><cusip>69608A108</cusip><value>900</value>
+    <shrsOrPrnAmt><sshPrnamt>50</sshPrnamt><sshPrnamtType>SH</sshPrnamtType></shrsOrPrnAmt>
+    <putCall>Put</putCall></infoTable>
+  <infoTable><nameOfIssuer>PALANTIR</nameOfIssuer><cusip>69608A108</cusip><value>100</value>
+    <shrsOrPrnAmt><sshPrnamt>5</sshPrnamt><sshPrnamtType>SH</sshPrnamtType></shrsOrPrnAmt></infoTable>
+</informationTable>""".encode()
+    rows = thirteenf._parse_info_table(xml)
+
+    assert [(r["put_call"], r["value_usd"]) for r in rows] == [("Put", 900.0), ("", 100.0)]
+
+
+def test_build_snapshot_splits_options_and_weights_longs_only():
+    rows = [
+        {"issuer": "PALANTIR", "cusip": "P", "put_call": "Put", "share_type": "SH", "value_usd": 900.0, "shares": 50.0},
+        {"issuer": "LULU", "cusip": "L", "put_call": "", "share_type": "SH", "value_usd": 75.0, "shares": 1.0},
+        {"issuer": "MOH", "cusip": "M", "put_call": "", "share_type": "SH", "value_usd": 25.0, "shares": 1.0},
+    ]
+    meta = {"cik": "1", "accession": "a", "filing_date": "2026-11-14", "report_date": "2026-09-30"}
+    snap = thirteenf._build_snapshot("scion", meta, rows, {"P": "PLTR", "L": "LULU", "M": "MOH"})
+
+    assert [h["ticker"] for h in snap["holdings"]] == ["LULU", "MOH"]
+    assert [h["weight_pct"] for h in snap["holdings"]] == [75.0, 25.0]
+    assert snap["total_value_usd"] == 100.0
+    assert snap["put_value_usd"] == 900.0
+    assert snap["options"][0]["ticker"] == "PLTR" and snap["options"][0]["weight_pct"] == 90.0
+
+
+def test_value_scale_detects_filers_still_reporting_thousands():
+    """Duquesne 실측 — value 를 천달러로 신고해 주당 역산가가 $0.0x 가 된다."""
+    thousands = [{"put_call": "", "share_type": "SH", "value_usd": v, "shares": s}
+                 for v, s in ((1300, 10000), (5000, 40000), (800, 9000))]
+    dollars = [{**r, "value_usd": r["value_usd"] * 1000} for r in thousands]
+
+    assert thirteenf._value_scale(thousands) == 1000
+    assert thirteenf._value_scale(dollars) == 1
+
+
+def test_resolve_prefers_equity_and_retries_bond_tickers(monkeypatch, tmp_path):
+    """과거 캐시의 채권 티커('GOOGL 6.25 05/15/29 B')는 다시 조회해 주식만 고른다."""
+    cache_path = tmp_path / "cusip_ticker_map.json"
+    cache_path.write_text(json.dumps({"02079K602": "GOOGL 6.25 05/15/29 B"}))
+    monkeypatch.setattr(thirteenf, "_CUSIP_CACHE_PATH", cache_path)
+
+    def fake_urlopen(req, timeout=20):
+        return _FakeResp(json.dumps([{"data": [
+            {"ticker": "GOOGL 6.25 05/15/29 B", "marketSector": "Corp", "exchCode": "US"},
+            {"ticker": "GOOGL", "marketSector": "Equity", "exchCode": "US"},
+        ]}]).encode())
+
+    import urllib.request
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    assert thirteenf._resolve_tickers_by_cusip(["02079K602"]) == {"02079K602": "GOOGL"}
+
+
+def test_resolve_failure_is_not_cached_and_definitive_miss_is(monkeypatch, tmp_path):
+    """한도 초과·네트워크 실패를 '티커 없음'으로 굳히면 미국 종목이 30일간 티커 없이 남는다(실측 3,780건)."""
+    cache_path = tmp_path / "cusip_ticker_map.json"
+    monkeypatch.setattr(thirteenf, "_CUSIP_CACHE_PATH", cache_path)
+    import urllib.request
+
+    def boom(req, timeout=20):
+        raise OSError("HTTP Error 429: Too Many Requests")
+
+    monkeypatch.setattr(urllib.request, "urlopen", boom)
+    assert thirteenf._resolve_tickers_by_cusip(["191216100"]) == {"191216100": None}
+    assert not cache_path.exists()
+
+    calls = []
+
+    def ok(req, timeout=20):
+        calls.append(1)
+        return _FakeResp(json.dumps([{"data": [{"ticker": "KO", "exchCode": "US"}]},
+                                     {"warning": "No identifier found."}]).encode())
+
+    monkeypatch.setattr(urllib.request, "urlopen", ok)
+    out = thirteenf._resolve_tickers_by_cusip(["191216100", "G0000000X"])
+    assert out == {"191216100": "KO", "G0000000X": None}
+    thirteenf._resolve_tickers_by_cusip(["191216100", "G0000000X"])
+    assert len(calls) == 1, "확정 미매핑(No identifier found)을 다시 조회함"

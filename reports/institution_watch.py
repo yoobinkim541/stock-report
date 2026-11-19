@@ -8,7 +8,7 @@ import logging
 import os
 import re
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -22,78 +22,13 @@ logger = logging.getLogger(__name__)
 KST = timezone(timedelta(hours=9))
 HISTORY_PATH = Path.home() / "reports" / "ml-data" / "notable_investors_13f.jsonl"
 _SEED_PATH = Path(__file__).resolve().parent.parent / "data" / "institution_watch_seed.json"
-_DEFAULT_13F_META = {
-    "berkshire": {
-        "category": "holding_company",
-        "primary_sources": ["13f"],
-        "metric_capabilities": ["holdings", "concentration", "source_refs"],
-        "refresh_policy": "quarterly",
-        "confidence": 0.95,
-    },
-    "bridgewater": {
-        "category": "hedge_fund",
-        "primary_sources": ["13f"],
-        "metric_capabilities": ["holdings", "concentration", "source_refs"],
-        "refresh_policy": "quarterly",
-        "confidence": 0.9,
-    },
-    "scion": {
-        "category": "hedge_fund",
-        "primary_sources": ["13f"],
-        "metric_capabilities": ["holdings", "concentration", "source_refs"],
-        "refresh_policy": "quarterly",
-        "confidence": 0.9,
-    },
-    "citadel": {
-        "category": "hedge_fund",
-        "primary_sources": ["13f"],
-        "metric_capabilities": ["holdings", "concentration", "source_refs"],
-        "refresh_policy": "quarterly",
-        "confidence": 0.9,
-    },
-    "duquesne": {
-        "category": "family_office",
-        "primary_sources": ["13f"],
-        "metric_capabilities": ["holdings", "concentration", "source_refs"],
-        "refresh_policy": "quarterly",
-        "confidence": 0.9,
-    },
-    "pershing_square": {
-        "category": "hedge_fund",
-        "primary_sources": ["13f"],
-        "metric_capabilities": ["holdings", "concentration", "source_refs"],
-        "refresh_policy": "quarterly",
-        "confidence": 0.9,
-    },
-    "point72": {
-        "category": "hedge_fund",
-        "primary_sources": ["13f"],
-        "metric_capabilities": ["holdings", "concentration", "source_refs"],
-        "refresh_policy": "quarterly",
-        "confidence": 0.9,
-    },
-    "third_point": {
-        "category": "hedge_fund",
-        "primary_sources": ["13f"],
-        "metric_capabilities": ["holdings", "concentration", "source_refs"],
-        "refresh_policy": "quarterly",
-        "confidence": 0.9,
-    },
-    "tudor": {
-        "category": "hedge_fund",
-        "primary_sources": ["13f"],
-        "metric_capabilities": ["holdings", "concentration", "source_refs"],
-        "refresh_policy": "quarterly",
-        "confidence": 0.9,
-    },
-    "nps": {
-        "category": "pension",
-        "primary_sources": ["13f"],
-        "metric_capabilities": ["holdings", "concentration", "source_refs"],
-        "refresh_policy": "quarterly",
-        "confidence": 0.85,
-    },
-}
+_13F_CATEGORY = {
+    "berkshire": "holding_company", "icahn": "holding_company",
+    "duquesne": "family_office", "nps": "pension", "gates_foundation": "foundation",
+    "ark": "asset_manager", "fundsmith": "asset_manager", "himalaya": "asset_manager",
+}   # 나머지는 hedge_fund
+_13F_CONFIDENCE = {"berkshire": 0.95, "nps": 0.85}   # 나머지 0.9
+_STALE_AFTER_DAYS = 150   # 13F 는 분기말+45일 마감 — 최근 신고가 이보다 오래면 신고가 끊긴 것
 _UNAVAILABLE_METRICS = (
     "portfolio_concentration",
     "cash_ratio",
@@ -114,23 +49,23 @@ def _load_seed_rows() -> list[dict]:
 def _build_registry() -> dict[str, dict]:
     registry: dict[str, dict] = {}
     for key, meta in thirteenf.FILERS.items():
-        defaults = _DEFAULT_13F_META.get(key, {})
         registry[key] = {
             "key": key,
             "display_name": meta["name"],
+            "short_name": meta.get("short") or meta["name"],
             "source_kind": "13f",
-            "category": defaults.get("category") or "hedge_fund",
+            "category": _13F_CATEGORY.get(key, "hedge_fund"),
             "freshness": "fresh",
-            "primary_sources": list(defaults.get("primary_sources") or ["13f"]),
-            "metric_capabilities": list(defaults.get("metric_capabilities")
-                                         or ["holdings", "concentration", "source_refs"]),
-            "refresh_policy": defaults.get("refresh_policy") or "quarterly",
-            "confidence": defaults.get("confidence") or 0.9,
+            "primary_sources": ["13f"],
+            "metric_capabilities": ["holdings", "concentration", "options", "source_refs"],
+            "refresh_policy": "quarterly",
+            "confidence": _13F_CONFIDENCE.get(key, 0.9),
         }
     for row in _load_seed_rows():
         registry[row["key"]] = {
             "key": row["key"],
             "display_name": row.get("display_name") or row["key"],
+            "short_name": row.get("short_name") or row.get("display_name") or row["key"],
             "source_kind": row.get("source_kind") or "seed",
             "category": row.get("category") or "seed",
             "freshness": row.get("freshness") or "proxy",
@@ -172,6 +107,7 @@ def _normalize_seed_snapshot(meta: dict, row: dict) -> dict:
     snapshot = {
         "institution_key": meta["key"],
         "display_name": row.get("display_name") or meta["display_name"],
+        "short_name": row.get("short_name") or meta.get("short_name") or meta["display_name"],
         "source_kind": "seed",
         "category": row.get("category") or meta.get("category") or "seed",
         "freshness": freshness,
@@ -237,17 +173,96 @@ def _compute_return_proxy(current: list[dict] | None, prior: list[dict] | None) 
     return round(weighted_sum / weight_total, 4)
 
 
-_SCREEN_DELTA_THRESHOLD = 0.005   # 0.5%p (분수 단위, weight_pct/100 스케일)
+_SHARE_MOVE_THRESHOLD = 0.05   # 주식 수 ±5% 미만은 '유지'(리밸런싱·반올림 잡음)
+_MOVE_LIST_LIMIT = 10
+_MATERIAL_WEIGHT_PCT = 1.0     # 알림·관심종목 자동추가는 포트 비중 1% 이상 매매만
+
+
+def _is_stale(filing_date, today: date | None = None) -> bool:
+    """최근 13F 접수일이 _STALE_AFTER_DAYS 보다 오래됐으면 True(신고 중단 — 예: Scion 2025-11 이후)."""
+    try:
+        filed = date.fromisoformat(str(filing_date)[:10])
+    except ValueError:
+        return False
+    return ((today or datetime.now(KST).date()) - filed).days > _STALE_AFTER_DAYS
+
+
+def classify_moves(current: list[dict] | None, prior: list[dict] | None) -> list[dict]:
+    """직전 분기 대비 종목별 매매 — CUSIP 매칭, 주식 수 변화로 판정.
+
+    가격만 올라 비중이 커진 종목을 '매수'로 오인하지 않도록 비중이 아니라 주식 수를 본다.
+    action: new(신규 편입)·added(추가 매수)·trimmed(일부 매도)·exited(전량 매도)·held(유지).
+    weight_pct·prior_weight_pct 는 %, delta_pct·shares_change_pct 는 분수."""
+    prior_by = {p["cusip"]: p for p in (prior or []) if p.get("cusip")}
+    moves: list[dict] = []
+    seen: set[str] = set()
+    for rank, row in enumerate(current or [], 1):
+        cusip = row.get("cusip")
+        if not cusip:
+            continue
+        seen.add(cusip)
+        p = prior_by.get(cusip)
+        now_w = float(row.get("weight_pct") or 0.0)
+        prior_w = float(p.get("weight_pct") or 0.0) if p else 0.0
+        share_chg = None
+        if p is None:
+            action = "new"
+        else:
+            ps, cs = float(p.get("shares") or 0), float(row.get("shares") or 0)
+            share_chg = cs / ps - 1 if ps > 0 else None
+            if share_chg is not None and share_chg >= _SHARE_MOVE_THRESHOLD:
+                action = "added"
+            elif share_chg is not None and share_chg <= -_SHARE_MOVE_THRESHOLD:
+                action = "trimmed"
+            else:
+                action = "held"
+        name = row.get("issuer") or row.get("ticker") or cusip
+        moves.append({
+            "cusip": cusip, "ticker": row.get("ticker"), "issuer": name, "name": name,
+            "action": action, "rank": rank,
+            "weight_pct": round(now_w, 2), "prior_weight_pct": round(prior_w, 2),
+            "delta_pct": round((now_w - prior_w) / 100.0, 4),
+            "shares_change_pct": None if share_chg is None else round(share_chg, 4),
+            "value_usd": row.get("value_usd"), "shares": row.get("shares"),
+        })
+    for cusip, p in prior_by.items():
+        if cusip in seen:
+            continue
+        prior_w = float(p.get("weight_pct") or 0.0)
+        name = p.get("issuer") or p.get("ticker") or cusip
+        moves.append({
+            "cusip": cusip, "ticker": p.get("ticker"), "issuer": name, "name": name,
+            "action": "exited", "rank": None,
+            "weight_pct": 0.0, "prior_weight_pct": round(prior_w, 2),
+            "delta_pct": round(-prior_w / 100.0, 4), "shares_change_pct": -1.0,
+            "value_usd": 0.0, "shares": 0.0,
+        })
+    return moves
+
+
+def _summarize_moves(moves: list[dict]) -> dict:
+    """매매 목록 → 버킷별 상위(신규·추가는 현재 비중, 일부 매도는 비중 감소폭, 전량 매도는 직전 비중 순)."""
+    by_action = {a: [m for m in moves if m["action"] == a] for a in ("new", "added", "trimmed", "exited")}
+    by_action["new"].sort(key=lambda m: -m["weight_pct"])
+    by_action["added"].sort(key=lambda m: -m["weight_pct"])
+    by_action["trimmed"].sort(key=lambda m: m["delta_pct"])
+    by_action["exited"].sort(key=lambda m: -m["prior_weight_pct"])
+    out = {a: rows[:_MOVE_LIST_LIMIT] for a, rows in by_action.items()}
+    out["counts"] = {a: len(rows) for a, rows in by_action.items()}
+    return out
+
+
+_SCREEN_BUCKETS = {"new": "new_buys", "added": "increased", "trimmed": "decreased", "exited": "exited"}
 
 
 def screen_position_changes(institution_keys: list[str]) -> dict:
-    """13F 기관들의 직전분기 대비 종목별 비중 변화를 교차 집계 — 신규편입/증가/감소.
+    """13F 기관들의 직전분기 대비 매매를 교차 집계 — 신규편입/추가 매수/일부 매도/전량 매도.
 
-    각 기관 current/prior 보유를 CUSIP 매칭해 delta_pct(분수)를 구하고, 같은 티커를
-    여러 기관이 어떻게 움직였는지 모아 기관수 내림차순→|평균변화폭| 내림차순 정렬,
-    각 버킷 상위 10개. return_proxy 와 같은 raw value_usd/shares 기반(외부가격 불요).
+    classify_moves(주식 수 기준)로 판정해 같은 종목(CUSIP)을 여러 기관이 어떻게 움직였는지
+    모은다. 기관수 내림차순→|평균 비중 변화| 내림차순, 각 버킷 상위 10개. 신고가 끊긴
+    기관(_is_stale)은 과거 매매가 지금 신호처럼 보이지 않게 뺀다.
     유빈님 요청(감사 후속, 2026-08-15)."""
-    buckets: dict[str, dict[str, dict]] = {"new_buys": {}, "increased": {}, "decreased": {}}
+    buckets: dict[str, dict[str, dict]] = {name: {} for name in _SCREEN_BUCKETS.values()}
 
     for key in institution_keys:
         try:
@@ -255,35 +270,17 @@ def screen_position_changes(institution_keys: list[str]) -> dict:
             prior = thirteenf.latest_holdings(key, skip=1)
         except Exception:
             continue
-        if not current or not prior:
+        if not current or not prior or _is_stale(current.get("filing_date")):
             continue
-        cur_rows = current.get("holdings") or []
-        prior_by_cusip = {p["cusip"]: p for p in (prior.get("holdings") or []) if p.get("cusip")}
-
-        for row in cur_rows:
-            cusip = row.get("cusip")
-            if not cusip:
+        for move in classify_moves(current.get("holdings"), prior.get("holdings")):
+            bucket_name = _SCREEN_BUCKETS.get(move["action"])
+            if bucket_name is None:
                 continue
-            ticker = row.get("ticker")
-            name = row.get("issuer") or ticker or cusip
-            now_w = float(row.get("weight_pct") or 0.0) / 100.0
-            prior_row = prior_by_cusip.get(cusip)
-            prior_w = float(prior_row.get("weight_pct") or 0.0) / 100.0 if prior_row else 0.0
-            delta = now_w - prior_w
-
-            if prior_row is None:
-                bucket_name = "new_buys"
-            elif delta >= _SCREEN_DELTA_THRESHOLD:
-                bucket_name = "increased"
-            elif delta <= -_SCREEN_DELTA_THRESHOLD:
-                bucket_name = "decreased"
-            else:
-                continue
-
             entry = buckets[bucket_name].setdefault(
-                cusip, {"ticker": ticker, "name": name, "institutions": [], "deltas": []})
+                move["cusip"], {"ticker": move["ticker"], "name": move["name"],
+                                "institutions": [], "deltas": []})
             entry["institutions"].append(key)
-            entry["deltas"].append(delta)
+            entry["deltas"].append(move["delta_pct"])
 
     out: dict = {}
     for bucket_name, entries in buckets.items():
@@ -297,6 +294,62 @@ def screen_position_changes(institution_keys: list[str]) -> dict:
             })
         rows.sort(key=lambda r: (r["count"], abs(r["avg_delta_pct"])), reverse=True)
         out[bucket_name] = rows[:10]
+    return out
+
+
+def investor_moves_for_tickers(tickers, keys=None) -> dict[str, list[dict]]:
+    """티커별 유명 투자자 보유·매매 — {TICKER: [{key, short_name, action, weight_pct, rank, ...}]}.
+
+    최신 13F 와 직전 분기를 비교해 해당 종목을 지금 보유하거나 이번 분기 전량 매도한 기관,
+    그리고 그 종목 옵션(풋·콜) 신고액을 모은다. 신고가 끊긴 기관은 뺀다.
+    보유 중인 기관은 비중 내림차순, 전량 매도는 뒤."""
+    wanted = {str(t).strip().upper() for t in tickers or [] if str(t).strip()}
+    out: dict[str, list[dict]] = {t: [] for t in wanted}
+    if not wanted:
+        return out
+    for key in keys or source_backed_institution_keys():
+        meta = INSTITUTION_REGISTRY.get(key) or {}
+        try:
+            current = thirteenf.latest_holdings(key)
+            prior = thirteenf.latest_holdings(key, skip=1) if current else None
+        except Exception:
+            continue
+        if not current or _is_stale(current.get("filing_date")):
+            continue
+        by_ticker: dict[str, dict] = {}
+        for move in classify_moves(current.get("holdings"), (prior or {}).get("holdings") if prior else None):
+            t = (move.get("ticker") or "").upper()
+            if t in wanted and t not in by_ticker:
+                by_ticker[t] = move
+        options: dict[str, list[dict]] = {}
+        for opt in current.get("options") or []:
+            t = (opt.get("ticker") or "").upper()
+            if t in wanted:
+                options.setdefault(t, []).append({"put_call": opt.get("put_call"),
+                                                  "value_usd": opt.get("value_usd")})
+        for t in set(by_ticker) | set(options):
+            move = by_ticker.get(t) or {}
+            if prior is None and move.get("action") == "new":
+                move = {**move, "action": "held"}   # 직전 분기가 없으면 신규인지 알 수 없다
+            out[t].append({
+                "key": key,
+                "short_name": meta.get("short_name") or key,
+                "display_name": current.get("filer_name") or meta.get("display_name") or key,
+                "filing_date": current.get("filing_date"),
+                "report_date": current.get("report_date"),
+                "holdings_count": len(current.get("holdings") or []),
+                "action": move.get("action"),
+                "rank": move.get("rank"),
+                "weight_pct": move.get("weight_pct"),
+                "prior_weight_pct": move.get("prior_weight_pct"),
+                "shares_change_pct": move.get("shares_change_pct"),
+                "value_usd": move.get("value_usd"),
+                "shares": move.get("shares"),
+                "options": options.get(t, []),
+            })
+    for rows in out.values():
+        rows.sort(key=lambda r: (r["action"] in (None, "exited"), -(r["weight_pct"] or 0.0),
+                                 -(r["prior_weight_pct"] or 0.0)))
     return out
 
 
@@ -364,15 +417,33 @@ def explain_screen(screen: dict, congress: dict) -> dict:
 
 def _normalize_13f_snapshot(meta: dict, raw: dict, *, prior: dict | None = None) -> dict:
     holdings = raw.get("holdings") or []
+    prior_holdings = (prior or {}).get("holdings")
     concentration = None
     if holdings:
         top_weights = [float(h.get("weight_pct") or 0.0) for h in holdings[:5]]
         concentration = round(sum(top_weights) / 100.0, 4)
-    return_proxy = _compute_return_proxy(holdings, (prior or {}).get("holdings"))
+    return_proxy = _compute_return_proxy(holdings, prior_holdings)
+    stale = _is_stale(raw.get("filing_date"))
+    # 옵션 노출 = 풋·콜 기초자산 명목 / 전체 신고액 (provider 가 options 를 낼 때만)
+    options_exposure = None
+    options = raw.get("options")
+    if options is not None:
+        opt_total = float(raw.get("put_value_usd") or 0) + float(raw.get("call_value_usd") or 0)
+        reported = opt_total + float(raw.get("total_value_usd") or 0)
+        options_exposure = round(opt_total / reported, 4) if reported > 0 else None
+    moves = classify_moves(holdings, prior_holdings) if prior_holdings is not None else []
+    move_by_cusip = {m["cusip"]: m for m in moves}
+    top_holdings = _normalize_top_holdings(holdings)
+    for h in top_holdings:
+        m = move_by_cusip.get(h.get("cusip")) or {}
+        h["action"] = m.get("action")
+        h["shares_change_pct"] = m.get("shares_change_pct")
     notes = [
         f"Latest 13F filing date: {raw.get('filing_date')}" if raw.get("filing_date") else "Latest 13F snapshot.",
         "13F data is delayed and does not disclose cash or complete derivatives exposure.",
     ]
+    if stale:
+        notes.append(f"No 13F filed for over {_STALE_AFTER_DAYS} days — excluded from current screens.")
     if return_proxy is not None:
         notes.append(
             "Return proxy = weighted price return of positions held in both the latest and prior "
@@ -382,14 +453,21 @@ def _normalize_13f_snapshot(meta: dict, raw: dict, *, prior: dict | None = None)
     snapshot = {
         "institution_key": meta["key"],
         "display_name": raw.get("filer_name") or meta["display_name"],
+        "short_name": meta.get("short_name") or meta["display_name"],
         "source_kind": "13f",
         "category": meta.get("category") or "hedge_fund",
-        "freshness": meta.get("freshness") or "fresh",
+        "freshness": "stale" if stale else (meta.get("freshness") or "fresh"),
         "holdings_count": len(holdings),
-        "top_holdings": _normalize_top_holdings(holdings),
+        "top_holdings": top_holdings,
         "portfolio_concentration": concentration,
         "cash_ratio": None,
-        "options_exposure": None,
+        "options_exposure": options_exposure,
+        "put_value_usd": raw.get("put_value_usd"),
+        "call_value_usd": raw.get("call_value_usd"),
+        "options_top": [{"ticker": o.get("ticker"), "issuer": o.get("issuer"), "put_call": o.get("put_call"),
+                         "value_usd": o.get("value_usd"), "weight_pct": o.get("weight_pct")}
+                        for o in (options or [])[:8]],
+        "changes": _summarize_moves(moves) if prior_holdings is not None else None,
         "reported_return": None,
         "return_proxy": return_proxy,
         "primary_sources": list(meta.get("primary_sources") or ["13f"]),
@@ -400,6 +478,8 @@ def _normalize_13f_snapshot(meta: dict, raw: dict, *, prior: dict | None = None)
         "availability_flags": {},
         "notes": notes,
         "filing_date": raw.get("filing_date"),
+        "report_date": raw.get("report_date"),
+        "prior_report_date": (prior or {}).get("report_date"),
         "accession": raw.get("accession"),
         "cik": raw.get("cik"),
         "total_value_usd": raw.get("total_value_usd"),
@@ -407,7 +487,7 @@ def _normalize_13f_snapshot(meta: dict, raw: dict, *, prior: dict | None = None)
     snapshot["availability_flags"] = {
         "portfolio_concentration": _availability(snapshot.get("portfolio_concentration")),
         "cash_ratio": "unavailable",
-        "options_exposure": "unavailable",
+        "options_exposure": _availability(options_exposure),
         "reported_return": "unavailable",
         "return_proxy": "proxy" if return_proxy is not None else "unavailable",
     }
@@ -453,6 +533,9 @@ def compare_institutions(keys: list[str], *, snapshots: dict[str, dict] | None =
         rows.append({
             "institution_key": snapshot["institution_key"],
             "display_name": snapshot["display_name"],
+            "short_name": snapshot.get("short_name") or snapshot["display_name"],
+            "filing_date": snapshot.get("filing_date"),
+            "total_value_usd": snapshot.get("total_value_usd"),
             "source_kind": snapshot["source_kind"],
             "category": snapshot.get("category") or "",
             "freshness": snapshot["freshness"],
@@ -976,7 +1059,9 @@ def _add_new_positions_to_watchlist(snapshot: dict, diff: dict) -> None:
         try:
             watchlist.add_ticker(
                 ticker,
-                reason=f"{snapshot['display_name']} 신규 편입 ({snapshot.get('filing_date') or 'latest snapshot'})",
+                reason=(f"{snapshot.get('short_name') or snapshot['display_name']} 신규 편입 "
+                        f"{float(holding.get('weight_pct') or 0):.1f}% "
+                        f"({snapshot.get('report_date') or snapshot.get('filing_date') or 'latest snapshot'})"),
                 source=f"notable_investor:{snapshot['institution_key']}",
             )
         except Exception as e:
@@ -1012,9 +1097,15 @@ def run(institution_keys=None, *, dry_run: bool = False, analysis_keys=None) -> 
             })
         else:
             previous = None if not history else (history[-1].get("top_holdings") or history[-1].get("holdings") or [])
-            diff = {"new": [], "exited": []} if not history else diff_holdings(previous, _snapshot_holdings(snapshot))
+            if not history:
+                diff = {"new": [], "exited": []}   # 첫 관측은 기록만 — 신규 필러가 알림을 쏟지 않게
+            elif snapshot.get("source_kind") == "13f":
+                diff = _material_diff(snapshot)
+            else:
+                diff = diff_holdings(previous, _snapshot_holdings(snapshot))
             updated.append({
                 "institution_key": key,
+                "display_name": snapshot.get("display_name"),
                 "status": "updated",
                 "accession": snapshot.get("accession"),
                 "new": diff["new"],
@@ -1093,6 +1184,28 @@ def _default_run_keys() -> list[str]:
     return [row["key"] for row in list_institutions()]
 
 
+def _material_diff(snapshot: dict) -> dict:
+    """13F 분기 매매 중 포트 비중 1% 이상만 — 알림·관심종목 자동추가용.
+
+    예전엔 이력 상위 10개 목록 비교라 '상위 10위 진입'을 신규 편입으로 알렸다(NPS META)."""
+    changes = snapshot.get("changes") or {}
+    return {
+        "new": [m for m in changes.get("new") or []
+                if float(m.get("weight_pct") or 0) >= _MATERIAL_WEIGHT_PCT],
+        "exited": [m for m in changes.get("exited") or []
+                   if float(m.get("prior_weight_pct") or 0) >= _MATERIAL_WEIGHT_PCT],
+    }
+
+
+def _fmt_move(h: dict, *, exited: bool = False) -> str:
+    """'APPLE INC (AAPL) 5.2%' — 청산은 직전 분기 비중."""
+    name = h.get("issuer") or h.get("name") or h.get("ticker") or "?"
+    tk = h.get("ticker")
+    w = h.get("prior_weight_pct") if exited and h.get("prior_weight_pct") is not None else h.get("weight_pct")
+    label = f"{name} ({tk})" if tk and tk != name else name
+    return f"{label} {float(w or 0):.1f}%"
+
+
 def _build_new_position_alert(result: dict) -> str | None:
     """run() 결과에서 신규편입/청산이 있으면 텔레그램 알림 텍스트, 없으면 None.
 
@@ -1108,13 +1221,12 @@ def _build_new_position_alert(result: dict) -> str | None:
         exited = item.get("exited") or []
         if not new and not exited:
             continue
-        snap = snaps.get(key) or {}
-        name = snap.get("display_name") or key
+        name = item.get("display_name") or (snaps.get(key) or {}).get("display_name") or key
         if new:
-            names = ", ".join(_legacy_fmt_holding(h) for h in new[:5])
+            names = ", ".join(_fmt_move(h) for h in new[:5])
             lines.append(f"🆕 {name} 신규 편입: {names}")
         if exited:
-            names = ", ".join(_legacy_fmt_holding(h) for h in exited[:5])
+            names = ", ".join(_fmt_move(h, exited=True) for h in exited[:5])
             lines.append(f"📤 {name} 청산: {names}")
     if not lines:
         return None
@@ -1140,6 +1252,14 @@ def main(argv: list[str] | None = None) -> int:
 
     keys = args.keys if args.keys else _default_run_keys()
     analysis_keys = args.analysis_keys if args.analysis_keys else source_backed_institution_keys()
+    if not args.dry_run:
+        # 화면 경로는 OpenFIGI 요청을 몇 번만 쓰므로 새 분기·신규 필러의 CUSIP 은 여기서 다 푼다
+        try:
+            pending = thirteenf.warm_ticker_map(source_backed_institution_keys())
+            if pending:
+                logger.info("CUSIP→티커 미확인 %d건 — 다음 실행에서 이어서 조회", pending)
+        except Exception as e:
+            logger.warning("CUSIP→티커 워밍 실패(무시): %s", e)
     result = run(keys, dry_run=args.dry_run, analysis_keys=analysis_keys or None)
 
     if not args.dry_run:

@@ -7,6 +7,13 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 
+@pytest.fixture(autouse=True)
+def _no_figi_warm(monkeypatch):
+    """main() 은 크론 경로에서 OpenFIGI 워밍을 먼저 돌린다 — 테스트에선 네트워크 차단."""
+    from reports import institution_watch as iw
+    monkeypatch.setattr(iw.thirteenf, "warm_ticker_map", lambda *a, **k: 0)
+
+
 def test_registry_exposes_13f_and_seed_institutions():
     from reports import institution_watch as iw
 
@@ -154,8 +161,10 @@ def test_normalize_13f_snapshot_return_proxy_none_without_prior():
     assert snap["availability_flags"]["return_proxy"] == "unavailable"
 
 
-def test_screen_position_changes_classifies_new_increased_decreased(monkeypatch):
-    """감사 후속 — 유빈님 요청: 여러 기관이 공통으로 신규편입/증가/감소한 종목 교차 스크리닝."""
+def test_screen_position_changes_classifies_by_share_change(monkeypatch):
+    """감사 후속 — 여러 기관 공통 신규편입/추가 매수/일부 매도/전량 매도 교차 스크리닝.
+
+    주식 수로 판정: 가격만 올라 비중이 커진 종목(alpha NVDA)은 매수가 아니다."""
     from reports import institution_watch as iw
 
     def fake_latest_holdings(key, skip=0):
@@ -176,7 +185,9 @@ def test_screen_position_changes_classifies_new_increased_decreased(monkeypatch)
                     {"cusip": "TSLA1", "ticker": "TSLA", "issuer": "TESLA",
                      "value_usd": 50.0, "shares": 5.0, "weight_pct": 5.0}],
                 1: [{"cusip": "NVDA1", "ticker": "NVDA", "issuer": "NVIDIA",
-                     "value_usd": 140.0, "shares": 20.0, "weight_pct": 14.0}],
+                     "value_usd": 140.0, "shares": 15.0, "weight_pct": 14.0},
+                    {"cusip": "INTC1", "ticker": "INTC", "issuer": "INTEL",
+                     "value_usd": 30.0, "shares": 9.0, "weight_pct": 3.0}],
             },
         }
         return {"holdings": data[key][skip]}
@@ -185,17 +196,31 @@ def test_screen_position_changes_classifies_new_increased_decreased(monkeypatch)
 
     out = iw.screen_position_changes(["alpha", "beta"])
 
-    new_tickers = {r["ticker"] for r in out["new_buys"]}
-    inc_tickers = {r["ticker"] for r in out["increased"]}
-    dec_tickers = {r["ticker"] for r in out["decreased"]}
-    assert new_tickers == {"TSLA"}
-    assert inc_tickers == {"NVDA"}
-    assert dec_tickers == {"AAPL"}
+    assert {r["ticker"] for r in out["new_buys"]} == {"TSLA"}
+    assert {r["ticker"] for r in out["increased"]} == {"NVDA"}
+    assert {r["ticker"] for r in out["decreased"]} == {"AAPL"}
+    assert {r["ticker"] for r in out["exited"]} == {"INTC"}
 
-    nvda = next(r for r in out["increased"] if r["ticker"] == "NVDA")
-    assert nvda["count"] == 2
-    assert set(nvda["institutions"]) == {"alpha", "beta"}
-    assert nvda["avg_delta_pct"] > 0
+    nvda = out["increased"][0]
+    assert nvda["institutions"] == ["beta"], "가격 상승만 있는 alpha 가 매수로 잡힘"
+    assert nvda["avg_delta_pct"] == pytest.approx(0.06)
+    assert out["exited"][0]["avg_delta_pct"] == pytest.approx(-0.03)
+
+
+def test_screen_position_changes_skips_stale_filer(monkeypatch):
+    """13F 신고가 끊긴 기관(예: Scion 2025-11 이후)의 마지막 매매는 지금 신호가 아니다."""
+    from reports import institution_watch as iw
+
+    def fake_latest_holdings(key, skip=0):
+        rows = [{"cusip": "N1", "ticker": "NEW", "issuer": "NEW CO",
+                 "value_usd": 100.0, "shares": 10.0, "weight_pct": 100.0}] if skip == 0 else []
+        return {"holdings": rows, "filing_date": "2025-11-03" if key == "old" else None}
+
+    monkeypatch.setattr(iw.thirteenf, "latest_holdings", fake_latest_holdings)
+
+    out = iw.screen_position_changes(["old", "live"])
+
+    assert out["new_buys"][0]["institutions"] == ["live"]
 
 
 def test_screen_position_changes_ignores_small_moves_below_threshold(monkeypatch):
@@ -232,7 +257,7 @@ def test_screen_position_changes_skips_institution_with_no_data(monkeypatch):
 
     out = iw.screen_position_changes(["broken", "alpha"])
 
-    assert out == {"new_buys": [], "increased": [], "decreased": []}
+    assert out == {"new_buys": [], "increased": [], "decreased": [], "exited": []}
 
 
 def test_screen_position_changes_caps_each_bucket_at_ten(monkeypatch):
@@ -801,3 +826,75 @@ def test_main_telegram_failure_does_not_crash(monkeypatch):
 
     rc = iw.main([])
     assert rc == 0          # 알림 실패해도 크론 자체는 성공 취급(무시)
+
+
+def test_snapshot_changes_use_full_holdings_not_top10_entry():
+    """예전엔 이력 상위 10개 비교라 '상위 10위 진입'(NPS META)을 신규 편입으로 알렸다.
+    이제 전체 보유를 직전 분기와 비교 — 계속 보유한 종목은 순위가 올라도 신규가 아니다."""
+    from reports import institution_watch as iw
+
+    filler = [{"cusip": f"F{i}", "ticker": f"F{i}", "issuer": f"F{i}", "shares": 10.0,
+               "value_usd": 100.0, "weight_pct": 8.0} for i in range(10)]
+    meta_prior = {"cusip": "META1", "ticker": "META", "issuer": "META", "shares": 10.0,
+                  "value_usd": 10.0, "weight_pct": 0.5}
+    meta_now = {**meta_prior, "value_usd": 900.0, "weight_pct": 9.0}
+    tiny_new = {"cusip": "T1", "ticker": "TINY", "issuer": "TINY", "shares": 1.0,
+                "value_usd": 1.0, "weight_pct": 0.1}
+    big_new = {"cusip": "B1", "ticker": "BIG", "issuer": "BIG", "shares": 50.0,
+               "value_usd": 500.0, "weight_pct": 5.0}
+    meta = iw.INSTITUTION_REGISTRY["nps"]
+    snap = iw._normalize_13f_snapshot(
+        meta, {"holdings": [meta_now, big_new, *filler, tiny_new], "filing_date": "2099-01-01"},
+        prior={"holdings": [*filler, meta_prior]})
+
+    assert [m["ticker"] for m in snap["changes"]["new"]] == ["BIG", "TINY"]
+    assert snap["changes"]["counts"]["added"] == 0
+    # 알림·관심종목 자동추가는 비중 1% 이상만
+    assert [m["ticker"] for m in iw._material_diff(snap)["new"]] == ["BIG"]
+
+
+def test_normalize_13f_snapshot_reports_options_exposure_separately():
+    from reports import institution_watch as iw
+
+    raw = {"holdings": [{"cusip": "L1", "ticker": "LULU", "issuer": "LULU", "shares": 1.0,
+                         "value_usd": 50.0, "weight_pct": 100.0}],
+           "options": [{"cusip": "P1", "ticker": "PLTR", "issuer": "PLTR", "put_call": "Put",
+                        "value_usd": 900.0, "weight_pct": 90.0}],
+           "total_value_usd": 50.0, "put_value_usd": 900.0, "call_value_usd": 50.0}
+    snap = iw._normalize_13f_snapshot(iw.INSTITUTION_REGISTRY["scion"], raw)
+
+    assert snap["options_exposure"] == pytest.approx(0.95)
+    assert snap["availability_flags"]["options_exposure"] == "available"
+    assert [h["ticker"] for h in snap["top_holdings"]] == ["LULU"]
+    assert snap["options_top"][0]["put_call"] == "Put"
+
+
+def test_investor_moves_for_tickers_lists_holders_exits_and_options(monkeypatch):
+    from reports import institution_watch as iw
+
+    def fake_latest_holdings(key, skip=0):
+        q = {
+            "alpha": ({"holdings": [{"cusip": "A1", "ticker": "AAPL", "issuer": "APPLE", "shares": 12.0,
+                                     "value_usd": 120.0, "weight_pct": 30.0}],
+                       "options": [{"ticker": "AAPL", "put_call": "Call", "value_usd": 7.0}]},
+                      {"holdings": [{"cusip": "A1", "ticker": "AAPL", "issuer": "APPLE", "shares": 10.0,
+                                     "value_usd": 90.0, "weight_pct": 25.0}]}),
+            "beta": ({"holdings": [{"cusip": "M1", "ticker": "MSFT", "issuer": "MSFT", "shares": 1.0,
+                                    "value_usd": 1.0, "weight_pct": 100.0}]},
+                     {"holdings": [{"cusip": "A1", "ticker": "AAPL", "issuer": "APPLE", "shares": 5.0,
+                                    "value_usd": 50.0, "weight_pct": 4.0}]}),
+            "stale": ({"holdings": [{"cusip": "A1", "ticker": "AAPL", "issuer": "APPLE", "shares": 1.0,
+                                     "value_usd": 1.0, "weight_pct": 50.0}], "filing_date": "2020-02-14"},
+                      {"holdings": []}),
+        }
+        return q[key][skip]
+
+    monkeypatch.setattr(iw.thirteenf, "latest_holdings", fake_latest_holdings)
+
+    out = iw.investor_moves_for_tickers(["aapl"], keys=["beta", "alpha", "stale"])
+
+    rows = out["AAPL"]
+    assert [(r["key"], r["action"]) for r in rows] == [("alpha", "added"), ("beta", "exited")]
+    assert rows[0]["rank"] == 1 and rows[0]["shares_change_pct"] == pytest.approx(0.2)
+    assert rows[0]["options"] == [{"put_call": "Call", "value_usd": 7.0}]
+    assert rows[1]["prior_weight_pct"] == 4.0

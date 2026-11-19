@@ -95,7 +95,8 @@ def top_traded(days: int = 90, limit: int = 10) -> dict:
     유빈님 요청(감사 후속, 2026-08-15)."""
     from datetime import datetime, timedelta
 
-    cutoff = datetime.now() - timedelta(days=days)
+    now = datetime.now()
+    cutoff = now - timedelta(days=days)
     rows = _load_all()
 
     def _parse(d):
@@ -113,7 +114,7 @@ def top_traded(days: int = 90, limit: int = 10) -> dict:
         if tx_type not in buckets:
             continue
         dt = _parse(r.get("transaction_date"))
-        if dt is None or dt < cutoff:
+        if dt is None or dt < cutoff or dt > now:   # 미래 거래일 = 신고 오기
             continue
         entry = buckets[tx_type].setdefault(
             ticker, {"ticker": ticker, "members": set(), "total_amount_mid": 0.0})
@@ -131,3 +132,51 @@ def top_traded(days: int = 90, limit: int = 10) -> dict:
         return rows_out[:limit]
 
     return {"bought": _finalize(buckets["Purchase"]), "sold": _finalize(buckets["Sale"])}
+
+
+def ticker_transactions(ticker: str, *, days: int = 365, limit: int = 20) -> dict:
+    """한 종목의 최근 days 일 하원의원 공시 거래 — 종목 분석 화면용.
+
+    → {rows: 최신순 최대 limit 건 [{representative, date, disclosure_date, type, amount,
+       amount_mid, owner, source_url}], buy_members, sell_members, buy_amount_mid, sell_amount_mid}.
+    집계(인원·추정금액)는 limit 과 무관하게 기간 전체."""
+    from datetime import datetime, timedelta
+
+    want = (ticker or "").strip().upper()
+    out = {"rows": [], "buy_members": 0, "sell_members": 0, "buy_amount_mid": 0.0, "sell_amount_mid": 0.0}
+    if not want:
+        return out
+    now = datetime.now()
+    cutoff = now - timedelta(days=days)
+    matched = []
+    buyers, sellers = set(), set()
+    for r in _load_all():
+        if (r.get("ticker") or "").strip().upper() != want:
+            continue
+        try:
+            dt = datetime.strptime(r.get("transaction_date") or "", "%m/%d/%Y")
+        except ValueError:
+            continue
+        if dt < cutoff or dt > now:   # 미래 거래일은 신고 오기(실측 12/26/2026 1건)
+            continue
+        matched.append((dt, r))
+        member = r.get("representative") or "?"
+        if r.get("type") == "Purchase":
+            buyers.add(member)
+            out["buy_amount_mid"] += float(r.get("amount_mid") or 0)
+        elif r.get("type") == "Sale":
+            sellers.add(member)
+            out["sell_amount_mid"] += float(r.get("amount_mid") or 0)
+    matched.sort(key=lambda x: x[0], reverse=True)
+    out["rows"] = [{
+        "representative": r.get("representative"),
+        "date": dt.date().isoformat(),
+        "disclosure_date": r.get("disclosure_date"),
+        "type": r.get("type"),
+        "amount": r.get("amount"),
+        "amount_mid": r.get("amount_mid"),
+        "owner": r.get("owner"),
+        "source_url": r.get("source_url"),
+    } for dt, r in matched[:limit]]
+    out["buy_members"], out["sell_members"] = len(buyers), len(sellers)
+    return out

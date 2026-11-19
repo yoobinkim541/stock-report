@@ -160,6 +160,9 @@ cached.risk_struct = lambda: {"port_vol":0.2,"n_eff":3.5,"n_assets":5,"mdd_est":
 cached.watchlist_quotes = lambda tickers: {}
 cached.institution_screener = lambda keys: {"new_buys": [], "increased": [], "decreased": []}
 cached.congress_top_traded = lambda days=90: {"bought": [], "sold": []}
+cached.watchlist_investor_moves = lambda tickers: {}
+cached.famous_holders = lambda t: []
+cached.congress_ticker_trades = lambda t: {"rows": []}
 cached.institution_watch = lambda keys=None: {
     "institutions": [
         {"key": "berkshire", "display_name": "Berkshire Hathaway", "source_kind": "13f",
@@ -2274,64 +2277,55 @@ watchlist.render()
     assert any("LLM 공통 패턴 요약" in item.value for item in at.markdown)
     assert any("LLM 요약" in item.value for item in at.markdown)
     assert any("관심종목" in item.value for item in at.title)
-    comparison = next(item.value for item in at.dataframe if "현금 비중" in item.value.columns)
-    assert comparison.loc[0, "현금 비중"] == "— (비공개)"
-    assert comparison.loc[1, "현금 비중"] == "5.0% (프록시)"
+    comparison = next(item.value for item in at.dataframe if "옵션 노출" in item.value.columns)
+    assert comparison.loc[0, "옵션 노출"] == "— (비공개)"
+    assert comparison.loc[1, "옵션 노출"] == "14.0% (공개)"
 
 
-def test_watchlist_page_filters_selected_institutions():
+def test_watchlist_investor_detail_separates_options_and_flags_stale_filer():
+    """투자자를 고르면 상세 — 풋·콜은 보유 상위와 따로, 신고가 끊긴 기관은 경고."""
     script = _STUBS + '''
 import streamlit as st
-st.session_state["_institution_watch_keys"] = ["berkshire"]
-st.session_state["_inst_calls"] = []
-cached.institution_screener = lambda keys: {"new_buys": [], "increased": [], "decreased": []}
-cached.congress_top_traded = lambda days=90: {"bought": [], "sold": []}
-
-def _hub(keys=None):
-    st.session_state["_inst_calls"].append(keys)
-    all_rows = [
-        {"key": "berkshire", "display_name": "Berkshire Hathaway", "source_kind": "13f",
-         "category": "holding_company", "freshness": "fresh", "holdings_count": 27,
-         "primary_sources": ["13f"], "availability_flags": {"cash_ratio": "unavailable",
-         "options_exposure": "unavailable"}},
-        {"key": "bridgewater", "display_name": "Bridgewater", "source_kind": "13f",
-         "category": "hedge_fund", "freshness": "fresh", "holdings_count": 120,
-         "primary_sources": ["13f"], "availability_flags": {"cash_ratio": "unavailable",
-         "options_exposure": "available"}},
-    ]
-    if keys:
-        wanted = set(keys)
-        all_rows = [row for row in all_rows if row["key"] in wanted]
-    return {
-        "institutions": all_rows,
-        "comparison": {
-            "rows": [
-                {"display_name": row["display_name"], "category": row["category"], "source_kind": row["source_kind"],
-                 "freshness": row["freshness"], "holdings_count": row["holdings_count"],
-                 "portfolio_concentration": None, "portfolio_concentration_flag": "unavailable",
-                 "cash_ratio": None, "cash_ratio_flag": "unavailable",
-                 "options_exposure": None, "options_exposure_flag": "unavailable",
-                 "reported_return": None, "reported_return_flag": "unavailable",
-                 "return_proxy": None, "return_proxy_flag": "unavailable",
-                 "primary_sources": row["primary_sources"]}
-                for row in all_rows
-            ],
-            "selected_keys": [row["key"] for row in all_rows],
-        },
-        "analysis": {"shared_moves": [], "divergences": [], "confidence": 0.0, "summary": "LLM 요약", "mode": "heuristic"},
-    }
-
-cached.institution_watch = _hub
+st.session_state["_investor_pick"] = "scion"
+cached.institution_watch = lambda keys=None, with_llm_summary=False: {
+    "institutions": [
+        {"key": "berkshire", "display_name": "Berkshire Hathaway", "short_name": "워런 버핏",
+         "source_kind": "13f", "category": "holding_company", "freshness": "fresh",
+         "holdings_count": 27, "total_value_usd": 3e11,
+         "top_holdings": [{"ticker": "AAPL", "issuer": "APPLE INC", "weight_pct": 22.0, "value_usd": 6.6e10}]},
+        {"key": "scion", "display_name": "Scion Asset Management", "short_name": "마이클 버리",
+         "source_kind": "13f", "category": "hedge_fund", "freshness": "stale", "filing_date": "2025-11-03",
+         "holdings_count": 3, "total_value_usd": 5e7, "options_exposure": 0.95,
+         "put_value_usd": 9.1e8, "call_value_usd": 1e8,
+         "top_holdings": [{"ticker": "LULU", "issuer": "LULULEMON", "weight_pct": 40.0,
+                           "value_usd": 2e7, "action": "new"}],
+         "options_top": [{"ticker": "PLTR", "issuer": "PALANTIR", "put_call": "Put",
+                          "value_usd": 9.12e8, "weight_pct": 80.0}],
+         "changes": {"new": [{"ticker": "LULU", "issuer": "LULULEMON", "action": "new", "weight_pct": 40.0}],
+                     "added": [], "trimmed": [],
+                     "exited": [{"ticker": "BABA", "issuer": "ALIBABA", "action": "exited",
+                                 "weight_pct": 0.0, "prior_weight_pct": 12.0}],
+                     "counts": {"new": 1, "added": 0, "trimmed": 0, "exited": 1}}},
+    ],
+    "comparison": {"rows": [], "selected_keys": []},
+    "analysis": {"shared_moves": [], "divergences": [], "confidence": 0.0, "summary": "", "mode": "heuristic"},
+}
 data.load_watchlist = lambda *a, **k: []
 from dashboard.pages import watchlist
 watchlist.render()
 '''
     at = AppTest.from_string(script, default_timeout=30).run()
 
-    assert at.session_state["_inst_calls"][-1] == ("berkshire",)
-    body = " ".join(str(item.value) for item in at.markdown)
-    assert "Berkshire Hathaway" in body
-    assert "Bridgewater" not in body
+    assert not at.exception, str(at.exception)
+    lists = [str(m.value) for m in at.markdown if 'class="tn-sl"' in str(m.value)]
+    top10 = next(html for html in lists if "보유 상위 10" in html)
+    options = next(html for html in lists if "옵션 포지션" in html)
+    assert "LULU" in top10 and "PLTR" not in top10, "풋 옵션이 롱 보유로 섞임"
+    assert "PLTR" in options and "풋" in options
+    exited = next(html for html in lists if "<b>전량 매도</b>" in html and "BABA" in html)
+    assert "직전 12.0%" in exited
+    warning = " ".join(str(w.value) for w in at.warning)
+    assert "2025-11-03 이후 13F 신고가 없습니다" in warning
 
 
 def test_watchlist_page_uses_generic_label_for_fallback_analysis():

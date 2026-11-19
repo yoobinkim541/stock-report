@@ -455,8 +455,8 @@ def _avatar_html(ticker, name="") -> str:
     """종목 아바타 — 한글 종목명은 첫 글자, 그 외는 티커 첫 글자. 색은 티커로 고정."""
     head = str(name or "").strip()[:1]
     if not ("가" <= head <= "힣"):
-        head = (str(ticker or "").strip()[:1] or "?").upper()
-    color = _AVATAR_COLORS[sum(map(ord, str(ticker or "?"))) % len(_AVATAR_COLORS)]
+        head = (str(ticker or "").strip()[:1] or head or "?").upper()
+    color = _AVATAR_COLORS[sum(map(ord, str(ticker or name or "?"))) % len(_AVATAR_COLORS)]
     return (f'<span class="tn-sl-ava" style="background:{color}" aria-hidden="true">'
             f'{_html_esc(head)}</span>')
 
@@ -910,7 +910,8 @@ a.tn-wl-row:focus-visible {{ outline: 2px solid {BLUE}; outline-offset: -2px; }}
 .tn-sec {{ border-left: 3px solid {BLUE}; padding-left: 10px; margin: 18px 0 10px; }}
 .tn-sec span {{ font-size: .84rem; font-weight: 700; color: {TEXT}; letter-spacing: -0.02em; }}
 
-.tn-sl {{ background: {PANEL}; border: 1px solid {BORDER}; border-radius: 20px; overflow: hidden; }}
+.tn-sl {{ background: {PANEL}; border: 1px solid {BORDER}; border-radius: 20px; overflow: hidden;
+  margin-bottom: 12px; }}
 .tn-sl-head {{ display: flex; justify-content: space-between; align-items: baseline; gap: 12px;
   padding: 16px 20px 10px; }}
 .tn-sl-head b {{ font-size: 1rem; font-weight: 700; color: {TEXT}; letter-spacing: -0.02em; }}

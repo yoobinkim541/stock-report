@@ -629,7 +629,7 @@ def test_views_institution_screener_graceful_on_exception(monkeypatch):
         raise RuntimeError("boom")
     monkeypatch.setattr(iw, "screen_position_changes", _boom)
 
-    assert views.institution_screener(("berkshire",)) == {"new_buys": [], "increased": [], "decreased": []}
+    assert views.institution_screener(("berkshire",)) == {"new_buys": [], "increased": [], "decreased": [], "exited": []}
 
 
 def test_views_congress_top_traded_delegates(monkeypatch):

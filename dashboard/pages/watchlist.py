@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
@@ -15,20 +16,22 @@ import streamlit as st
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
+import ticker_names
 from dashboard import cached, data, theme, ui_actions
+from providers import thirteenf
 
-_SCREEN_13F_KEYS = ("berkshire", "bridgewater", "scion", "citadel", "duquesne",
-                    "pershing_square", "point72", "third_point", "tudor", "nps")
+# 신고가 끊긴 기관은 screen_position_changes 가 스스로 뺀다
+_SCREEN_13F_KEYS = tuple(thirteenf.FILERS)
+
+_ACTION_LABELS = {"new": "신규 편입", "added": "추가 매수", "trimmed": "일부 매도",
+                  "exited": "전량 매도", "held": "보유"}
+_ACTION_DIR = {"new": 1, "added": 1, "trimmed": -1, "exited": -1}
+_US_TICKER = re.compile(r"^[A-Z][A-Z.\-]{0,6}$")
 
 _FRESHNESS_LABELS = {
     "fresh": "최신",
-    "stale": "지연",
+    "stale": "신고 끊김",
     "proxy": "프록시",
-}
-
-_SOURCE_LABELS = {
-    "13f": "13F",
-    "seed": "시드",
 }
 
 _CATEGORY_LABELS = {
@@ -38,6 +41,7 @@ _CATEGORY_LABELS = {
     "family_office": "패밀리오피스",
     "venture_fund": "벤처펀드",
     "pension": "연기금",
+    "foundation": "재단",
     "seed": "시드",
 }
 
@@ -46,10 +50,6 @@ _FLAG_LABELS = {
     "proxy": "프록시",
     "unavailable": "비공개",
 }
-
-
-def _flag_text(flags: dict, key: str) -> str:
-    return _FLAG_LABELS.get(str((flags or {}).get(key) or "unavailable"), "비공개")
 
 
 def _fmt_pct(value, flag: str) -> str:
@@ -61,47 +61,99 @@ def _fmt_pct(value, flag: str) -> str:
         return f"{value} ({_FLAG_LABELS.get(flag, flag)})"
 
 
-def _fmt_sources(value) -> str:
-    items = [str(v) for v in (value or []) if str(v).strip()]
-    return ", ".join(items[:3]) if items else "—"
+def _short(row: dict) -> str:
+    return row.get("short_name") or row.get("display_name") or row.get("key") or "?"
 
 
-def _render_institution_cards(rows: list[dict]):
-    if not rows:
-        st.info("기관 허브에 표시할 스냅샷이 아직 없습니다.")
+def _move_delta(m: dict) -> str:
+    action = m.get("action")
+    if action == "new":
+        return "신규"
+    if action == "exited":
+        return "전량 매도"
+    chg = m.get("shares_change_pct")
+    return f"주식 수 {chg * 100:+.0f}%" if chg is not None else ""
+
+
+def _move_rows(moves: list[dict], limit: int = 6) -> list[dict]:
+    out = []
+    for m in moves[:limit]:
+        exited = m.get("action") == "exited"
+        w = m.get("prior_weight_pct") if exited else m.get("weight_pct")
+        out.append({
+            "ticker": m.get("ticker") or "", "name": _stock_name(m.get("ticker"), m.get("issuer") or m.get("name")),
+            "value": f"{'직전 ' if exited else ''}{float(w or 0):.1f}%",
+            "delta": _move_delta(m), "direction": _ACTION_DIR.get(m.get("action"), 0),
+        })
+    return out
+
+
+def _investor_detail(row: dict) -> None:
+    """한 투자자의 분기 포트폴리오 — 요약 지표, 보유 상위, 옵션, 분기 매매 네 갈래."""
+    stale = row.get("freshness") == "stale"
+    when = " · ".join(p for p in (
+        f"{row['report_date']} 분기말" if row.get("report_date") else "",
+        f"{row['filing_date']} 공시" if row.get("filing_date") else "") if p)
+    theme.render(theme.section_head_html(_short(row), " · ".join(p for p in (
+        row.get("display_name") or "", _CATEGORY_LABELS.get(row.get("category"), ""), when) if p)))
+    if row.get("source_kind") != "13f":
+        st.info("13F 단일 신고 주체가 없어 공개 자료로만 추적합니다. "
+                + " ".join(str(n) for n in (row.get("notes") or [])[:1]))
         return
-    cols = st.columns(min(3, len(rows)))
-    for idx, row in enumerate(rows):
-        flags = row.get("availability_flags") or {}
-        with cols[idx % len(cols)].container(border=True, key=f"tn-card-inst-{idx}"):
-            st.markdown(
-                "\n".join([
-                    f"#### {row.get('display_name', row.get('key', '기관'))}",
-                    (
-                        f"`{_CATEGORY_LABELS.get(row.get('category'), row.get('category', ''))}`"
-                        f" · `{_SOURCE_LABELS.get(row.get('source_kind'), row.get('source_kind', ''))}`"
-                        f" · `{_FRESHNESS_LABELS.get(row.get('freshness'), row.get('freshness', ''))}`"
-                    ),
-                    f"- 보유 종목 수: {int(row.get('holdings_count') or 0)}",
-                    f"- 현금 비중: {_flag_text(flags, 'cash_ratio')}",
-                    f"- 옵션 노출: {_flag_text(flags, 'options_exposure')}",
-                    f"- 주요 출처: {_fmt_sources(row.get('primary_sources'))}",
-                ])
-            )
-            top = list(row.get("top_holdings") or [])
-            total = row.get("total_value_usd")
-            if top:
-                donut_rows = [{"ticker": h.get("ticker") or h.get("issuer") or "?",
-                              "value": h.get("value_usd") or 0,
-                              "name": h.get("issuer") or h.get("ticker")} for h in top]
-                if total:
-                    top_sum = sum(d["value"] for d in donut_rows)
-                    other = total - top_sum
-                    if other > 0:
-                        donut_rows.append({"ticker": "기타", "value": other, "name": "기타(상위10 외)"})
-                from dashboard import charts
-                st.plotly_chart(charts.allocation_donut(donut_rows), width="stretch",
-                                config={"displayModeBar": False})
+    if stale:
+        st.warning(f"{row.get('filing_date') or '—'} 이후 13F 신고가 없습니다. 과거 포트폴리오라서 "
+                   "공통 움직임·내 종목 보유자 집계에서는 뺐습니다.")
+
+    put_v, call_v = float(row.get("put_value_usd") or 0), float(row.get("call_value_usd") or 0)
+    opt = row.get("options_exposure")
+    conc = row.get("portfolio_concentration")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("롱 보유액", _usd_compact(row.get("total_value_usd")),
+              help="13F 현물 주식·채권 롱 합계. 옵션·공매도·현금은 빠집니다.")
+    c2.metric("보유 종목", f"{int(row.get('holdings_count') or 0)}개")
+    c3.metric("상위 5 집중도", f"{conc * 100:.1f}%" if conc is not None else "—")
+    c4.metric("옵션 비중", f"{opt * 100:.1f}%" if opt is not None else "—",
+              help=f"풋 {_usd_compact(put_v)} · 콜 {_usd_compact(call_v)} — 기초자산 명목, 전체 신고액 대비")
+    if row.get("return_proxy") is not None:
+        st.caption(f"연속 보유 종목 가격 변화(대체 수익률) {row['return_proxy'] * 100:+.1f}% · "
+                   "13F 신고가로 추정, 매매·현금 제외")
+
+    top = list(row.get("top_holdings") or [])
+    top_rows = [{
+        "ticker": h.get("ticker") or "", "name": _stock_name(h.get("ticker"), h.get("issuer")),
+        "tags": [_ACTION_LABELS[h["action"]]] if h.get("action") in _ACTION_DIR else [],
+        "value": f"{float(h.get('weight_pct') or 0):.1f}%",
+        "delta": _usd_compact(h.get("value_usd")),
+    } for h in top]
+    options = list(row.get("options_top") or [])
+    left, right = st.columns(2)
+    with left:
+        theme.render(theme.stock_list_html(top_rows, title="보유 상위 10", meta="롱 대비 비중 · 평가액",
+                                           empty="보유 종목 없음"))
+    with right:
+        theme.render(theme.stock_list_html([{
+            "ticker": o.get("ticker") or "", "name": _stock_name(o.get("ticker"), o.get("issuer")),
+            "tags": ["풋" if o.get("put_call") == "Put" else "콜"],
+            "value": _usd_compact(o.get("value_usd")), "delta": f"{float(o.get('weight_pct') or 0):.1f}%",
+            "direction": -1 if o.get("put_call") == "Put" else 1,
+        } for o in options], title="옵션 포지션", meta="기초자산 명목 · 전체 신고액 대비",
+            empty="신고한 풋·콜 없음"))
+
+    changes = row.get("changes")
+    if not changes:
+        st.caption("직전 분기 13F 가 없어 분기 매매를 계산하지 못했습니다.")
+        return
+    counts = changes.get("counts") or {}
+    theme.render(theme.section_label_html(
+        f"{row.get('prior_report_date') or '직전 분기'} → {row.get('report_date') or '최신'} 매매"))
+    for i, action in enumerate(("new", "added", "trimmed", "exited")):
+        if i % 2 == 0:   # 행 단위 2열 — 모바일에서 신규·추가·일부·전량 순으로 쌓이게
+            grid = st.columns(2)
+        with grid[i % 2]:
+            theme.render(theme.stock_list_html(
+                _move_rows(changes.get(action) or []), title=_ACTION_LABELS[action],
+                meta=f"{counts.get(action, 0)}종목", empty="없음"))
+    st.caption("주식 수 ±5% 이상 변화만 매매로 봅니다(가격 변동으로 비중만 바뀐 건 제외).")
 
 
 def _render_comparison_table(comparison: dict):
@@ -110,17 +162,16 @@ def _render_comparison_table(comparison: dict):
         st.info("비교 가능한 기관 스냅샷이 아직 충분하지 않습니다.")
         return
     table = pd.DataFrame([{
+        "투자자": _short(row),
         "기관": row.get("display_name"),
         "카테고리": _CATEGORY_LABELS.get(row.get("category"), row.get("category")),
-        "소스": _SOURCE_LABELS.get(row.get("source_kind"), row.get("source_kind")),
         "신선도": _FRESHNESS_LABELS.get(row.get("freshness"), row.get("freshness")),
+        "공시일": row.get("filing_date") or "—",
+        "롱 보유액": _usd_compact(row.get("total_value_usd")) if row.get("total_value_usd") else "—",
         "보유 종목 수": row.get("holdings_count"),
         "집중도": _fmt_pct(row.get("portfolio_concentration"), row.get("portfolio_concentration_flag")),
-        "현금 비중": _fmt_pct(row.get("cash_ratio"), row.get("cash_ratio_flag")),
         "옵션 노출": _fmt_pct(row.get("options_exposure"), row.get("options_exposure_flag")),
-        "수익률": _fmt_pct(row.get("reported_return"), row.get("reported_return_flag")),
         "대체 수익률": _fmt_pct(row.get("return_proxy"), row.get("return_proxy_flag")),
-        "주요 출처": _fmt_sources(row.get("primary_sources")),
     } for row in rows])
     st.dataframe(table, hide_index=True, width="stretch")
 
@@ -347,20 +398,86 @@ def _usd_compact(value) -> str:
     return f"${v:,.0f}"
 
 
-def _load_investor_data() -> tuple[dict, dict, dict]:
-    """기관 허브·13F 스크리닝·정치인 상위를 동시에 불러온다.
+def _my_us_tickers(rows: list[dict]) -> tuple[tuple[str, ...], dict]:
+    """관심종목 + 해외 보유 중 미국 티커와 표시명 — 13F 는 미국 상장 종목만 신고한다."""
+    items = [(r.get("ticker"), r.get("name")) for r in rows]
+    try:
+        items += [(h.get("ticker"), h.get("name")) for h in cached.holdings() or []]
+    except Exception:
+        pass
+    names: dict[str, str] = {}
+    for t, name in items:
+        t = str(t or "").strip().upper()
+        if _US_TICKER.match(t):
+            names[t] = names.get(t) or name or t
+    return tuple(sorted(names)), names
 
-    셋 다 따로 캐시되며 콜드일 때 직렬 합이 ≈6.5초(2.7+2.8+1.0)라, 접지 않고 늘 그리는 대신
+
+def _load_investor_data(my_tickers: tuple[str, ...]) -> tuple[dict, dict, dict, dict]:
+    """기관 허브·13F 스크리닝·정치인 상위·내 종목 보유자를 동시에 불러온다.
+
+    각각 따로 캐시되며 콜드일 때 직렬 합이 수 초라, 접지 않고 늘 그리는 대신
     병렬로 가장 느린 것 하나만큼만 기다린다. 워커가 캐시를 쓰도록 ScriptRunContext 를 붙인다.
     """
     from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
     jobs = (cached.institution_watch,
             lambda: cached.institution_screener(_SCREEN_13F_KEYS),
-            lambda: cached.congress_top_traded(90))
+            lambda: cached.congress_top_traded(90),
+            lambda: cached.watchlist_investor_moves(my_tickers) if my_tickers else {})
     with ThreadPoolExecutor(max_workers=len(jobs), initializer=add_script_run_ctx,
                             initargs=(None, get_script_run_ctx())) as ex:
-        hub, screen, congress = (f.result() for f in [ex.submit(job) for job in jobs])
-    return hub or {}, screen or {}, congress or {}
+        hub, screen, congress, moves = (f.result() for f in [ex.submit(job) for job in jobs])
+    return hub or {}, screen or {}, congress or {}, moves or {}
+
+
+def _my_stocks_section(my_tickers: tuple[str, ...], moves: dict, names: dict) -> None:
+    """내 관심·보유 종목을 들고 있거나 이번 분기 사고판 유명 투자자."""
+    theme.render(theme.section_head_html(
+        "내 종목 × 유명 투자자", f"관심·보유 미국 종목 {len(my_tickers)}개 · 최신 13F 와 직전 분기 비교 · 누르면 종목 분석"))
+    if not my_tickers:
+        st.caption("관심종목·보유에 미국 종목이 없어 비교할 13F 가 없습니다.")
+        return
+
+    def _who(entries: list[dict]) -> list[str]:
+        tags = [e.get("short_name") or e.get("key") for e in entries[:3]]
+        return tags + ([f"외 {len(entries) - 3}"] if len(entries) > 3 else [])
+
+    holders, buckets = [], {a: [] for a in ("new", "added", "trimmed", "exited")}
+    for t in my_tickers:
+        entries = moves.get(t) or []
+        name = names.get(t) or t
+        holding = [e for e in entries if e.get("action") not in (None, "exited")]
+        if holding:
+            top = holding[0]
+            holders.append({"ticker": t, "name": name, "tags": _who(holding), "n": len(holding),
+                            "value": f"{len(holding)}명",
+                            "delta": f"최대 비중 {float(top.get('weight_pct') or 0):.1f}%",
+                            "title": ", ".join(f"{e.get('short_name')} {float(e.get('weight_pct') or 0):.1f}%"
+                                               for e in holding)})
+        for action, rows in buckets.items():
+            hit = [e for e in entries if e.get("action") == action]
+            if not hit:
+                continue
+            if action == "exited":
+                delta = f"직전 최대 {max(float(e.get('prior_weight_pct') or 0) for e in hit):.1f}%"
+            elif action == "new":
+                delta = f"최대 비중 {max(float(e.get('weight_pct') or 0) for e in hit):.1f}%"
+            else:
+                chg = [e["shares_change_pct"] for e in hit if e.get("shares_change_pct") is not None]
+                delta = f"주식 수 평균 {sum(chg) / len(chg) * 100:+.0f}%" if chg else ""
+            rows.append({"ticker": t, "name": name, "tags": _who(hit), "value": f"{len(hit)}명",
+                         "delta": delta, "direction": _ACTION_DIR[action]})
+    holders.sort(key=lambda r: -r["n"])
+    theme.render(theme.stock_list_html(holders, title="보유 중인 유명 투자자", meta=f"{len(holders)}종목",
+                                       empty="내 종목을 보유한 추적 투자자가 없습니다."))
+    for i, (action, rows) in enumerate(buckets.items()):
+        if i % 2 == 0:
+            grid = st.columns(2)
+        with grid[i % 2]:
+            theme.render(theme.stock_list_html(rows, title=_ACTION_LABELS[action],
+                                               meta=f"{len(rows)}종목", empty="없음"))
+    st.caption("13F 는 분기말 보유를 45일 안에 신고하는 지연 자료 · 주식 수 ±5% 이상 변화만 매매로 봄 "
+               "· 정보·표시용, 매매 신호 아님")
 
 
 def _congress_trading_section() -> None:
@@ -384,19 +501,31 @@ def _congress_trading_section() -> None:
               "· 정보·표시용 — 매매 신호 아님")
 
 
+def _investor_short(key: str) -> str:
+    return (thirteenf.FILERS.get(key) or {}).get("short") or key
+
+
+def _stock_name(ticker: str | None, fallback: str | None = None) -> str:
+    return (ticker_names.display_name(ticker, allow_net=False) if ticker else None) or fallback or ticker or "—"
+
+
 def _bucket_list(title: str, rows: list[dict]) -> str:
+    def _tags(keys: list[str]) -> list[str]:
+        return [_investor_short(k) for k in keys[:3]] + ([f"외 {len(keys) - 3}"] if len(keys) > 3 else [])
+
     items = [{
-        "ticker": r.get("ticker") or "—", "name": r.get("name") or r.get("ticker") or "—",
+        "ticker": r.get("ticker") or "—", "name": _stock_name(r.get("ticker"), r.get("name")),
+        "tags": _tags(r.get("institutions") or []),
         "value": f"기관 {r.get('count') or 0}곳",
         "delta": f"{(r.get('avg_delta_pct') or 0) * 100:+.1f}%p",
         "direction": _sign(r.get("avg_delta_pct")),
     } for r in rows]
-    return theme.stock_list_html(items, title=title, meta=f"{len(items)}종목", empty="해당 없음")
+    return theme.stock_list_html(items, title=title, meta=f"{len(items)}종목 · 평균 비중 변화", empty="해당 없음")
 
 
 def _congress_list(title: str, rows: list[dict]) -> str:
     items = [{
-        "ticker": r.get("ticker") or "—", "name": r.get("ticker") or "—",
+        "ticker": r.get("ticker") or "—", "name": _stock_name(r.get("ticker")),
         "value": _usd_compact(r.get("total_amount_mid")),
         "delta": f"의원 {r.get('member_count') or 0}명",
     } for r in rows]
@@ -405,12 +534,13 @@ def _congress_list(title: str, rows: list[dict]) -> str:
 
 def _screening_section(screen: dict, congress: dict) -> None:
     theme.render(theme.section_head_html(
-        "여러 기관 공통 움직임", "직전 분기 13F 대비 여러 기관이 같은 방향으로 움직인 종목 · 누르면 종목 분석"))
-    cols = st.columns(3)
-    for col, title, key in ((cols[0], "신규 편입", "new_buys"),
-                            (cols[1], "비중 확대", "increased"),
-                            (cols[2], "비중 축소", "decreased")):
-        with col:
+        "여러 기관 공통 움직임",
+        "직전 분기 13F 대비 주식 수 기준 · 신고가 끊긴 기관 제외 · 누르면 종목 분석"))
+    for i, (title, key) in enumerate((("신규 편입", "new_buys"), ("추가 매수", "increased"),
+                                      ("일부 매도", "decreased"), ("전량 매도", "exited"))):
+        if i % 2 == 0:
+            grid = st.columns(2)
+        with grid[i % 2]:
             theme.render(_bucket_list(title, screen.get(key) or []))
 
     theme.render(theme.section_head_html(
@@ -435,38 +565,31 @@ def _screening_section(screen: dict, congress: dict) -> None:
         st.caption("버튼을 누르면 위 스크리닝 결과를 해설합니다. 자동으로 실행하지 않습니다.")
 
 
-def _institution_compare_section(hub_all: dict) -> None:
-    theme.render(theme.section_head_html("기관 포트폴리오 비교", "13F 스냅샷 · 보유 상위 비중"))
-    all_rows = list(hub_all.get("institutions") or [])
-    all_keys = [row.get("key") for row in all_rows if row.get("key")]
-    label_by_key = {
-        row["key"]: (
-            f"{row.get('display_name', row['key'])}"
-            f" · {_CATEGORY_LABELS.get(row.get('category'), row.get('category', ''))}"
-            f" · {_SOURCE_LABELS.get(row.get('source_kind'), row.get('source_kind', ''))}"
-            f" · {_FRESHNESS_LABELS.get(row.get('freshness'), row.get('freshness', ''))}"
-        )
-        for row in all_rows
-    }
-    if hub_all.get("error"):
-        st.warning(ui_actions.user_message(hub_all.get("error"), "기관 목록을 불러오지 못했습니다."))
-    selected_keys = []
-    if all_keys:
-        if "_institution_watch_keys" not in st.session_state:
-            st.session_state["_institution_watch_keys"] = list(all_keys)
-        default_keys = list(st.session_state.get("_institution_watch_keys", all_keys))
-        selected_keys = st.multiselect(
-            "비교할 기관",
-            options=all_keys,
-            default=[key for key in default_keys if key in all_keys],
-            format_func=lambda key: label_by_key.get(key, key),
-            key="_institution_watch_keys",
-        )
-        st.caption(f"선택 {len(selected_keys)} / 전체 {len(all_keys)}")
-    all_selected = len(selected_keys) == len(all_keys)
-    hub = hub_all if all_selected else cached.institution_watch(tuple(selected_keys))
-    _render_institution_cards(list(hub.get("institutions") or []))
-    theme.render(theme.section_label_html("비교 테이블"))
+def _investor_section(hub: dict) -> None:
+    theme.render(theme.section_head_html(
+        "유명 투자자 포트폴리오", "13F 분기 공시 · 풋·콜 옵션은 롱 보유와 분리 · 투자자를 고르면 상세"))
+    if hub.get("error"):
+        st.warning(ui_actions.user_message(hub.get("error"), "기관 목록을 불러오지 못했습니다."))
+    rows = list(hub.get("institutions") or [])
+    if not rows:
+        st.info("기관 허브에 표시할 스냅샷이 아직 없습니다.")
+    else:
+        # 13F 최신 → 신고 끊김 → 시드 순, 그 안에서는 롱 보유액 큰 순
+        order = {"fresh": 0, "stale": 1}
+        rows.sort(key=lambda r: (r.get("source_kind") != "13f", order.get(r.get("freshness"), 2),
+                                 -float(r.get("total_value_usd") or 0)))
+        by_key = {r["key"]: r for r in rows if r.get("key")}
+        keys = list(by_key)
+        if st.session_state.get("_investor_pick") not in by_key:
+            st.session_state["_investor_pick"] = keys[0]
+        pick = st.pills(
+            "투자자", options=keys, required=True, key="_investor_pick", label_visibility="collapsed",
+            format_func=lambda k: _short(by_key[k]) + (" · 신고 끊김" if by_key[k].get("freshness") == "stale" else ""),
+        ) or keys[0]
+        with st.container(border=True, key="tn-card-investor-detail"):
+            _investor_detail(by_key[pick])
+
+    theme.render(theme.section_label_html("전체 비교"))
     _render_comparison_table(hub.get("comparison") or {})
 
     theme.render(theme.section_label_html("공통 패턴 요약"))
@@ -474,8 +597,7 @@ def _institution_compare_section(hub_all: dict) -> None:
         st.session_state["_watch_llm_requested"] = True
     if st.session_state.get("_watch_llm_requested"):
         with st.spinner("요약 생성 중…"):
-            keys_arg = None if all_selected else tuple(selected_keys)
-            hub_llm = cached.institution_watch(keys_arg, with_llm_summary=True)
+            hub_llm = cached.institution_watch(None, with_llm_summary=True)
         _render_common_moves(hub_llm.get("analysis") or {})
     else:
         st.caption("버튼을 누르면 기관별 공통 패턴과 차이를 요약합니다. 자동으로 실행하지 않습니다.")
@@ -488,8 +610,10 @@ def render():
     rows = data.load_watchlist()
     _watchlist_section(rows)
 
+    my_tickers, names = _my_us_tickers(rows)
     with st.spinner("기관·정치인 데이터 불러오는 중…"):
-        hub_all, screen, congress = _load_investor_data()
+        hub_all, screen, congress, moves = _load_investor_data(my_tickers)
+    _my_stocks_section(my_tickers, moves, names)
     _screening_section(screen, congress)
-    _institution_compare_section(hub_all)
+    _investor_section(hub_all)
     _congress_trading_section()
