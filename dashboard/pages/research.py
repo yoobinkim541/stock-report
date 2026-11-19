@@ -158,17 +158,17 @@ def _screener_section():
 
         def _updown(v):                                  # 등락 색 (± 셀 텍스트)
             try:
-                return (f"color: {theme.GREEN}" if v > 0
-                        else f"color: {theme.RED}" if v < 0 else "")
+                return (f"color: {theme.UP}" if v > 0
+                        else f"color: {theme.DOWN}" if v < 0 else "")
             except TypeError:
                 return ""
 
         def _movecolor(v):
             sv = str(v)
             if sv.startswith("▲") or sv == "신규":
-                return f"color: {theme.GREEN}"
+                return f"color: {theme.UP}"
             if sv.startswith("▼"):
-                return f"color: {theme.RED}"
+                return f"color: {theme.DOWN}"
             return f"color: {theme.MUTED}"
 
         sty = (df.style
@@ -273,7 +273,7 @@ def _screener_detail(event, rows, feats, importance):
     reason_chips = "".join(_chip(x.strip(), theme.BLUE)
                            for x in (r.get("reason") or "").split("·") if x.strip() and x.strip() != "—")
     rating = r.get("tech_rating") or "—"
-    r_col = theme.GREEN if "매수" in rating else theme.RED if "매도" in rating else theme.MUTED
+    r_col = theme.UP if "매수" in rating else theme.DOWN if "매도" in rating else theme.MUTED
     st.markdown(
         f'<div style="background:{theme.PANEL};border-radius:20px;padding:16px 20px">'
         f'<div style="display:flex;gap:14px;align-items:baseline;flex-wrap:wrap">'

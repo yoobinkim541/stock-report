@@ -37,7 +37,7 @@ function el(id) {
   if (id === "chart") gd = els[id];
   return els[id];
 }
-global.document = { getElementById: el,
+global.document = { getElementById: el, addEventListener() {},
                     createElement: () => ({ style: {}, textContent: "" }) };
 global.window = { frameElement: null, parent: { innerHeight: 900, addEventListener() {} } };
 global.performance = { now: () => 1 };
@@ -301,7 +301,7 @@ function el(id) {
   if (id === "chart") gd = els[id];
   return els[id];
 }
-global.document = { getElementById: el, createElement: () => ({ style: {}, textContent: "" }) };
+global.document = { getElementById: el, addEventListener() {}, createElement: () => ({ style: {}, textContent: "" }) };
 global.window = { frameElement: null, parent: { innerHeight: 900, addEventListener() {} } };
 global.performance = { now: () => 1 };
 global.requestAnimationFrame = () => null;
@@ -404,7 +404,7 @@ function el(id) {
   if (id === "chart") gd = els[id];
   return els[id];
 }
-global.document = { getElementById: el,
+global.document = { getElementById: el, addEventListener() {},
                     createElement: () => ({ style: {}, textContent: "" }) };
 global.window = { frameElement: null, parent: { innerHeight: 900, addEventListener() {} },
                   addEventListener(t, f) { winHandlers[t] = f; } };
@@ -479,7 +479,7 @@ function el(id) {
   return els[id];
 }
 global.document = {
-  getElementById: el,
+  getElementById: el, addEventListener() {},
   createElement: () => ({ style: {}, textContent: "", innerHTML: "" }),
 };
 global.window = {
@@ -737,7 +737,7 @@ function el(id) {
   if (id === "chart") gd = els[id];
   return els[id];
 }
-global.document = { getElementById: el,
+global.document = { getElementById: el, addEventListener() {},
                     createElement: () => ({ style: {}, textContent: "" }) };
 global.window = { frameElement: null, parent: { innerHeight: 900, addEventListener() {} } };
 global.performance = { now: () => 1 };
@@ -900,7 +900,7 @@ function el(id) {
   if (id === "chart") gd = els[id];
   return els[id];
 }
-global.document = { getElementById: el, createElement: () => ({ style: {}, textContent: "" }) };
+global.document = { getElementById: el, addEventListener() {}, createElement: () => ({ style: {}, textContent: "" }) };
 global.window = { frameElement: null, parent: { innerHeight: 900, addEventListener() {} },
                   addEventListener() {} };
 global.performance = { now: () => 1 };
@@ -1018,7 +1018,7 @@ function el(id) {
   if (id === "chart") gd = els[id];
   return els[id];
 }
-global.document = { getElementById: el,
+global.document = { getElementById: el, addEventListener() {},
                     createElement: () => ({ style: {}, textContent: "" }) };
 global.window = { frameElement: null, parent: { innerHeight: 900, addEventListener() {} } };
 global.performance = { now: () => 1 };
@@ -1164,7 +1164,7 @@ function el(id) {
   if (id === "chart") gd = els[id];
   return els[id];
 }
-global.document = { getElementById: el, createElement: () => ({ style: {}, textContent: "" }) };
+global.document = { getElementById: el, addEventListener() {}, createElement: () => ({ style: {}, textContent: "" }) };
 global.window = { frameElement: null, parent: { innerHeight: 900, addEventListener() {} } };
 global.performance = { now: () => 1 };
 global.requestAnimationFrame = () => null;
@@ -1284,7 +1284,7 @@ function el(id) {
   if (id === "chart") gd = els[id];
   return els[id];
 }
-global.document = { getElementById: el, createElement: () => ({ style: {}, textContent: "" }) };
+global.document = { getElementById: el, addEventListener() {}, createElement: () => ({ style: {}, textContent: "" }) };
 global.window = { frameElement: null, parent: { innerHeight: 900, addEventListener() {} } };
 global.performance = { now: () => clock };
 global.requestAnimationFrame = (cb) => { rafQueue.push(cb); return rafQueue.length; };
@@ -1410,7 +1410,7 @@ function el(id) {
   if (id === "chart") gd = els[id];
   return els[id];
 }
-global.document = { getElementById: el, createElement: () => ({ style: {}, textContent: "" }) };
+global.document = { getElementById: el, addEventListener() {}, createElement: () => ({ style: {}, textContent: "" }) };
 global.window = { frameElement: null, parent: { innerHeight: 900, addEventListener() {} },
                   addEventListener() {} };
 global.performance = { now: () => 1 };
@@ -1503,7 +1503,7 @@ function el(id) {
   if (id === "chart") gd = els[id];
   return els[id];
 }
-global.document = { getElementById: el, createElement: () => ({ style: {}, textContent: "" }) };
+global.document = { getElementById: el, addEventListener() {}, createElement: () => ({ style: {}, textContent: "" }) };
 global.window = { frameElement: null, parent: { innerHeight: 900, addEventListener() {} } };
 global.performance = { now: () => clock };
 global.requestAnimationFrame = (cb) => { rafQueue.push(cb); return rafQueue.length; };

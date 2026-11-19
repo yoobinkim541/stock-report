@@ -654,7 +654,7 @@ def nav_curve(points: list[dict], currency: str = "₩"):
     dates = [p.get("date") for p in pts]
     navs = [float(p["nav"]) for p in pts]
     up = navs[-1] >= navs[0]
-    color = _GREEN if up else _RED
+    color = _UP if up else _DOWN
     fig.add_trace(go.Scatter(x=dates, y=navs, name="순자산", mode="lines",
                              line=dict(color=color, width=2), fill="tozeroy",
                              fillcolor=("rgba(52,211,153,0.08)" if up else "rgba(248,113,113,0.08)"),
@@ -973,7 +973,7 @@ def _add_hollow_candles(fig, hist, name: str) -> None:
         mask = (color_up == rising) & (hollow_body == hollow)
         if not bool(mask.any()):
             continue
-        color = _GREEN if rising else _RED
+        color = _UP if rising else _DOWN
         fill = "rgba(0,0,0,0)" if hollow else color
         rows = hist.loc[mask]
         fig.add_trace(_go().Candlestick(
@@ -1014,7 +1014,7 @@ def _add_rsi_divergence(fig, hist, rsi_series, rsi_row) -> None:
         if a not in hist.index or b not in hist.index:
             continue
         bearish = ev["type"] == "bearish"
-        color = _RED if bearish else _GREEN
+        color = _DOWN if bearish else _UP
         label = "약세 다이버전스" if bearish else "강세 다이버전스"
         fig.add_trace(go.Scatter(
             x=[a, b], y=[ev["prior_rsi"], ev["rsi"]], mode="lines+markers",
@@ -1239,7 +1239,7 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
             base = float(baseline)
             marker = dict(
                 size=5,
-                color=[_GREEN if float(value) >= base else _RED for value in close],
+                color=[_UP if float(value) >= base else _DOWN for value in close],
             )
             mode = "lines+markers"
         fig.add_trace(_SC(
@@ -1386,7 +1386,7 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
         macd = ema12 - ema26
         signal = macd.ewm(span=9, adjust=False).mean()
         histo = macd - signal
-        hcolors = [_GREEN if v >= 0 else _RED for v in histo.fillna(0)]
+        hcolors = [_UP if v >= 0 else _DOWN for v in histo.fillna(0)]
         fig.add_trace(go.Bar(x=hist.index, y=histo, name="MACD 히스토", showlegend=False,
                              marker=dict(color=hcolors), opacity=0.5), row=macd_row, col=1)
         fig.add_trace(go.Scatter(x=hist.index, y=macd, name="MACD(12·26)", showlegend=False,
@@ -1603,7 +1603,7 @@ def _add_extremes_and_last(fig, hist, view_days, panes) -> None:
                            showarrow=True, arrowhead=2, ax=0, ay=24,
                            font=dict(size=10, color=_BLUE), arrowcolor=_BLUE, **kw)
     prev = float(hist["Close"].iloc[-2]) if len(hist) > 1 else last
-    chip = _GREEN if last >= prev else _RED
+    chip = _UP if last >= prev else _DOWN       # 라이브 패치(plotly_embed patchLast)와 같은 색
     # name=tn-last — ⚡live 클라이언트 패치(plotly_embed patchLast)가 이름으로 찾아
     # 현재가선·라벨을 in-place 이동 (tool-* 아님 → 드로잉 보호·지우기 로직과 무간섭)
     fig.add_hline(y=last, name="tn-last",

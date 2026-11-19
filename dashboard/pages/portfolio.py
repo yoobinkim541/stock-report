@@ -160,15 +160,18 @@ def _rebalance_section(rows):
     with g2:
         st.dataframe(pd.DataFrame([{
             "종목": g["ticker"], "현재%": g["cur"], "목표%": g["tgt"],
-            "갭%p": g["gap_pp"], "조정 필요": g["usd_delta"],
+            "갭%p": g["gap_pp"],
+            # NumberColumn "$%.0f" 은 "$-1316" 으로 찍힌다 — 부호를 통화 앞에, 천 단위 구분
+            "조정 필요": (f"{'+' if g['usd_delta'] >= 0 else '-'}${abs(g['usd_delta']):,.0f}"
+                       if isinstance(g.get("usd_delta"), (int, float)) else "—"),
         } for g in gaps]), hide_index=True, width="stretch",
             height=min(302, 44 + 35 * len(gaps)),
             column_config={
                 "현재%": st.column_config.NumberColumn(format="%.1f"),
                 "목표%": st.column_config.NumberColumn(format="%.1f"),
                 "갭%p": st.column_config.NumberColumn(format="%+.1f"),
-                "조정 필요": st.column_config.NumberColumn(
-                    format="$%.0f", help="+ = 매수 필요 · − = 축소 필요 (표시 전용)"),
+                "조정 필요": st.column_config.TextColumn(
+                    help="+ = 매수 필요 · − = 축소 필요 (표시 전용)"),
             })
     unt = (rb or {}).get("untargeted") or []
     _ROLE = {"현금성 (초단기 국채)": "실탄", "인컴 (커버드콜)": "배당재투자",
@@ -237,8 +240,8 @@ def _holdings_table(rows):
 
     def _pl(v):
         try:
-            return (f"color: {theme.GREEN}" if v > 0
-                    else f"color: {theme.RED}" if v < 0 else "")
+            return (f"color: {theme.UP}" if v > 0            # 손익: 이익 빨강·손실 파랑 (한국식)
+                    else f"color: {theme.DOWN}" if v < 0 else "")
         except TypeError:
             return ""
 

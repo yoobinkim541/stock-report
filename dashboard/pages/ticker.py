@@ -1950,10 +1950,10 @@ def _analysis_snapshot(ticker, hist=None, price=None):
         if total_rec > 0:
             if buyers > sellers + rec_counts.get("hold", 0):
                 stance = "매수 우세"
-                stance_col = theme.GREEN
+                stance_col = theme.UP
             elif sellers > buyers:
                 stance = "보수적"
-                stance_col = theme.RED
+                stance_col = theme.DOWN
             else:
                 stance = "중립"
                 stance_col = None

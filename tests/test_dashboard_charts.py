@@ -196,8 +196,8 @@ def test_renderer_applies_area_and_baseline_styles():
 
     assert area.figure.data[0].fill == "tozeroy"
     marker_colors = list(baseline.figure.data[0].marker.color)
-    assert charts._GREEN in marker_colors
-    assert charts._RED in marker_colors
+    assert charts._UP in marker_colors                    # 기준선 위 = 상승 빨강
+    assert charts._DOWN in marker_colors
 
 
 def test_renderer_hollow_candles_encode_previous_close_and_body_direction():
@@ -220,7 +220,7 @@ def test_renderer_hollow_candles_encode_previous_close_and_body_direction():
         trace.decreasing.line.color for trace in candles
     }
     assert "rgba(0,0,0,0)" in fills
-    assert charts._GREEN in line_colors and charts._RED in line_colors
+    assert charts._UP in line_colors and charts._DOWN in line_colors
     assert all(trace.meta["color_basis"] == "previous_close" for trace in candles)
     assert all(trace.meta["fill_basis"] == "open_close" for trace in candles)
 

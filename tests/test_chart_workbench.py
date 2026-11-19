@@ -500,14 +500,16 @@ def test_vision_section_warns_on_schema_violation_and_hides_ungrounded_numbers(m
     at = AppTest.from_string(_IDENTITY_SCRIPT.format(root=ROOT), default_timeout=60).run()
     at.button[0].click().run()
     assert not at.exception, str(at.exception)
-    assert any("invalid_llm_schema" in str(w.value) for w in at.warning)
+    # 스키마 위반은 내부 코드 대신 한국어 재시도 안내로 보인다 (엔진 문자열 비노출)
+    assert any("시각 분석을 끝내지 못했습니다" in str(w.value) for w in at.warning)
+    assert not any("invalid_llm_schema" in str(w.value) for w in at.warning)
     assert "뚜렷한 고전 패턴이 식별되지 않았습니다" not in _rendered_text(at)
 
     mode["value"] = "ungrounded"
     at.button[0].click().run()
     assert not at.exception, str(at.exception)
     body = _rendered_text(at)
-    assert "wedge" in body
+    assert "쐐기형" in body                                 # 패턴 kind 는 한국어 라벨
     assert "999999" not in body and "888888" not in body and "-100" not in body
     assert "미검증 수치 주장 2건" in body
     assert "관측값(봉 데이터 계산): 현재가 199" in body

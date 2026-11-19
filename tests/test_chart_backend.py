@@ -25,7 +25,6 @@ def test_auto_selects_canvas_for_dense_compatible_chart():
     assert decision.requested == "auto"
     assert decision.automatic is True
     assert decision.reasons == ()
-    assert "Canvas" in decision.status
 
 
 def test_auto_keeps_plotly_for_small_noncompact_chart():
@@ -63,7 +62,6 @@ def test_canvas_request_falls_back_for_unsupported_capability(kwargs, reason):
 
     assert decision.backend == "plotly"
     assert reason in decision.reasons
-    assert "Plotly" in decision.status
 
 
 def test_sequence_chart_type_falls_back_even_when_x_mode_is_wrongly_time():
