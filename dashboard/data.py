@@ -345,9 +345,11 @@ def f_pct(x, dec: int = 1) -> str:
 
 
 def f_pct_s(x, dec: int = 1) -> str:
-    """이미 퍼센트 → 부호 (50.4 → '+50.4%')."""
+    """이미 퍼센트 → 부호 (50.4 → '+50.4%'). 반올림 0 은 부호 없이(fmt.pct 와 같은 규약 — '-0.00%' 방지)."""
     f = _try_float(x)
-    return "—" if f is None else f"{f:+.{dec}f}%"
+    if f is None:
+        return "—"
+    return f"{0:.{dec}f}%" if round(f, dec) == 0 else f"{f:+.{dec}f}%"
 
 
 def f_usd(x, dec: int = 2) -> str:

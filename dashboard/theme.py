@@ -120,7 +120,8 @@ def ticker_hero_html(symbol, name="", price=None, change=None, change_pct=None,
     up = pct >= 0
     # 반올림해 0.00% 인 등락은 보합 — "▼ -$0.00 0.00%" 처럼 방향을 지어내지 않는다
     flat = change is not None and round(pct, 2) == 0 and round(change or 0, 2) == 0
-    col = "#8b95a1" if flat else (UP if up else DOWN)
+    # 등락 미상(change None)은 방향 색을 칠하지 않는다 — 빨간 '—' 가 하락/상승처럼 보였다
+    col = "#8b95a1" if (flat or change is None) else (UP if up else DOWN)
     arrow = "▲" if up else "▼"
     badge = (symbol or "?").replace(".KS", "")[:4]
     code = str(currency or "USD")
@@ -132,14 +133,15 @@ def ticker_hero_html(symbol, name="", price=None, change=None, change_pct=None,
         delta = ("보합 0.00%" if flat else
                  f"{arrow} {_hero_money(change, code, signed=True)} ({'+' if up else '-'}{_num(abs(pct))}%)")
     else:
-        delta = "—"
+        delta = ""
     asof_html = f'<div class="tn-asof">{asof}</div>' if asof else ""
     cur_html = "" if code in _WON or code in _DOLLAR or code in {"₩", "%"} else (
         f'<span class="tn-cur">{code}</span>' if code else "")
     row = [f'<span class="tn-price">{price_html}</span>']
     if cur_html:
         row.append(cur_html)
-    row.append(f'<span class="tn-delta" style="color:{col}">{delta}</span>')
+    if delta:
+        row.append(f'<span class="tn-delta" style="color:{col}">{delta}</span>')
     # 한 줄로 붙인다. 빈 {cur_html} 줄 + 4칸 이상 들여쓰기는 st.markdown 이
     # 코드블록으로 그려 등락·기준시각 HTML 이 그대로 보인다.
     return (
@@ -154,9 +156,10 @@ def ticker_hero_html(symbol, name="", price=None, change=None, change_pct=None,
     )
 
 
+# 기술적 게이지 — 좌 약세·우 강세. 한국식(토스증권) 상승·매수 빨강, 하락·매도 파랑.
 _GAUGE_ZONES = [
-    (UP, "강력매도"), ("#fb8a93", "매도"), ("#8b95a1", "중립"),
-    ("#7aa7f7", "매수"), (DOWN, "강력매수"),
+    (DOWN, "강력매도"), ("#7aa7f7", "매도"), ("#8b95a1", "중립"),
+    ("#fb8a93", "매수"), (UP, "강력매수"),
 ]
 
 
@@ -197,9 +200,11 @@ def rating_gauge_html(score, verdict="", sub="", *, title="",
         for i, (c, _) in enumerate(zones))
     a = 90.0 * (1 - score)                            # score -1→180°, 0→90°, +1→0°
     nx, ny = _polar(cx, cy, R - 20, a)
-    vcol = DOWN if score > 0.15 else UP if score < -0.15 else MUTED
+    zone_i = min(n - 1, int((score + 1) / 2 * n))
+    # verdict 색 = 해당 존 색 (게이지마다 색 의미가 다르다 — 기술: 강세 빨강 / 가치·온도: 위험 빨강)
+    vcol = zones[zone_i][0] if abs(score) > 0.15 else MUTED
     if not verdict:
-        verdict = zones[min(n - 1, int((score + 1) / 2 * n))][1]
+        verdict = zones[zone_i][1]
     ly = cy + 16
     head = (f'<div style="color:{MUTED};font-size:0.78rem;text-align:center;'
             f'margin-bottom:-4px">{title}</div>' if title else '')
