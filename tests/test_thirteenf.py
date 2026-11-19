@@ -289,3 +289,10 @@ def test_resolve_failure_is_not_cached_and_definitive_miss_is(monkeypatch, tmp_p
     assert out == {"191216100": "KO", "G0000000X": None}
     thirteenf._resolve_tickers_by_cusip(["191216100", "G0000000X"])
     assert len(calls) == 1, "확정 미매핑(No identifier found)을 다시 조회함"
+
+
+def test_norm_ticker_maps_openfigi_symbols_to_yfinance_form():
+    assert thirteenf._norm_ticker("BRK/B") == "BRK-B"
+    assert thirteenf._norm_ticker("WBD*") == "WBD"          # when-issued 표기 — 종목 링크가 깨짐
+    assert thirteenf._norm_ticker("ALNY 0 09/15/28") is None  # 전환사채
+    assert thirteenf._norm_ticker("") is None

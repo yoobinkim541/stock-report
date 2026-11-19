@@ -514,7 +514,7 @@ def _bucket_list(title: str, rows: list[dict]) -> str:
         return [_investor_short(k) for k in keys[:3]] + ([f"외 {len(keys) - 3}"] if len(keys) > 3 else [])
 
     items = [{
-        "ticker": r.get("ticker") or "—", "name": _stock_name(r.get("ticker"), r.get("name")),
+        "ticker": r.get("ticker") or "", "name": _stock_name(r.get("ticker"), r.get("name")),
         "tags": _tags(r.get("institutions") or []),
         "value": f"기관 {r.get('count') or 0}곳",
         "delta": f"{(r.get('avg_delta_pct') or 0) * 100:+.1f}%p",

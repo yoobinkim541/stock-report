@@ -230,10 +230,11 @@ def _settled(value) -> bool:
 
 
 def _norm_ticker(value) -> str | None:
-    """캐시 값 → 화면 티커. 미매핑·채권은 None, 'BRK/B' 는 yfinance 표기 'BRK-B'."""
+    """캐시 값 → 화면 티커. 미매핑·채권은 None, 'BRK/B' 는 yfinance 표기 'BRK-B',
+    OpenFIGI 의 when-issued 표기 'WBD*' 는 'WBD'."""
     if not _settled(value) or not value:
         return None
-    return value.replace("/", "-")
+    return value.replace("/", "-").rstrip("*") or None
 
 
 def _pick_equity_ticker(item: dict) -> str:
