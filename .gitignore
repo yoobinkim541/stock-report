@@ -86,3 +86,9 @@ out/
 .DS_Store
 .vercel/
 price_alerts.json.lock
+
+# ── 루트 임시 산출물 (일회성 스크립트·JSON 덤프) ──
+/_tmp_*
+/output*.json
+/wiki-*.json
+/merged_content.json
