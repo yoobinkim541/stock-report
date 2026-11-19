@@ -536,3 +536,8 @@ def _learning_section():
         st.dataframe(pd.DataFrame([{"주": a.get("date"), "OOS 초과": a.get("excess_challenger")}
                                    for a in ev["adoptions"]]), hide_index=True, width="stretch")
     st.caption("표시·모의 정책 · 실거래 미반영 · 무엣지면 정직 공개")
+
+
+if __name__ == "__main__":   # 재기동 직후 딥링크가 MPA v1 로 이 파일을 직접 실행할 때
+    from dashboard.pages import leave_mpa_v1
+    leave_mpa_v1()

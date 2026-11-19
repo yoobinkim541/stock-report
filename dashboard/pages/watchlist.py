@@ -637,3 +637,8 @@ def render():
     _screening_section(screen, congress)
     _investor_section(hub_all)
     _congress_trading_section()
+
+
+if __name__ == "__main__":   # 재기동 직후 딥링크가 MPA v1 로 이 파일을 직접 실행할 때
+    from dashboard.pages import leave_mpa_v1
+    leave_mpa_v1()

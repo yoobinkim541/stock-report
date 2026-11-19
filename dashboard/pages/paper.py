@@ -429,3 +429,8 @@ def _decisions_section(surface: str):
                  column_config={"판단 근거": st.column_config.TextColumn(width="large")})
     st.caption("실현 순초과 = 평가 기간이 지난 뒤 지수 대비 초과수익(거래비용 차감) · ⏳ = 결과 성숙 대기 · "
                "⚠️ 모의투자 — 실거래 아님")
+
+
+if __name__ == "__main__":   # 재기동 직후 딥링크가 MPA v1 로 이 파일을 직접 실행할 때
+    from dashboard.pages import leave_mpa_v1
+    leave_mpa_v1()

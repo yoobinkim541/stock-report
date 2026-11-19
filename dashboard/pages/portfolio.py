@@ -347,3 +347,8 @@ def _income_section(rows):
                 help="활성 플랜 × 주기 환산 (매일×21·매주×4.33)")
     i[3].metric("자동 모으기 월 적립($)", f"${usd_m:,.2f}" if usd_m else "—")
     st.caption("분배 예상은 최근 배당 기준 추정(보장 아님) · 적립은 기록 전용 플랜 합산")
+
+
+if __name__ == "__main__":   # 재기동 직후 딥링크가 MPA v1 로 이 파일을 직접 실행할 때
+    from dashboard.pages import leave_mpa_v1
+    leave_mpa_v1()

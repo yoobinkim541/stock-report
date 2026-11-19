@@ -2992,3 +2992,8 @@ def _manage_position(ticker, cur_price, pos):
         st.caption("기록은 잠금으로 보호됩니다. 실계좌 주문은 없고, 기록만 남습니다.")
     with right:
         _trade_history(ticker)
+
+
+if __name__ == "__main__":   # 재기동 직후 딥링크가 MPA v1 로 이 파일을 직접 실행할 때
+    from dashboard.pages import leave_mpa_v1
+    leave_mpa_v1()

@@ -1092,3 +1092,8 @@ def _inject_codex_css():
         """,
         unsafe_allow_html=True,
     )
+
+
+if __name__ == "__main__":   # 재기동 직후 딥링크가 MPA v1 로 이 파일을 직접 실행할 때
+    from dashboard.pages import leave_mpa_v1
+    leave_mpa_v1()
