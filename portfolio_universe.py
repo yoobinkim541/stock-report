@@ -31,11 +31,13 @@ RETIRED_TICKERS_PATH = os.path.expanduser(
     "~/.local/share/stock-report/retired_tickers.json")
 
 # 스냅샷을 읽을 수 없을 때의 폴백 — 실보유와 어긋나면 일일 감사가 잡는다
-DEFAULT_PORTFOLIO_TICKERS = ["MSFT", "QQQI", "ORCL", "SAP", "UNH",
-                             "SGOV", "NVDA", "GOOGL", "SPMO"]
+DEFAULT_PORTFOLIO_TICKERS = ["GOOGL", "MSFT", "NVDA", "ORCL", "QLD", "SGOV",
+                             "SPMO", "UNH", "UPRO", "AMZN", "CRM", "GPIQ", "QQQI"]
 
-# 전량 청산이 끝난 과거 보유 종목 (정적 시드 — retired_tickers.json 과 합산)
-RETIRED_SEED = {"CPNG", "NOW", "CRM"}  # ticker-ok
+# 전량 청산이 끝난 과거 보유 종목 (정적 시드 — retired_tickers.json 과 합산).
+# CRM 은 재매수로 다시 보유 중이라 뺐다 (load_retired_tickers 는 보유분을 빼지만, 스냅샷이
+# 없는 체크아웃에선 폴백 목록만 보므로 시드에 남으면 감사가 오탐한다).
+RETIRED_SEED = {"CPNG", "NOW"}  # ticker-ok
 
 # 보유 여부와 무관하게 전략·벤치마크로 코드에 상시 등장하는 티커 (감사 제외)
 STRATEGY_TICKERS = {"QQQ", "QLD", "TQQQ", "UPRO", "SPY", "DIA", "SGOV",

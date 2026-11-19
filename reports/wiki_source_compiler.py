@@ -124,7 +124,7 @@ _NUMBER = re.compile(r"[0-9]+(?:[.,][0-9]+)*")
 _PERIOD = re.compile(r"(?<![\w.,])(?:[1-4]Q[0-9]{2}|[12]H[0-9]{2}|FY[0-9]{2,4}|[0-9]{4}년|[0-9]{1,2}(?:분기|월|일|시))",
                      re.IGNORECASE)
 _FRAME_CHARS = 160   # about two sentences of lead-in
-_ACRONYM = re.compile(r"(?<![A-Za-z0-9])[A-Z][A-Z0-9&]+(?![A-Za-z0-9])")   # NBIS, AVGO, FT; not YoY
+_ACRONYM = re.compile(r"(?<![A-Za-z0-9])[A-Z][A-Z0-9&]+(?![A-Za-z0-9])")   # NBIS, AVGO, FT; not YoY  (ticker-ok)
 _HANGUL = re.compile(r"[\u1100-\u11ff\u3130-\u318f\uac00-\ud7a3]")
 # Broker shorthand also states a move with an arrow after its subject ("불확실성↑", "금리↓"). Triangles are left
 # out: ▲ is a list bullet as often as a rise, and △ is the accounting minus.
