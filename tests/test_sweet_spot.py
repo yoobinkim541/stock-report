@@ -73,7 +73,10 @@ def test_kr_exit_buffer_keeps_held_boundary_name_without_topping_up():
     assert by["C"]["selection_basis"].startswith("스위트스팟 유예")
     assert ("C", "sell") not in orders and ("C", "buy") not in orders
     assert ("E", "sell") in orders                       # 3위 밖(k+buffer) — 청산
-    assert ("A", "buy") in orders and ("B", "buy") in orders
+    # 유예 보유 C 와 청산 미체결 E 가 슬롯 2개를 점유한다 — 매도 체결 전 신규편입 없음
+    assert ("A", "buy") not in orders and ("B", "buy") not in orders
+    after_sale = {(o["code"], o["side"]) for o in _kr_plan(marked, {"C": positions["C"]}, n)}
+    assert ("A", "buy") in after_sale and ("B", "buy") not in after_sale
     assert by["A"]["selection_basis"].startswith("스위트스팟 선정")
 
 

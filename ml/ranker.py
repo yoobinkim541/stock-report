@@ -623,6 +623,138 @@ def adopt_if_better(result: RankerResult, path: Path = MODEL_CACHE, *, tol: floa
 
 # ── 오늘의 랭킹 생성 ──────────────────────────────────────────────────────────
 
+# 횡단면 관측일 허용 시차. 주말·휴장(약 5일)은 같은 세션으로 보고,
+# 그 이전 관측은 타 종목 최신일과 섞지 않는다. 벽시계 '오늘'과 비교하지 않는다.
+RANK_OBS_MAX_LAG_DAYS = 5
+
+
+def _naive_day(value) -> pd.Timestamp | None:
+    """거래일 비교용 naive 자정. ohlc_utils.to_naive_days 와 같은 벽시계 규칙."""
+    try:
+        stamp = pd.Timestamp(value)
+        return None if pd.isna(stamp) else stamp.tz_localize(None).normalize()
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _finite_score(value) -> float | None:
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return None
+    return score if np.isfinite(score) else None
+
+
+def _ticker_key(value) -> str | None:
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
+    key = str(value).strip()
+    return key or None
+
+
+def _ranking_session_date(dates: list[pd.Timestamp]) -> pd.Timestamp | None:
+    """다수가 공유하는 가장 늦은 관측일.
+
+    한 종목만 가진 미래 스탬프는 세션을 끌어올리지 않는다. 공유일이 없으면
+    (유니버스가 흩어진 퇴화 경우) 가장 늦은 관측일을 세션으로 본다.
+    """
+    counts: dict[pd.Timestamp, int] = {}
+    for day in dates:
+        if day is None:
+            continue
+        counts[day] = counts.get(day, 0) + 1
+    if not counts:
+        return None
+    shared = [day for day, n in counts.items() if n >= 2]
+    return max(shared or counts)
+
+
+def _observation_is_current(
+    obs: pd.Timestamp | None,
+    session: pd.Timestamp | None,
+    *,
+    max_lag_days: int = RANK_OBS_MAX_LAG_DAYS,
+) -> bool:
+    if obs is None or session is None:
+        return False
+    if obs > session:
+        return False
+    return int((session - obs).days) <= max_lag_days
+
+
+def _select_ranking_rows(
+    rows: list[dict],
+    *,
+    session: pd.Timestamp | None = None,
+    max_lag_days: int = RANK_OBS_MAX_LAG_DAYS,
+) -> list[dict]:
+    """스테일·중복·비유한 예측을 랭킹 전에 제거.
+
+    티커 중복은 더 최신 관측을 남긴다(같은 날이면 먼저 온 유한 점수).
+    """
+    prepared: list[dict] = []
+    for row in rows:
+        ticker = _ticker_key(row.get("ticker"))
+        score = _finite_score(row.get("score"))
+        obs = _naive_day(row.get("obs_date"))
+        if ticker is None or score is None or obs is None:
+            continue
+        item = {**row, "ticker": ticker, "score": score, "obs_date": obs.date().isoformat()}
+        item["_obs"] = obs
+        prepared.append(item)
+    if session is None:
+        session = _ranking_session_date([row["_obs"] for row in prepared])
+    best: dict[str, dict] = {}
+    for row in prepared:
+        if not _observation_is_current(row["_obs"], session, max_lag_days=max_lag_days):
+            continue
+        ticker = row["ticker"]
+        prev = best.get(ticker)
+        if prev is None:
+            best[ticker] = row
+            continue
+        if row["_obs"] > prev["_obs"]:
+            best[ticker] = row
+    return [{k: v for k, v in row.items() if k != "_obs"} for row in best.values()]
+
+
+def _scores_from_frame(df: pd.DataFrame | None) -> dict[str, float]:
+    """랭킹 프레임 → 티커별 유한 점수. 정렬된 첫 행을 유지하고 중복·비유한 값은 버린다."""
+    out: dict[str, float] = {}
+    if df is None or getattr(df, "empty", True):
+        return out
+    for _, row in df.iterrows():
+        ticker = _ticker_key(row.get("ticker"))
+        score = _finite_score(row.get("score"))
+        if ticker is None or score is None or ticker in out:
+            continue
+        out[ticker] = score
+    return out
+
+
+def _close_on(df: pd.DataFrame, label) -> float | None:
+    """피처 관측일과 같은 봉의 종가. 더 늦은 종가로 옛 피처를 포장하지 않는다."""
+    if df is None or "Close" not in getattr(df, "columns", []):
+        return None
+    close = pd.to_numeric(df["Close"], errors="coerce")
+    try:
+        px = close.loc[label]
+    except KeyError:
+        return None
+    if isinstance(px, pd.Series):
+        px = px.dropna()
+        if px.empty:
+            return None
+        px = px.iloc[-1]
+    return _finite_score(px)
+
+
+
 def rank_today(
     mode: str = "nasdaq100",
     top_n: int = 15,
@@ -640,7 +772,9 @@ def rank_today(
         cache_path: 모델 캐시 경로(KR 모델은 별도 경로).
 
     Returns:
-        DataFrame (ticker, score, rank, features...)
+        DataFrame (ticker, score, rank, obs_date, features...)
+        관측일은 벤치마크 최신 유효 종가 기준 −5일~당일만 사용한다. 벤치마크가
+        없으면 후보들의 공통 관측일로 대체한다. 비유한 점수·중복 티커는 제외한다.
     """
     from ml.data_pipeline import build_ml_dataset, fetch_prices, build_stock_features, build_fear_greed_proxy
 
@@ -664,7 +798,6 @@ def rank_today(
 
     prices = fetch_prices(tickers + [benchmark_ticker, "QQQ", "SPY", "^VIX", "HYG", "LQD", "IEF", "TLT"], days=300)
     fg = build_fear_greed_proxy(days=300)
-    import yfinance as yf
     vix_df = prices.get("^VIX")
     market_feat = fg.to_frame("fg_score")
     if vix_df is not None:
@@ -682,43 +815,72 @@ def rank_today(
             logger.warning("지수 다중TF RSI(추론) 생성 실패: %s", e)
 
     rows = []
+    seen: set[str] = set()
     for ticker in tickers:
-        df = prices.get(ticker)
-        if df is None or len(df) < 60:
+        if not ticker or ticker in seen:
             continue
-        feat = build_stock_features(ticker, df, market_feat, qqq_close=qqq_close)
-        if feat.empty:
-            continue
-        feat_clean = feat.dropna()
-        if feat_clean.empty:
-            continue
-        today_feat = feat_clean.iloc[-1].reindex(result.feature_names)
-        if today_feat.isna().any():
-            continue
-        score = float(result.model.predict(today_feat.to_frame().T)[0])
-        # 생존편향 플래그: 52주 고점 근처 + 강한 모멘텀 = 편입 이후 고점 가능성.
-        # 감산은 DataFrame 단계에서 횡단면 스케일로 — 곱셈(×0.85)은 lambdarank 음수 점수에서
-        # 오히려 값을 키워(부스트) 페널티 대상을 위로 올리는 부호버그였다(감사 확정).
-        surv_flag = _survivorship_penalty(today_feat) < 1.0
-        # TradingView식 기술등급 (참고 표시용 — 점수에는 미반영)
+        seen.add(ticker)
         try:
-            from ml.technical_rating import compute_technical_rating
-            tr = compute_technical_rating(df)
-            tech_rating = tr["summary"]["rating"] if tr else None
-        except Exception:
-            tech_rating = None
+            df = prices.get(ticker)
+            if df is None or len(df) < 60:
+                continue
+            feat = build_stock_features(ticker, df, market_feat, qqq_close=qqq_close)
+            if feat is None or getattr(feat, "empty", True):
+                continue
+            # inf 는 dropna 가 남긴다. 비유한 피처 행을 빼고 남은 완결 행 중 가장 늦은 관측을 쓴다.
+            feat_clean = feat.reindex(columns=result.feature_names).replace([np.inf, -np.inf], np.nan).dropna()
+            if feat_clean.empty:
+                continue
+            if not feat_clean.index.is_monotonic_increasing:
+                feat_clean = feat_clean.sort_index()
+            today_feat = feat_clean.iloc[-1]
+            score = _finite_score(result.model.predict(today_feat.to_frame().T)[0])
+            if score is None:
+                continue
+            obs = _naive_day(today_feat.name)
+            price = _close_on(df, today_feat.name)
+            if obs is None or price is None or price <= 0:
+                continue
+            # 생존편향 플래그: 52주 고점 근처 + 강한 모멘텀 = 편입 이후 고점 가능성.
+            # 감산은 DataFrame 단계에서 횡단면 스케일로 — 곱셈(×0.85)은 lambdarank 음수 점수에서
+            # 오히려 값을 키워(부스트) 페널티 대상을 위로 올리는 부호버그였다(감사 확정).
+            surv_flag = _survivorship_penalty(today_feat) < 1.0
+            try:
+                from ml.technical_rating import compute_technical_rating
+                tr = compute_technical_rating(df.loc[:today_feat.name])
+                tech_rating = tr["summary"]["rating"] if tr else None
+            except Exception:
+                tech_rating = None
+            rows.append({
+                "ticker": ticker,
+                "score": score,
+                "surv_flag": surv_flag,
+                "price": price,
+                "tech_rating": tech_rating,
+                **today_feat.to_dict(),
+                "obs_date": obs.date().isoformat(),
+            })
+        except Exception as e:
+            logger.warning("랭킹 관측 스킵 %s: %s", ticker, e)
+            continue
 
-        rows.append({"ticker": ticker, "score": score,
-                     "surv_flag": surv_flag,
-                     "price": float(df["Close"].dropna().iloc[-1]),
-                     "tech_rating": tech_rating,
-                     **today_feat.to_dict()})
-
-    if not rows:
+    session = None
+    if qqq_close is not None:
+        bench_px = pd.to_numeric(qqq_close, errors="coerce")
+        valid = bench_px.index[np.isfinite(bench_px) & (bench_px > 0)]
+        if len(valid):
+            session = _naive_day(valid.max())
+    kept = _select_ranking_rows(rows, session=session)
+    if len(kept) != len(rows):
+        logger.info(
+            "랭킹 관측 제외 %d/%d (세션 불일치·중복·비유한 점수)",
+            len(rows) - len(kept), len(rows),
+        )
+    if not kept:
         return pd.DataFrame()
 
     ranking = (
-        pd.DataFrame(rows)
+        pd.DataFrame(kept)
         .sort_values("score", ascending=False)
         .reset_index(drop=True)
     )
@@ -753,7 +915,8 @@ def rank_today(
                 unit  = 0.15 * s_std if np.isfinite(s_std) and s_std > 0 else 0.0
             else:
                 unit = 0.005
-            cand["fund_score"] = cand["ticker"].map(fund)
+            fund_scores = pd.to_numeric(cand["ticker"].map(fund), errors="coerce")
+            cand["fund_score"] = fund_scores.where(fund_scores.between(0, 100))
             adj = (cand["fund_score"].fillna(50) - 50) / 50 * unit
             cand["score"] = cand["score"] + adj
             ranking = pd.concat([cand, ranking.iloc[len(cand):]]) \
@@ -780,14 +943,7 @@ def scores_by_ticker(tickers: list[str] | None = None, *, mode: str = "nasdaq100
         want = [str(t) for t in (tickers or []) if t]
         top_n = max(len(want) * 2, 50) if want else 50
         df = rank_today(mode=mode, top_n=top_n, benchmark_ticker=benchmark_ticker)
-        if df is None or getattr(df, "empty", True):
-            return {}
-        out: dict[str, float] = {}
-        for _, r in df.iterrows():
-            t, sc = r.get("ticker"), r.get("score")
-            if t is None or sc is None or (isinstance(sc, float) and sc != sc):
-                continue
-            out[str(t)] = float(sc)
+        out = _scores_from_frame(df)
         if want:
             keep = set(want)
             out = {k: v for k, v in out.items() if k in keep}
@@ -887,6 +1043,8 @@ def format_ranking_report(ranking: pd.DataFrame, result: RankerResult, detail_to
             sign = "+" if row["score"] >= 0 else "-"
             score_str = f"{sign}{abs(row['score'])*100:.2f}%"
         lines.append(f"  {row['rank']:>2}. {row['ticker']:<6}  {score_str}  {score_bar}")
+        if row.get("obs_date"):
+            lines[-1] += f"  ({row['obs_date']} 종가)"
 
         # 상위 종목 매매 가이드: ATR(14) 배수 — 목표 +2×ATR / 손절 -1.5×ATR / 매수 -0.5×ATR~현재가
         price = row.get("price")

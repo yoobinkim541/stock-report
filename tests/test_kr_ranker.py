@@ -58,5 +58,18 @@ def test_kr_scores_by_ticker_maps_and_handles_failure(monkeypatch):
     assert kr_ranker.kr_scores_by_ticker() == {}
 
 
+def test_kr_scores_by_ticker_drops_nonfinite_and_duplicates(monkeypatch):
+    """US scores_by_ticker 와 같이 inf·NaN·중복 티커를 정책 점수에 넣지 않는다."""
+    import pandas as pd
+    df = pd.DataFrame([
+        {"ticker": "005930.KS", "score": 0.8},
+        {"ticker": "005930.KS", "score": 0.1},
+        {"ticker": "000660.KS", "score": float("inf")},
+        {"ticker": "035420.KS", "score": float("nan")},
+    ])
+    monkeypatch.setattr(kr_ranker, "rank_kr_today", lambda top_n=30: df)
+    assert kr_ranker.kr_scores_by_ticker() == {"005930.KS": 0.8}
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

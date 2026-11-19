@@ -250,7 +250,7 @@ def load_lev_shadow(path: str | None = None) -> float | None:
 
 def sleeve_plan(reco_lev: float | None, nav: float, positions: dict, price: float | None,
                 *, band: float = 0.25, max_frac: float = LEV_SLEEVE_MAX_FRAC,
-                symbol: str = "QLD") -> tuple[float, list[dict]]:
+                symbol: str = "QLD", buy_cash: float | None = None) -> tuple[float, list[dict]]:
     """유효레버리지 목표 → 2x ETF 슬리브 (비중, 정수주 주문계획). 순수.
 
     reco=None(게이트 미통과/stale) → 목표 0 = 보유분 전량 청산(안전 방향).
@@ -270,6 +270,8 @@ def sleeve_plan(reco_lev: float | None, nav: float, positions: dict, price: floa
         return frac, []                                    # 무거래 밴드
     tgt = int(tgt_val // price)
     delta = tgt - cur
+    if delta > 0 and buy_cash is not None:
+        delta = min(delta, int(max(0.0, buy_cash) // price))
     if delta > 0:
         return frac, [{"symbol": symbol, "side": "buy", "qty": delta,
                        "reason": f"Tier3 구조레버 슬리브 ×{reco_lev:.2f}", "sleeve": True}]
@@ -277,6 +279,16 @@ def sleeve_plan(reco_lev: float | None, nav: float, positions: dict, price: floa
         return frac, [{"symbol": symbol, "side": "sell", "qty": -delta,
                        "reason": "슬리브 리밸런스", "sleeve": True}]
     return frac, []
+
+
+def stock_book_positions(positions: dict, sleeve_mode: str, sleeve_symbol: str) -> dict:
+    """주식 북 보유. paper 에서만 슬리브 종목을 뺀다.
+
+    off/shadow 는 그 종목의 소유자가 랭킹 북이다. 빼면 보유가 신규로 세어져 한도가 과소계상된다.
+    """
+    if sleeve_mode == "paper":
+        return {k: v for k, v in positions.items() if k != sleeve_symbol}
+    return dict(positions)
 
 
 def _rt_best(sym: str, side: str):
@@ -592,6 +604,9 @@ def plan_rebalance(signals: list[dict], positions: dict, budget_usd: float,
     cash_buffer<1 이면 주문가능금액의 그 비율만 매수에 사용(수수료·지정가 여유).
     rebal_band>0: 보유종목 조정을 |현재가치−목표가치|/목표가치 > band 일 때만(잔챙이 skip·회전율↓).
     exit_buffer>0: 보유종목이 top-(N+buffer) 안이면 유지(경계 flip-flop 방지·회전율↓).
+    신규 편입은 주문 전 보유(양수 수량, 청산 주문 포함)가 남긴 빈 슬롯만 채운다.
+    계획된 매도는 체결로 보지 않아 슬롯을 비우지 않고, 그 대금은 가용현금에 더하지 않는다.
+    레버리지 캡도 같은 주문 전 보유를 센다. 구조 슬리브는 이 함수 밖이다.
     min_cash_usd: 매수 가용현금(cash_usd*cash_buffer)이 이 밑이면 매수 자체를 생성 안 함
     (2026-07-24: 회당 목표주수>0인데 실제 KIS 주문가능금액은 이미 0인 경우가 있어 — 어차피
     거부될 소액 매수 시도로 API 콜만 낭비하는 걸 방지).
@@ -627,12 +642,32 @@ def plan_rebalance(signals: list[dict], positions: dict, budget_usd: float,
     remaining = (cash_usd * cash_buffer) if cash_usd is not None else None
     if remaining is not None and remaining < min_cash_usd:
         remaining = 0.0   # 매수 후보는 훑되 전부 tgt<=cur 로 클램프 — 신규매수 생성 안 함
+    held_n = sum(1 for p in positions.values() if int(p.get("shares", 0) or 0) > 0)
+    open_slots = max(0, int(max_positions) - held_n)
+    lev_syms = {str(s).upper() for s in leverage_symbols} if leverage_symbols else set()
+    lev_open = None
+    if lev_syms and leverage_max_positions is not None:
+        held_lev = sum(
+            1 for sym, p in positions.items()
+            if int(p.get("shares", 0) or 0) > 0 and str(sym).upper() in lev_syms
+        )
+        lev_open = max(0, int(leverage_max_positions) - held_lev)
     for s in buys:
         sym, price = s["ticker"], s["price"]
         per = target_values.get(sym, 0.0)
         if per <= 0 or price <= 0:
             continue
         cur = int(positions.get(sym, {}).get("shares", 0) or 0)
+        if cur <= 0 and open_slots <= 0:
+            logger.info(
+                "포지션 한도 — 신규편입 보류: %s (주문 전 보유 %d / 한도 %d, 미체결 매도는 슬롯을 비우지 않음)",
+                sym, held_n, max_positions)
+            continue
+        if cur <= 0 and str(sym).upper() in lev_syms and lev_open is not None and lev_open <= 0:
+            logger.info(
+                "레버리지 한도 — 신규편입 보류: %s (주문 전 보유 레버가 한도 점유, 매도 미체결로 간주)",
+                sym)
+            continue
         eff = price * (1.0 + max(0.0, slippage))
         if quote_fn:                                       # 라이브 호가(ask) 있으면 실제 체결가로 사이징
             try:
@@ -651,6 +686,10 @@ def plan_rebalance(signals: list[dict], positions: dict, budget_usd: float,
         delta = tgt - cur
         if delta > 0:
             orders.append({"symbol": sym, "side": "buy", "qty": delta, "reason": "신규/추가"})
+            if cur <= 0:
+                open_slots -= 1
+                if str(sym).upper() in lev_syms and lev_open is not None:
+                    lev_open -= 1
             if remaining is not None:
                 remaining -= delta * eff
         elif delta < 0:
@@ -721,16 +760,26 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     else:
         leverage_symbols = set(leverage_universe())
+        # paper 만 슬리브가 종목을 소유한다(신호·보유 모두 주식 북에서 제외). off/shadow 에서
+        # 보유만 빼면 같은 종목을 신규로 착각해 max_positions 가 과소계상된다.
         sleeve_frac, sleeve_orders = 0.0, []
-        positions_stock = {k: v for k, v in positions.items() if k != LEV_SLEEVE_SYMBOL}
+        stock_cash = None
+        if cash is not None:
+            stock_cash = max(0.0, cash) * min(1.0, max(0.0, CASH_BUFFER))
+            if stock_cash < MIN_CASH_USD:
+                stock_cash = 0.0
         sleeve_mode = leverage_sleeve_mode()
+        positions_stock = stock_book_positions(positions, sleeve_mode, LEV_SLEEVE_SYMBOL)
         if sleeve_mode != "off":
             reco = load_lev_shadow()
             lev_px = _rt_best(LEV_SLEEVE_SYMBOL, "buy") or (kis_mock.get_price(LEV_SLEEVE_SYMBOL) if not dry else None)
             shadow_frac, shadow_orders = sleeve_plan(reco, nav, positions, lev_px,
-                                                     band=REBAL_BAND, symbol=LEV_SLEEVE_SYMBOL)
+                                                     band=REBAL_BAND, symbol=LEV_SLEEVE_SYMBOL,
+                                                     buy_cash=stock_cash if sleeve_mode == "paper" else None)
             if sleeve_mode == "paper":
                 sleeve_frac, sleeve_orders = shadow_frac, shadow_orders
+                if stock_cash is not None and sleeve_orders and sleeve_orders[0]["side"] == "buy":
+                    stock_cash -= sleeve_orders[0]["qty"] * lev_px
             logger.info("슬리브[%s]: reco=%s → 비중 %.0f%% · 주문 %d건",
                         sleeve_mode, reco, shadow_frac * 100, len(shadow_orders))
         budget = nav * INVEST * (1.0 - sleeve_frac)
@@ -742,8 +791,8 @@ def main(argv: list[str] | None = None) -> int:
             s["ticker"]: float(s.get("momentum_multiplier", 1.0) or 1.0)
             for s in trade_signals if s.get("ticker")
         }
-        plan = plan_rebalance(trade_signals, positions_stock, budget, MAX_POS, cash_usd=cash,
-                              slippage=SLIPPAGE, quote_fn=_rt_best, cash_buffer=CASH_BUFFER,
+        plan = plan_rebalance(trade_signals, positions_stock, budget, MAX_POS, cash_usd=stock_cash,
+                              slippage=SLIPPAGE, quote_fn=_rt_best,
                               rebal_band=REBAL_BAND, exit_buffer=EXIT_BUFFER,
                               leverage_symbols=leverage_symbols,
                               leverage_max_positions=LEV_ETF_MAX_POS,

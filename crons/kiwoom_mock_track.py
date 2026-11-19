@@ -361,6 +361,7 @@ def _plan_weighted(signals: list[dict], positions: dict, budget_krw: float,
 
     비중은 호출자가 고른다. 점수 랭킹·exit_buffer·tranches 는 쓰지 않는다.
     최소보유는 호출자가 0 으로 넘긴다. 가격이 없는 미보유 종목은 건너뛴다.
+    양수 비중인데 신호·보유 가격이 모두 없으면 보유분은 청산하지 않고 리사이즈도 하지 않는다.
     """
     orders: list[dict] = []
     held_days = held_days or {}
@@ -371,20 +372,29 @@ def _plan_weighted(signals: list[dict], positions: dict, budget_krw: float,
         if code and px > 0:
             price_of[str(code)] = px
     weights: dict[str, float] = {}
+    unpriced_held: set[str] = set()
+    held_key = {
+        str(k): k for k, p in positions.items()
+        if int(p.get("shares", 0) or 0) > 0
+    }
     for code, raw in (target_weights or {}).items():
         w = float(raw or 0.0)
         if w <= 0.0:
             continue
         code = str(code)
-        px = price_of.get(code) or float(positions.get(code, {}).get("cur_price") or 0)
+        pos_key = held_key.get(code, code)
+        pos = positions.get(pos_key) or {}
+        px = price_of.get(code) or float(pos.get("cur_price") or 0)
         if px <= 0:
+            if pos_key in positions and int(pos.get("shares", 0) or 0) > 0:
+                unpriced_held.add(pos_key)
             continue
         price_of[code] = px
         weights[code] = w
     total = sum(weights.values())
     if total > 1.0:
         weights = {c: w / total for c, w in weights.items()}
-    keep = set(weights)
+    keep = set(weights) | unpriced_held
     for code, p in positions.items():
         sh = int(p.get("shares", 0) or 0)
         if sh > 0 and code not in keep:
@@ -468,6 +478,10 @@ def plan_rebalance(signals: list[dict], positions: dict, budget_krw: float,
         애초에 목표에서 빠지므로 자동 청산됨). **매도는 항상 먼저(현금 확보).**
       - 매수/조정 = 목표 종목별 목표주수까지 delta. 예산 0/음수면 매수 생략(유령매도 방지),
         가용현금 알면 그 한도까지만(over-spend 방지).
+      - 신규 편입은 주문 전 보유(양수 수량, 청산 주문 포함)가 남긴 빈 슬롯만 채운다.
+        계획된 매도(전량·부분·exit buffer·min_hold 잔존)는 체결로 보지 않아 슬롯을 비우지 않고,
+        그 대금은 가용현금에 더하지 않는다. 장점 북은 이 고정 N 한도와 분리한다.
+    target_weights 가 있으면 점수 랭킹 대신 그 비중을 쓴다. 합이 1 미만이면 현금이다.
     """
     orders: list[dict] = []
     held_days = held_days or {}
@@ -527,12 +541,20 @@ def plan_rebalance(signals: list[dict], positions: dict, budget_krw: float,
     # (2026-07-24: us_mock_track.py 와 동일한 버그 — cash_krw>0 도 요구하면 현금 정확히 0일 때
     # 캡이 통째로 빠져 예산 기준 풀사이즈 매수가 그대로 나감)
     remaining = cash_krw
+    # 주문 전 양수 보유가 슬롯을 점유한다. 청산 주문이 있어도 체결 전 카운트는 줄지 않는다.
+    held_n = sum(1 for p in positions.values() if int(p.get("shares", 0) or 0) > 0)
+    open_slots = max(0, int(max_positions) - held_n)
     for s in buys:
         code, price = s["code"], s["price"]
         per_sym = target_values.get(code, per)
         if per_sym <= 0 or price <= 0:
             continue
         cur = int(positions.get(code, {}).get("shares", 0) or 0)
+        if cur <= 0 and open_slots <= 0:
+            logger.info(
+                "포지션 한도 — 신규편입 보류: %s (주문 전 보유 %d / 한도 %d, 미체결 매도는 슬롯을 비우지 않음)",
+                code, held_n, max_positions)
+            continue
         eff_price = price * (1.0 + max(0.0, slippage))   # 슬리피지 버퍼
         if quote_fn:                                      # 라이브 호가(ask) 있으면 실제 체결가로 사이징
             try:
@@ -551,6 +573,8 @@ def plan_rebalance(signals: list[dict], positions: dict, budget_krw: float,
         delta = tgt - cur
         if delta > 0:
             orders.append({"code": code, "side": "buy", "qty": delta, "reason": "신규/추가"})
+            if cur <= 0:
+                open_slots -= 1
             if remaining is not None:
                 remaining -= delta * eff_price
         elif delta < 0:

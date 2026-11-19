@@ -151,3 +151,25 @@ def test_active_mark_uses_the_last_completed_month():
     assert active_mark(marks, "2026-10-31") == pd.Timestamp("2026-09-30")
     marks = [pd.Timestamp("2026-10-30"), pd.Timestamp("2026-11-10")]
     assert active_mark(marks, "2026-11-12") == pd.Timestamp("2026-10-30")
+
+
+def test_book_prices_exclude_future_and_absent_quotes(monkeypatch):
+    from ml.kr_advantage import _closes
+    from providers import kr_market_data
+    year = pd.DataFrame({
+        "Code": ["000001", "000002", "000001", "000003", "000001", "000002"],
+        "Date": pd.to_datetime(["2025-03-12", "2025-03-12", "2025-03-13", "2025-03-13",
+                                "2025-12-30", "2025-12-30"]),
+        "Close": [10, 20, 12, np.inf, 100, 200],
+    })
+    monkeypatch.setattr(kr_market_data, "_marcap_year", lambda y: year)
+    assert _closes({"000001", "000002", "000003"}, pd.Timestamp("2025-03-13")) == {"000001": 12}
+
+
+def test_future_rows_cannot_make_a_stale_book_current(monkeypatch):
+    from ml import kr_advantage
+    kb, _ = kr_advantage._runners()
+    stale = pd.DataFrame({"000001": [0, 1]}, index=pd.to_datetime(["2025-01-02", "2025-12-30"]))
+    monkeypatch.setattr(kb, "build_panels", lambda *args: {"ret": stale})
+    book = kr_advantage.current_book("2025-03-15")
+    assert not book["ok"] and "2025-01-02" in book["error"]

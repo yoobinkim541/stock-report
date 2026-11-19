@@ -256,6 +256,19 @@ def test_simulate_live_min_hold_blocks_and_stub_exempt():
     assert r_hold.abs().sum() > 0                      # 실제 거래·수익 발생
 
 
+def test_live_replacement_waits_for_confirmed_slot():
+    dates = pd.bdate_range("2025-05-05", periods=4)
+    # B doubles immediately after the decision to sell A; B can only enter next cycle.
+    px = pd.DataFrame({"A": [1., 1., 1., 1.], "B": [1., 1., 2., 4.]}, index=dates)
+    feats = {d: pd.DataFrame({"hi52": scores}, index=["A", "B"])
+             for d, scores in zip(dates, [[1, 0], [0, 1], [0, 1]])}
+    out = bt.simulate_live({"adj": px, "ret": px.pct_change()}, feats, list(feats),
+                           top_k=1, exit_buffer=0, min_hold_days=0, tranches=1,
+                           buy_bps=0, sell_bps=0)
+    assert out.iloc[2] == pytest.approx(0.0)
+    assert out.iloc[3] == pytest.approx(0.9)
+
+
 def test_simulate_live_tranches_slow_entry():
     """트란치 N=3 이면 첫 결정일 직후 투자비중이 일괄(1/1)보다 작다 (분할 진입)."""
     p = _panels(n_days=900)
@@ -268,14 +281,14 @@ def test_simulate_live_tranches_slow_entry():
     assert r3.loc[seg].std() < r1.loc[seg].std()
 
 
-def test_live_combo_eval_verdict_keys():
+def test_live_combo_uses_each_eligible_month_end():
     p = _panels(n_days=1400)
     mes = bt.month_ends(p["ret"].index)
     bench = bt.cap_benchmark(p, mes)
     lv = bt.live_combo_eval(p, bench, cadence=5)
-    assert lv.get("verdict") in ("CONFIRMED", "PARTIAL", "NOT-CONFIRMED") or lv.get("error")
-    if "combo" in lv:
-        assert {"combo", "no_brakes", "monthly_batch", "bench"} <= set(lv)
+    feats = {d: f for d in mes if (f := bt.features_asof(p, d)) is not None}
+    monthly = bt.simulate_live(p, feats, list(feats), min_hold_days=0, tranches=1)
+    assert lv["monthly_batch"] == bt.perf(monthly)
 
 
 # ── 라이브·백테스트 mom12/hi52 원시식 공유 (parity — nautilus_trader "동일 코드경로" 원칙 적용) ──

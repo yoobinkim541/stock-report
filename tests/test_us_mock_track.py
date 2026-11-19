@@ -23,9 +23,13 @@ def test_plan_buys_top_n_whole_shares():
 
 
 def test_plan_sells_off_target_first():
+    """타깃이탈 매도는 나가되, 주문 전 보유가 한도를 채우면 대체 신규편입은 하지 않는다.
+    현금이 있어도 매도 체결과 매도대금을 가정하지 않는다."""
     sigs = [{"ticker": "A", "price": 100, "policy_score": 0.9}]
-    o = _orders(T.plan_rebalance(sigs, {"X": {"shares": 5}}, budget_usd=1000, max_positions=1))
-    assert o.get(("X", "sell")) == 5 and o.get(("A", "buy")) == 10
+    o = _orders(T.plan_rebalance(sigs, {"X": {"shares": 5}}, budget_usd=1000, max_positions=1,
+                                 cash_usd=1000))
+    assert o.get(("X", "sell")) == 5
+    assert ("A", "buy") not in o
 
 
 def test_plan_cash_cap():
@@ -280,6 +284,28 @@ def test_sleeve_plan_sizes_l_minus_one():
     assert frac == 0.3
     assert orders == [{"symbol": "QLD", "side": "buy", "qty": 600,
                        "reason": "Tier3 구조레버 슬리브 ×1.30", "sleeve": True}]
+
+
+def test_paper_sleeve_cannot_buy_more_than_confirmed_cash():
+    frac, orders = T.sleeve_plan(1.3, 100_000, {}, 50., buy_cash=149.)
+    assert frac == 0.3 and _orders(orders) == {("QLD", "buy"): 2}
+    _, orders = T.sleeve_plan(None, 100_000, {"QLD": {"shares": 5}}, 50., buy_cash=0.)
+    assert _orders(orders) == {("QLD", "sell"): 5}
+
+
+def test_dry_run_stock_and_sleeve_share_one_cash_balance(monkeypatch, caplog):
+    monkeypatch.setenv("US_MOCK_LEV_SLEEVE_MODE", "paper")
+    monkeypatch.setenv("MOCK_SWEET_SPOT", "0")   # 주식+슬리브 경로 (스위트스팟 ETF 경로 아님)
+    for key, value in {"SEED_USD": 1000., "CASH_BUFFER": 0.35, "MIN_CASH_USD": 0.,
+                       "INVEST": 1., "TRANCHES": 1, "LEV_SLEEVE_SYMBOL": "QLD"}.items():
+        monkeypatch.setattr(T, key, value)
+    monkeypatch.setattr(T, "_rt_best", lambda *args: 50.)
+    monkeypatch.setattr(T, "load_lev_shadow", lambda: 1.3)
+    monkeypatch.setattr(T, "compute_us_signals", lambda: [{"ticker": "A", "price": 50.}])
+    with caplog.at_level("INFO"):
+        assert T.main(["--dry-run"]) == 0
+    orders = [r.args[:3] for r in caplog.records if "[DRY] " in r.msg and r.args]
+    assert orders == [("buy", "QLD", 6), ("buy", "A", 1)]  # $300 + $50, not $300 + $350
 
 
 def test_sleeve_plan_liquidates_when_gate_off():
@@ -544,3 +570,62 @@ def test_sweet_spot_etf_path_places_cash_capped_orders_with_real_basis(monkeypat
     assert len(us) == 3
     assert all((r.get("selection_basis") or "").startswith(notes["basis"]) for r in us)
     assert rows["us_mock_history"][-1]["kind"] == "snapshot"
+
+
+def test_plan_residual_holdings_block_new_entries():
+    """exit buffer 잔존 + 청산 예정이 주문 전 슬롯을 채우면 신규편입은 없다.
+    3분할로 매도가 부분만 나가도 슬롯은 비지 않는다."""
+    from lib.tranche import plan_tranches
+    sigs = [
+        {"ticker": "A", "price": 100, "policy_score": 0.9},
+        {"ticker": "B", "price": 100, "policy_score": 0.8},
+        {"ticker": "C", "price": 100, "policy_score": 0.7},
+    ]
+    pos = {"C": {"shares": 5}, "F": {"shares": 30}}
+    plan = T.plan_rebalance(sigs, pos, budget_usd=10_000, max_positions=2,
+                            cash_usd=10_000, exit_buffer=2)
+    o = _orders(plan)
+    assert o.get(("F", "sell")) == 30
+    assert ("C", "sell") not in o
+    assert ("A", "buy") not in o and ("B", "buy") not in o
+    partial = plan_tranches(plan, 10_000 / 2, lambda s: 100, 3, id_key="symbol")
+    assert not any(x["side"] == "buy" for x in partial)
+    assert any(x["symbol"] == "F" and x["side"] == "sell" and x["qty"] < 30 for x in partial)
+
+
+def test_plan_open_slot_admits_only_best_new_entry():
+    """빈 슬롯은 최상위 신규 1개만. 버퍼 보유는 유지하고 차순위 신규는 넣지 않는다."""
+    sigs = [
+        {"ticker": "A", "price": 100, "policy_score": 0.9},
+        {"ticker": "B", "price": 100, "policy_score": 0.8},
+        {"ticker": "C", "price": 100, "policy_score": 0.7},
+    ]
+    o = _orders(T.plan_rebalance(sigs, {"C": {"shares": 5}}, budget_usd=10_000,
+                                 max_positions=2, cash_usd=10_000, exit_buffer=2))
+    assert o.get(("A", "buy")) == 50
+    assert ("B", "buy") not in o
+    assert ("C", "sell") not in o
+
+
+def test_plan_preorder_leverage_hold_blocks_new_leverage():
+    """청산 예정 레버리지도 주문 전 한도를 점유한다. 주식 신규는 빈 슬롯만큼 허용."""
+    sigs = [
+        {"ticker": "NVDL", "price": 100, "policy_score": 0.99},
+        {"ticker": "A", "price": 100, "policy_score": 0.80},
+        {"ticker": "B", "price": 100, "policy_score": 0.70},
+    ]
+    o = _orders(T.plan_rebalance(
+        sigs, {"SOXL": {"shares": 10}},
+        budget_usd=10_000, max_positions=3, cash_usd=10_000,
+        leverage_symbols={"NVDL", "SOXL"}, leverage_max_positions=1,
+    ))
+    assert o.get(("SOXL", "sell")) == 10
+    assert ("NVDL", "buy") not in o
+    assert o.get(("A", "buy")) == 33 and o.get(("B", "buy")) == 33
+
+
+def test_stock_book_counts_sleeve_symbol_unless_paper_owns_it():
+    pos = {"QLD": {"shares": 4}, "A": {"shares": 1}}
+    assert set(T.stock_book_positions(pos, "shadow", "QLD")) == {"QLD", "A"}
+    assert set(T.stock_book_positions(pos, "off", "QLD")) == {"QLD", "A"}
+    assert set(T.stock_book_positions(pos, "paper", "QLD")) == {"A"}

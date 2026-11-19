@@ -833,3 +833,63 @@ def test_plan_min_hold_stub_exempt():
     out2 = kt.plan_rebalance(signals, built, 1_000_000, 1, min_hold_days=60,
                              held_days={"B": 3}, stub_frac=0.5)
     assert not any(o["code"] == "B" and o["side"] == "sell" for o in out2)
+
+
+def test_plan_residual_holdings_block_new_entries():
+    """exit buffer·min_hold·청산 예정이 주문 전 슬롯을 채우면 현금이 있어도 신규편입은 없다.
+    3분할 부분매도도 슬롯을 비우지 않는다."""
+    import kiwoom_mock_track as kt
+    from lib.tranche import plan_tranches
+    signals = [
+        {"code": "A", "is_buy": True, "price": 1000, "policy_score": 0.9},
+        {"code": "B", "is_buy": True, "price": 1000, "policy_score": 0.8},
+        {"code": "C", "is_buy": True, "price": 1000, "policy_score": 0.7},
+        {"code": "D", "is_buy": True, "price": 1000, "policy_score": 0.6},
+    ]
+    positions = {
+        "C": {"shares": 5, "cur_price": 1000},
+        "E": {"shares": 10, "cur_price": 1000},
+        "F": {"shares": 300, "cur_price": 1000},
+    }
+    orders = kt.plan_rebalance(
+        signals, positions, 1_000_000, 2, cash_krw=1_000_000,
+        exit_buffer=2, min_hold_days=60, held_days={"C": 100, "E": 3, "F": 90},
+    )
+    assert not any(o["code"] in {"A", "B"} and o["side"] == "buy" for o in orders)
+    assert not any(o["code"] == "C" and o["side"] == "sell" for o in orders)
+    assert not any(o["code"] == "E" and o["side"] == "sell" for o in orders)
+    assert any(o["code"] == "F" and o["side"] == "sell" and o["qty"] == 300 for o in orders)
+    partial = plan_tranches(orders, 1_000_000 / 2, lambda c: 1000, 3, id_key="code")
+    assert not any(o["side"] == "buy" for o in partial)
+    assert any(o["code"] == "F" and o["side"] == "sell" and o["qty"] < 300 for o in partial)
+
+
+def test_plan_open_slot_admits_only_best_new_entry():
+    """빈 슬롯 1개는 최상위 신규만. 버퍼 보유는 팔지 않는다."""
+    import kiwoom_mock_track as kt
+    signals = [
+        {"code": "A", "is_buy": True, "price": 1000, "policy_score": 0.9},
+        {"code": "B", "is_buy": True, "price": 1000, "policy_score": 0.8},
+        {"code": "C", "is_buy": True, "price": 1000, "policy_score": 0.7},
+    ]
+    orders = kt.plan_rebalance(
+        signals, {"C": {"shares": 5, "cur_price": 1000}}, 1_000_000, 2,
+        cash_krw=1_000_000, exit_buffer=2,
+    )
+    buys = [o["code"] for o in orders if o["side"] == "buy"]
+    assert buys == ["A"]
+    assert not any(o["code"] == "C" and o["side"] == "sell" for o in orders)
+
+
+def test_weighted_plan_keeps_positive_target_without_price():
+    """양수 비중인데 신호·보유 가격이 없으면 청산도 리사이즈도 하지 않는다."""
+    import kiwoom_mock_track as kt
+    orders = kt.plan_rebalance(
+        [{"code": "000660", "price": 100000, "is_buy": True}],
+        {"005930": {"shares": 4, "cur_price": 0}},
+        budget_krw=1_000_000, max_positions=5, cash_krw=1_000_000,
+        target_weights={"005930": 0.4, "000660": 0.5},
+    )
+    assert not any(o["code"] == "005930" for o in orders)
+    assert any(o["code"] == "000660" and o["side"] == "buy" for o in orders)
+    assert kt.plan_rebalance([], {}, 1_000_000, 5, target_weights={"005930": 0.4}) == []

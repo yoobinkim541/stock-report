@@ -718,9 +718,12 @@ def simulate_live(panels: dict, feats: dict, decision_dates: list, *, top_k: int
             if a in f.columns:
                 score = score + float(w) * f[a].fillna(0.0)
         ranked = list(score.nlargest(top_k + max(0, exit_buffer)).index)
-        target = set(score.nlargest(top_k).index)
+        target = ranked[:top_k]
         keep = set(ranked)
         per = nav * 0.9 / max(top_k, 1)                      # INVEST 0.9 정합
+        # 크론은 체결 전 잔고 한 번으로 주문을 계획한다. 이번 매도 대금·자리 재사용 금지.
+        buy_cash = cash
+        new_slots = max(0, top_k - len(shares))
 
         # 1) 청산 게이트: keep 밖 + (min_hold 충족 또는 스텁) → 트란치 상한 매도
         for c in list(shares.keys()):
@@ -745,6 +748,8 @@ def simulate_live(panels: dict, feats: dict, decision_dates: list, *, top_k: int
 
         # 2) 매수: 목표 top-k 중 미달분 → 트란치 상한
         for c in target:
+            if c not in shares and new_slots == 0:
+                continue
             p = float(px.get(c) or 0)
             if p <= 0:
                 continue
@@ -753,12 +758,15 @@ def simulate_live(panels: dict, feats: dict, decision_dates: list, *, top_k: int
             if gap <= per * 0.25:                            # 무거래 밴드(REBAL_BAND 정합)
                 continue
             cap_sh = ((per / tranches) / p) if tranches > 1 else (gap / p)
-            q = min(gap / p, cap_sh, cash / (p * (1.0 + buy_bps / 1e4)) if p > 0 else 0)
+            q = min(gap / p, cap_sh, buy_cash / (p * (1.0 + buy_bps / 1e4)))
             if q <= 0:
                 continue
-            cash -= q * p * (1.0 + buy_bps / 1e4)
+            cost = q * p * (1.0 + buy_bps / 1e4)
+            cash -= cost
+            buy_cash -= cost
             if c not in shares:
                 entry_di[c] = di
+                new_slots -= 1
             shares[c] = shares.get(c, 0.0) + q
 
     nav_s = pd.Series(navs, index=dates)
@@ -787,8 +795,13 @@ def live_combo_eval(panels: dict, bench, *, cadence: int = 5) -> dict:
     naked = simulate_live(panels, feats_w, decision_dates,
                           min_hold_days=0, tranches=1, exit_buffer=0)
     # 월간 배치(기존 가정) — 월말만 결정
-    monthly_dates = [t for t in month_ends(ret.index) if t in feats_w]
-    monthly = simulate_live(panels, feats_w, monthly_dates,
+    monthly_dates = month_ends(ret.index)
+    feats_m = {}
+    for t in monthly_dates:
+        f = feats_w[t] if t in feats_w else features_asof(panels, t)
+        if f is not None:
+            feats_m[t] = f
+    monthly = simulate_live(panels, feats_m, monthly_dates,
                             min_hold_days=0, tranches=1, exit_buffer=LIVE_EXIT_BUFFER)
 
     b = bench.reindex(combo.index).fillna(0.0)

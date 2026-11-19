@@ -50,12 +50,16 @@ def rank_kr_today(top_n: int = 30, retrain: bool = False):
 
 
 def kr_scores_by_ticker(top_n: int = 30) -> dict[str, float]:
-    """티커→모델점수 매핑(정책 점수 산출용). 실패 시 빈 dict."""
+    """티커→모델점수 매핑(정책 점수 산출용). 실패 시 빈 dict.
+
+    US `scores_by_ticker` 와 같이 비유한 점수·중복 티커는 넣지 않는다.
+    관측일 게이트는 `rank_today` 가 이미 적용한다.
+    """
     try:
         df = rank_kr_today(top_n=top_n)
-        if df is None or df.empty:
+        if df is None or getattr(df, "empty", True):
             return {}
-        return {str(r["ticker"]): float(r["score"]) for _, r in df.iterrows()}
+        return _ranker._scores_from_frame(df)
     except Exception as e:
         logger.warning("KR 랭킹 산출 실패: %s", e)
         return {}

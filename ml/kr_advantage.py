@@ -102,23 +102,17 @@ def _runners():
     return kb, xb
 
 
-def _closes(codes: set[str], year: int) -> dict[str, float]:
-    from providers.kr_market_data import _marcap_year, norm_code
-    df = _marcap_year(year)
-    if df is None or "Close" not in getattr(df, "columns", []):
+def _closes(codes: set[str], session: pd.Timestamp) -> dict[str, float]:
+    """해당 거래일에 관측된 종가만 주문 참고가로 허용한다."""
+    from providers.kr_market_data import marcap_asof
+    if not codes:
         return {}
-    want = {norm_code(c) for c in codes}
-    work = df.copy()
-    work["_code"] = work["Code"].map(norm_code)
-    sub = work[work["_code"].isin(want)].sort_values("Date")
-    if sub.empty:
+    snap = marcap_asof(str(session.date()))
+    if snap is None or snap.empty or "Close" not in snap:
         return {}
-    last = sub.groupby("_code", sort=False).tail(1)
-    out = {}
-    for code, px in zip(last["_code"], last["Close"]):
-        if px is not None and float(px) > 0:
-            out[str(code)] = float(px)
-    return out
+    rows = snap.loc[snap["Code"].isin(codes) & (pd.to_datetime(snap["Date"]) == session)]
+    return {code: float(px) for code, px in zip(rows["Code"], rows["Close"])
+            if pd.notna(px) and np.isfinite(px) and px > 0}
 
 
 def current_book(asof=None, *, start_year: int = 2001) -> dict:
@@ -130,7 +124,10 @@ def current_book(asof=None, *, start_year: int = 2001) -> dict:
         panels = kb.build_panels(start_year, int(asof.year))
         if not panels or panels["ret"].empty:
             return {"ok": False, "error": "marcap 패널 없음"}
-        last = pd.Timestamp(panels["ret"].index.max()).normalize()
+        panels = {key: frame.loc[:asof] for key, frame in panels.items()}
+        if panels["ret"].empty:
+            return {"ok": False, "error": f"{asof.date()}까지 관측된 거래일 없음"}
+        last = pd.Timestamp(panels["ret"].index[-1]).normalize()
         if (asof - last).days > STALE_DAYS:
             return {"ok": False, "error": f"패널이 오래됨 {last.date()}"}
         frames = xb.build_frames(panels)
@@ -167,7 +164,7 @@ def current_book(asof=None, *, start_year: int = 2001) -> dict:
         weights = {}
         for code, w in raw.items():
             weights[norm_code(code)] = weights.get(norm_code(code), 0.0) + float(w)
-        prices = _closes(set(weights), int(last.year))
+        prices = _closes(set(weights), last)
         return {
             "ok": True,
             "asof": str(mark.date()),

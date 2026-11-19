@@ -73,6 +73,9 @@ def test_scores_by_ticker_empty_frame(monkeypatch):
 
 
 def test_scores_by_ticker_skips_unusable_rows(monkeypatch):
-    df = pd.DataFrame({"ticker": ["AAPL", None, "MSFT"], "score": [0.9, 0.5, None]})
+    df = pd.DataFrame({
+        "ticker": ["AAPL", None, "MSFT", "INF", "AAPL"],
+        "score": [0.9, 0.5, None, float("inf"), 0.1],
+    })
     monkeypatch.setattr(ranker, "rank_today", lambda **k: df)
     assert ranker.scores_by_ticker() == {"AAPL": 0.9}
