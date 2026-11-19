@@ -1078,9 +1078,9 @@ def _inject_codex_css():
     st.markdown(
         """
         <style>
-        .codex-console-title{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;padding:0 0 12px;border-bottom:1px solid rgba(148,163,184,.14);margin-bottom:12px}
-        .codex-console-title h1{margin:0;font-size:1.55rem;line-height:1.15;letter-spacing:0}
-        .codex-console-title span,.codex-kicker{color:rgba(148,163,184,.92);font-size:.82rem}.codex-kicker{text-transform:uppercase;letter-spacing:.08em;margin-bottom:2px}
+        .codex-console-title{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;padding:0 0 4px;margin-bottom:12px}
+        .codex-console-title h1{margin:0;padding:0;line-height:1.15}
+        .codex-console-title > span,.codex-kicker{color:var(--tn-muted);font-size:.82rem}.codex-kicker{margin-bottom:2px}
         .codex-glance{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin:0 0 8px}.codex-glance div{border:none;border-radius:16px;background:var(--tn-panel);padding:12px 14px;min-height:52px}.codex-glance span{display:block;color:var(--tn-muted);font-size:.72rem;margin-bottom:3px}.codex-glance b{display:block;color:var(--tn-text);font-size:.95rem;font-weight:700;line-height:1.25;overflow-wrap:anywhere}
         .codex-chat-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 16px;border:none;border-radius:16px;background:var(--tn-panel);margin-bottom:10px}.codex-chat-head span{color:var(--tn-muted);font-size:.78rem;overflow-wrap:anywhere}.codex-chip{display:inline-block;margin-left:8px;padding:2px 9px;border:none;border-radius:999px;background:rgba(49,130,246,.16);color:#3182f6!important;font-size:.72rem!important;font-weight:600;vertical-align:middle;white-space:nowrap}
         div[data-testid="stChatMessage"]{border:none;border-radius:16px;background:var(--tn-panel);padding:12px 14px;margin-bottom:8px}div[data-testid="stChatInput"] textarea{border-radius:12px}

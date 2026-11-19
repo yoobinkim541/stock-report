@@ -514,15 +514,18 @@ def market_treemap(rows: list[dict], height: int | None = None):
         else:
             texts.append(f"{tile}<br>{ticker}<br>{pct}")
         names.append(r.get("name") or ticker); pcts.append(pct)
+    # 보합·섹터 헤더 회색과 타일 경계선을 페이지 바탕에 맞춘다(다크 #17171c / 라이트 #f2f4f6)
+    light = theme.is_light()
+    mid, edge = ("#8b95a1", "#f2f4f6") if light else ("#2c2c35", "#17171c")
     fig = go.Figure(go.Treemap(
         ids=ids, labels=labels, parents=parents, values=values, branchvalues="total",
         text=texts, textinfo="text", textposition="middle center",
         textfont=dict(size=11, color="white", family=theme._NUM_FONT),
         customdata=names, hovertext=pcts,
         marker=dict(colors=colors,
-                    colorscale=[[0.0, _RED], [0.5, "#1a1d26"], [1.0, _GREEN]],
+                    colorscale=[[0.0, _RED], [0.5, mid], [1.0, _GREEN]],
                     cmid=0, cmin=-3, cmax=3, showscale=False,
-                    line=dict(width=1, color="#0e1117")),
+                    line=dict(width=1, color=edge)),
         tiling=dict(pad=1),
         hovertemplate="%{customdata} (%{label}) %{hovertext}<br>시총 %{value:,.0f}<extra></extra>"))
     # uniformtext 를 두지 않는다 — 글자는 타일마다 맞춰 줄고, 숨는 타일이 없다.

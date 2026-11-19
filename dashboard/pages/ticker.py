@@ -881,7 +881,7 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
     """
     # 컨트롤 한 줄 — 봉 | 라인/캔들 | 지표 | 비교 | 기간 | ⛶ (풀뷰는 리플레이 토글) (좁은 화면은 자동 줄바꿈)
     ctf, ckind, c3, c4, cper, cfull = st.columns(
-        [1.65, 0.78, 0.44, 0.6, 1.15, 0.62 if fullscreen else 0.32], vertical_alignment="center",
+        [1.65, 0.62, 0.44, 0.56, 1.36, 0.62 if fullscreen else 0.32], vertical_alignment="center",
     )
     if not fullscreen:   # 풀뷰는 상단 '↙ 종목 분석' 이 복귀 — 이 칸은 리플레이 토글 자리
         if cfull.button("⛶", key="_chart_fullbtn", help="전체화면 풀차트 — 모든 컨트롤 그대로"):

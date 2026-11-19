@@ -130,7 +130,7 @@ def ticker_hero_html(symbol, name="", price=None, change=None, change_pct=None,
     price_html = _hero_money(price, code) if has else "—"
     if has and change is not None:
         delta = ("보합 0.00%" if flat else
-                 f"{arrow} {_hero_money(change, code, signed=True)}  {_num(abs(pct))}%")
+                 f"{arrow} {_hero_money(change, code, signed=True)} ({'+' if up else '-'}{_num(abs(pct))}%)")
     else:
         delta = "—"
     asof_html = f'<div class="tn-asof">{asof}</div>' if asof else ""
@@ -842,9 +842,9 @@ h5 {{ font-size: 1rem !important; padding-top: .6rem !important; }}
 [data-testid="stCaptionContainer"] {{ color: {MUTED} !important; font-size: .8rem; line-height: 1.5; }}
 /* 해시·URL 같은 끊김 없는 긴 토큰이 컬럼 밖으로 넘쳐 옆 컬럼과 겹치지 않게 */
 [data-testid="stMarkdownContainer"], [data-testid="stCaptionContainer"] {{ overflow-wrap: anywhere; }}
-[data-testid="stMarkdownContainer"] a {{ text-decoration: none; font-weight: 500; }}
-[data-testid="stMarkdownContainer"] a:hover {{ text-decoration: underline; }}
-[data-testid="stMarkdownContainer"] :not(pre) > code {{
+[data-testid="stMarkdownContainer"] a, [data-testid="stCaptionContainer"] a {{ text-decoration: none; font-weight: 500; }}
+[data-testid="stMarkdownContainer"] a:hover, [data-testid="stCaptionContainer"] a:hover {{ text-decoration: underline; }}
+[data-testid="stMarkdownContainer"] :not(pre) > code, [data-testid="stCaptionContainer"] :not(pre) > code {{
   background: {PANEL2}; color: {MUTED}; border-radius: 6px; padding: 1px 6px; font-size: .78em;
   font-family: {_NUM_FONT}; font-weight: 600; }}
 
@@ -910,12 +910,12 @@ hr {{ border-color: {BORDER} !important; margin: 1.6rem 0 !important; }}
 [data-testid="stBaseButton-tertiary"], [data-testid="stBaseButton-borderless"] {{ color: {BLUE} !important; }}
 
 /* ── 입력: 테두리 없는 회색 면, 포커스 때만 파랑 ── */
-[data-baseweb="input"] > div, [data-baseweb="select"] > div, [data-baseweb="textarea"],
+[data-baseweb="input"], [data-baseweb="input"] > div, [data-baseweb="select"] > div, [data-baseweb="textarea"],
 [data-baseweb="base-input"], [data-testid="stChatInput"] > div {{
   border-radius: 14px !important; background: {PANEL2} !important; border-color: transparent !important; }}
 [data-baseweb="input"] input, [data-baseweb="textarea"] textarea, [data-baseweb="base-input"] input {{
   background: transparent !important; }}
-[data-baseweb="input"]:focus-within > div, [data-baseweb="select"]:focus-within > div,
+[data-baseweb="input"]:focus-within, [data-baseweb="select"]:focus-within > div,
 [data-baseweb="textarea"]:focus-within {{ border-color: {BLUE} !important; }}
 [data-testid="stWidgetLabel"] p {{ font-weight: 500; }}
 
