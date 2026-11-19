@@ -277,21 +277,33 @@ def _ticker_label(rows: list[dict]):
     return lambda t: f"{names.get(t, t)} ({t})" if names.get(t, t) != t else t
 
 
+def _do_add() -> None:
+    """추가 버튼 콜백 — 위젯 렌더 전에 돌아서 성공 시 입력칸을 비울 수 있다."""
+    ss = st.session_state
+    ticker = str(ss.get("_watchlist_add_ticker") or "")
+    if not ticker.strip():
+        ss["_watchlist_add_result"] = ("warning", "티커를 입력하세요.")
+        return
+    ok, msg = data.add_watchlist_ticker(ticker, note=str(ss.get("_watchlist_add_note") or ""))
+    if ok:
+        ss["_watchlist_add_ticker"] = ""
+        ss["_watchlist_add_note"] = ""
+        ss["_watchlist_add_result"] = ("toast", f"⭐ 관심종목 추가: {msg}")
+    else:
+        ss["_watchlist_add_result"] = ("error", msg)
+
+
 def _add_card() -> None:
     with st.container(border=True, key="tn-card-wl-add"):
         st.markdown("**종목 추가**")
-        ticker = st.text_input("티커", key="_watchlist_add_ticker", placeholder="PLTR · 005930")
-        note = st.text_input("메모 (선택)", key="_watchlist_add_note", placeholder="실적 기대")
-        if st.button("추가", key="_watchlist_add_btn", type="primary", width="stretch"):
-            if not ticker.strip():
-                st.warning("티커를 입력하세요.")
-            else:
-                ok, msg = data.add_watchlist_ticker(ticker, note=note)
-                if ok:
-                    st.toast(f"⭐ 관심종목 추가: {msg}")
-                    st.rerun()
-                else:
-                    st.error(msg)
+        st.text_input("티커", key="_watchlist_add_ticker", placeholder="PLTR · 005930")
+        st.text_input("메모 (선택)", key="_watchlist_add_note", placeholder="실적 기대")
+        st.button("추가", key="_watchlist_add_btn", type="primary", width="stretch", on_click=_do_add)
+        kind, msg = st.session_state.pop("_watchlist_add_result", (None, ""))
+        if kind == "toast":
+            st.toast(msg)
+        elif kind:
+            getattr(st, kind)(msg)
 
 
 def _move_card(rows: list[dict], folders: list[str]) -> None:

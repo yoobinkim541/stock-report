@@ -172,6 +172,9 @@ def test_add_and_remove_buttons_use_shared_watchlist_store(monkeypatch):
     at.text_input(key="_watchlist_add_ticker").set_value("amd")
     at.text_input(key="_watchlist_add_note").set_value("MI450")
     at.button(key="_watchlist_add_btn").click().run()
+    # 성공하면 입력칸이 비워져 같은 티커를 다시 누르는 중복 추가를 막는다
+    assert at.text_input(key="_watchlist_add_ticker").value == ""
+    assert at.text_input(key="_watchlist_add_note").value == ""
     at.selectbox(key="_watchlist_remove_ticker").set_value("NVDA").run()
     at.button(key="_watchlist_remove_btn").click().run()
     assert removed == []
