@@ -53,9 +53,10 @@ _token_cache: dict = {"token": None, "exp": 0.0}
 # 모의 게이트웨이는 초당 호출 한도를 넘기면 HTTP 500 + msg_cd EGW00201("초당 거래건수를 초과하였습니다")을
 # 준다(2026-11-19 연속 GET 8회 실측: 200 은 2회). 주문마다 hashkey·잔고 GET·주문 POST 가 1초 안에 몰려
 # QQQ·SGOV 주문이 거부됐다. 모든 모의 호출은 _send 한 통로로 프로세스 간 간격을 둔다.
+# 간격 실측(현재가 GET 연속): 0.55s 8회 중 3회·0.75s 10회 중 1회 EGW00201, 1.0s 10회 0회.
 _RATE_LIMIT_CODE = "EGW00201"
 _RATE_LIMIT_RETRIES = 3
-_MIN_INTERVAL_S = float(os.getenv("KIS_MOCK_MIN_INTERVAL_S", "0.55"))
+_MIN_INTERVAL_S = float(os.getenv("KIS_MOCK_MIN_INTERVAL_S", "1.0"))
 _PACE_FILE = os.path.expanduser("~/.cache/kis_mock_pace")
 
 # 종목 → 해외거래소코드(주문 OVRS_EXCG_CD). 미상은 NASD 기본 — get_price 가 다른 거래소에서 찾으면
