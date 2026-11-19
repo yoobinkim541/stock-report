@@ -880,6 +880,13 @@ h5 {{ font-size: 1rem !important; padding-top: .6rem !important; }}
 [data-testid="stMetricValue"] {{ font-size: 1.5rem !important; font-weight: 700; color: {TEXT};
   letter-spacing: -0.035em; }}
 [data-testid="stMetricDelta"] {{ font-weight: 600; }}
+/* 메트릭 카드 하나만 든 컬럼: 같은 행 카드 높이를 맞춘다(델타 유무로 카드 높이가 들쭉날쭉하지 않게) */
+[data-testid="stColumn"]:has(> [data-testid="stVerticalBlock"] > [data-testid="stElementContainer"]:only-child > [data-testid="stMetric"]) {{
+  display: flex; flex-direction: column; }}
+[data-testid="stColumn"] > [data-testid="stVerticalBlock"]:has(> [data-testid="stElementContainer"]:only-child > [data-testid="stMetric"]),
+[data-testid="stVerticalBlock"] > [data-testid="stElementContainer"]:only-child:has(> [data-testid="stMetric"]) {{
+  flex: 1 1 auto; }}
+[data-testid="stElementContainer"]:only-child > [data-testid="stMetric"] {{ height: 100%; }}
 [data-testid="stExpander"] {{ border: none; border-radius: 20px; background: {PANEL}; }}
 [data-testid="stExpander"] details {{ border: none !important; border-radius: 20px; }}
 [data-testid="stExpander"] summary {{ padding: 14px 20px; font-weight: 600; border-radius: 20px; }}
@@ -1061,10 +1068,10 @@ footer {{ display: none !important; }}
   .tn-wl-spark {{ display: none; }}
   [data-testid="stMetric"] {{ padding: 11px 14px 10px !important; border-radius: 16px; }}
   [data-testid="stMetricValue"] {{ font-size: 1.25rem !important; }}
-  [data-testid="stMetricLabel"] p {{ font-size: .68rem !important; }}
+  [data-testid="stMetricLabel"] p {{ font-size: .72rem !important; }}
   [data-testid="stMetricDelta"] {{ font-size: .78rem !important; }}
   [data-testid="stVerticalBlock"] {{ gap: .6rem !important; }}
-  [data-testid="stHorizontalBlock"] {{ gap: .5rem !important; }}
+  [data-testid="stHorizontalBlock"] {{ gap: .6rem !important; }}
   .stTabs [data-baseweb="tab"] {{ padding: 7px 10px; font-size: .84rem; }}
   .tn-etf-rets {{ gap: 6px; }}
   .tn-hold-row {{ grid-template-columns: minmax(0,1fr) 58px; }}
@@ -1073,6 +1080,13 @@ footer {{ display: none !important; }}
   .tn-sl-ava {{ width: 36px; height: 36px; font-size: .9rem; }}
   .tn-sl-head {{ padding: 14px 14px 6px; }}
   .tn-sl-memo {{ display: none; }}
+}}
+
+/* Streamlit 은 640px 아래에서 컬럼을 한 줄에 하나씩 쌓는다. 메트릭 카드만 든 컬럼은 두 장씩 놓아
+   카드 7~8장이 화면 두 개 높이로 늘어지지 않게 한다(홀수 마지막 장·차트 옆 카드는 flex-grow 로 한 줄을 채움). */
+@media (max-width: 640px) {{
+  [data-testid="stColumn"]:has(> [data-testid="stVerticalBlock"] > [data-testid="stElementContainer"]:only-child > [data-testid="stMetric"]) {{
+    min-width: calc(50% - .3rem) !important; flex-basis: calc(50% - .3rem) !important; }}
 }}
 
 @media (max-width: 430px) {{

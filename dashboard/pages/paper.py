@@ -135,31 +135,33 @@ def _account_section(surface: str):
     life_excess = None
     if d.get("lifetime_cum_ret") is not None and d.get("lifetime_bench_ret") is not None:
         life_excess = d["lifetime_cum_ret"] - d["lifetime_bench_ret"]
+    # 두 줄 모두 4칸 — 윗줄은 현재 세대, 아랫줄은 세대를 이어붙인 전체. 같은 열이 같은 지표라 위아래로 비교된다.
     m = st.columns(4)
     m[0].metric("순자산", _money(d["nav"], cur),
                 delta=(f"{d['day_ret']:+.2f}% 전일" if d.get("day_ret") is not None else None))
     m[1].metric("세대 누적 수익률", data.f_pct_s(d.get("cum_ret"), 2),
                 help=f"세대 {d.get('generation') or '—'} · 인셉션 {d.get('inception_date') or '—'} 이후")
-    m[2].metric("전체 누적 수익률", data.f_pct_s(d.get("lifetime_cum_ret"), 2),
-                help=f"최초 {d.get('lifetime_inception_date') or d.get('inception_date') or '—'} 이후")
-    m[3].metric(f"세대 vs {bench}", (f"{excess:+.2f}%p" if excess is not None else "—"),
+    m[2].metric(f"세대 vs {bench}", (f"{excess:+.2f}%p" if excess is not None else "—"),
                 delta=(f"{bench} {d['bench_ret']:+.2f}%" if d.get("bench_ret") is not None else None),
                 delta_color="off", help="현재 세대 기준 지수 아웃퍼폼")
+    mdd_ok = (d.get("strat_mdd") is not None and d.get("bench_mdd") is not None
+              and d["strat_mdd"] <= d["bench_mdd"])
+    m[3].metric("MDD (세대)", data.f_pct(d.get("strat_mdd")),
+                delta=(f"지수 {data.f_pct(d.get('bench_mdd'))} {'✅' if mdd_ok else '⚠️'}"
+                       if d.get("bench_mdd") is not None else None),
+                delta_color="off", help="현재 세대 최대낙폭")
 
-    m2 = st.columns(3)
-    m2[0].metric(f"전체 vs {bench}", (f"{life_excess:+.2f}%p" if life_excess is not None else "—"),
+    m2 = st.columns(4)
+    m2[0].metric("현금 (예수금)", _money(d.get("cash"), cur))
+    m2[1].metric("전체 누적 수익률", data.f_pct_s(d.get("lifetime_cum_ret"), 2),
+                 help=f"최초 {d.get('lifetime_inception_date') or d.get('inception_date') or '—'} 이후")
+    m2[2].metric(f"전체 vs {bench}", (f"{life_excess:+.2f}%p" if life_excess is not None else "—"),
                  delta=(f"{bench} {d['lifetime_bench_ret']:+.2f}%"
                         if d.get("lifetime_bench_ret") is not None else None),
                  delta_color="off", help="세대 경계를 이어붙인 전체 성과")
-    mdd_ok = (d.get("strat_mdd") is not None and d.get("bench_mdd") is not None
-              and d["strat_mdd"] <= d["bench_mdd"])
-    m2[1].metric("MDD (세대)", data.f_pct(d.get("strat_mdd")),
-                 delta=(f"지수 {data.f_pct(d.get('bench_mdd'))} {'✅' if mdd_ok else '⚠️'}"
-                        if d.get("bench_mdd") is not None else None),
-                 delta_color="off", help="현재 세대 최대낙폭")
     life_mdd_ok = (d.get("lifetime_strat_mdd") is not None and d.get("lifetime_bench_mdd") is not None
                    and d["lifetime_strat_mdd"] <= d["lifetime_bench_mdd"])
-    m2[2].metric("MDD (전체)", data.f_pct(d.get("lifetime_strat_mdd")),
+    m2[3].metric("MDD (전체)", data.f_pct(d.get("lifetime_strat_mdd")),
                  delta=(f"지수 {data.f_pct(d.get('lifetime_bench_mdd'))} {'✅' if life_mdd_ok else '⚠️'}"
                         if d.get("lifetime_bench_mdd") is not None else None),
                  delta_color="off", help="리셋 구간을 이어붙인 전체 최대낙폭")
@@ -172,42 +174,37 @@ def _account_section(surface: str):
     else:
         st.info("순자산 시계열이 아직 쌓이는 중입니다. 평일 마감 스냅샷마다 누적됩니다.")
 
-    # ── 보유 + 현금 ───────────────────────────────────────────────────────────
+    # ── 보유 (현금은 KPI 둘째 줄) ─────────────────────────────────────────────
+    # 모바일 표는 앞 2~3열만 보이므로 평가액·수익률을 종목 바로 뒤에 둔다.
     pos = d.get("positions") or []
-    left, right = st.columns([3, 1])
-    with left:
-        st.markdown(f"##### 보유 {len(pos)}종목")
-        if pos:
-            event = st.dataframe(pd.DataFrame([{
-                "종목": p["name"], "수량": p["shares"],
-                "평단": _money(p["avg"], cur),
-                "현재가": _money(p["cur"], cur),
-                "평가액": _money(p["value"], cur), "수익률": data.f_pct_s(p.get("ret"), 2),
-            } for p in pos]), hide_index=True, width="stretch",
-                on_select="rerun", selection_mode="single-row", key=f"_paper_pos_{surface}")
-            try:
-                sel = event.selection.rows
-            except Exception:
-                sel = []
-            if sel and sel[0] < len(pos):
-                symbol = _analysis_symbol(pos[sel[0]].get("symbol"))
-                if symbol:
-                    ui_actions.open_ticker(
-                        symbol,
-                        toast=f"종목 분석 → {pos[sel[0]].get('name') or symbol}",
-                    )
-            st.caption("행을 누르면 종목 분석으로 이동합니다")
-        elif d.get("balance_ok"):
-            st.caption("보유 없음 — 현금 100%")
-        else:
-            st.caption("보유 내역을 불러오지 못했습니다.")
-    with right:
-        st.markdown("##### 현금")
-        st.metric("예수금", _money(d.get("cash"), cur), label_visibility="collapsed")
-        c = d.get("cost")
-        if c:
-            st.caption(f"💸 누적 거래비용 {_money(c['total'], cur)}\n\n"
-                       f"회전율 {c['turnover']:.0f}% · 드래그 −{c['drag']:.2f}%p")
+    st.markdown(f"##### 보유 {len(pos)}종목")
+    if pos:
+        event = st.dataframe(pd.DataFrame([{
+            "종목": p["name"], "평가액": _money(p["value"], cur),
+            "수익률": data.f_pct_s(p.get("ret"), 2), "수량": p["shares"],
+            "현재가": _money(p["cur"], cur), "평단": _money(p["avg"], cur),
+        } for p in pos]), hide_index=True, width="stretch",
+            on_select="rerun", selection_mode="single-row", key=f"_paper_pos_{surface}")
+        try:
+            sel = event.selection.rows
+        except Exception:
+            sel = []
+        if sel and sel[0] < len(pos):
+            symbol = _analysis_symbol(pos[sel[0]].get("symbol"))
+            if symbol:
+                ui_actions.open_ticker(
+                    symbol,
+                    toast=f"종목 분석 → {pos[sel[0]].get('name') or symbol}",
+                )
+        st.caption("행을 누르면 종목 분석으로 이동합니다")
+    elif d.get("balance_ok"):
+        st.caption("보유 없음 — 현금 100%")
+    else:
+        st.caption("보유 내역을 불러오지 못했습니다.")
+    c = d.get("cost")
+    if c:
+        st.caption(f"💸 누적 거래비용 {_money(c['total'], cur)} · "
+                   f"회전율 {c['turnover']:.0f}% · 드래그 −{c['drag']:.2f}%p")
 
     orders = d.get("order_history") or []
     if orders:
@@ -217,8 +214,8 @@ def _account_section(surface: str):
             "종목": _order_label(r.get("code") or r.get("symbol") or r.get("ticker")),
             "방향": "매수" if r.get("side") == "buy" else ("매도" if r.get("side") == "sell" else r.get("side")),
             "수량": r.get("qty"),
-            "사유": _reason_text(r.get("reason")),
             "상태": "✅ 성공" if r.get("ok") is True else ("❌ 실패" if r.get("ok") is False else "—"),
+            "사유": _reason_text(r.get("reason")),
             "메시지": _reason_text(r.get("msg")) if r.get("msg") else "—",
         } for r in orders[:30]]), hide_index=True, width="stretch",
             column_config={"메시지": st.column_config.TextColumn(width="large")})
@@ -406,6 +403,9 @@ def _decisions_section(surface: str):
             "구분": f"{_SIDE_ICON.get(r.get('side'), '')} {r.get('side', '')}",
             "종목": r.get("name") or r.get("ticker"),
             "수량": r.get("qty"),
+            "체결": "✅" if r.get("ok") else ("❌" if r.get("ok") is False else "—"),
+            "적중": ("✅" if r["correct"] else "❌") if r.get("correct") is not None else "⏳",
+            "실현 순초과": data.f_frac_pct_s(r.get("fwd_excess"), 2),
             "정책점수": data.f_ratio(r.get("policy_score"), 3),
             "선택점수": data.f_ratio(r.get("selection_score"), 3),
             "오버레이": "켜짐" if overlay_active else "꺼짐",
@@ -415,9 +415,6 @@ def _decisions_section(surface: str):
             "틸트": data.f_ratio(r.get("momentum_tilt"), 3),
             "레짐": _label(_REGIME_LABEL, r.get("regime")),
             "판단 근거": _reason_text(r.get("reason")),
-            "체결": "✅" if r.get("ok") else ("❌" if r.get("ok") is False else "—"),
-            "실현 순초과": data.f_frac_pct_s(r.get("fwd_excess"), 2),
-            "적중": ("✅" if r["correct"] else "❌") if r.get("correct") is not None else "⏳",
         }
         if show_axes:
             f = r.get("features") or {}
