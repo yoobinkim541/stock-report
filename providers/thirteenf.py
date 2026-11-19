@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import statistics
 import threading
 import time
@@ -85,10 +86,11 @@ def _cached_json(path: Path, ttl_h: float, url: str) -> dict | None:
 
 
 def latest_filing_meta(filer_key: str, *, skip: int = 0) -> dict | None:
-    """13F-HR 필링 메타 {cik, accession, filing_date, report_date, primary_doc}. 실패 시 None.
+    """13F-HR 필링 메타 {cik, accession, filing_date, report_date, primary_doc, amendments}. 실패 시 None.
 
     skip=0 이 최신, skip=1 이 그 직전 분기(return_proxy 계산용) — 13F-HR 이 아닌
-    필링(10-K 등)은 건너뛰고 세도록 카운트. report_date 는 기준 분기말(없으면 None)."""
+    필링(10-K 등)은 건너뛰고 세도록 카운트. report_date 는 기준 분기말(없으면 None).
+    amendments 는 같은 분기말의 13F-HR/A [{accession, filing_date, primary_doc}] (오래된 순)."""
     filer = FILERS.get(filer_key)
     if not filer:
         return None
@@ -102,6 +104,11 @@ def latest_filing_meta(filer_key: str, *, skip: int = 0) -> dict | None:
     recent = (sub.get("filings") or {}).get("recent") or {}
     forms = recent.get("form") or []
     report_dates = recent.get("reportDate") or []
+
+    def _at(i: int) -> dict:
+        return {"accession": recent["accessionNumber"][i], "filing_date": recent["filingDate"][i],
+                "primary_doc": recent["primaryDocument"][i]}
+
     seen = 0
     for i, form in enumerate(forms):
         if form != "13F-HR":
@@ -109,13 +116,11 @@ def latest_filing_meta(filer_key: str, *, skip: int = 0) -> dict | None:
         if seen < skip:
             seen += 1
             continue
-        return {
-            "cik": cik,
-            "accession": recent["accessionNumber"][i],
-            "filing_date": recent["filingDate"][i],
-            "report_date": (report_dates[i] if i < len(report_dates) else None) or None,
-            "primary_doc": recent["primaryDocument"][i],
-        }
+        report_date = (report_dates[i] if i < len(report_dates) else None) or None
+        amendments = [_at(j) for j, f in enumerate(forms)
+                      if f == "13F-HR/A" and report_date and j < len(report_dates) and report_dates[j] == report_date]
+        return {"cik": cik, **_at(i), "report_date": report_date,
+                "amendments": sorted(amendments, key=lambda a: (a["filing_date"], a["accession"]))}
     return None
 
 
@@ -299,8 +304,8 @@ def _resolve_tickers_by_cusip(cusips: list[str], *, max_requests: int | None = N
 # ── 보유 스냅샷 ────────────────────────────────────────────────────────────
 # accession 은 불변이라 같은 프로세스에서 한 번만 파싱한다(Citadel 정보테이블 8MB).
 # 티커가 덜 풀린 결과는 메모하지 않아 다음 호출이 이어서 채운다.
-_HOLDINGS_MEMO: dict[tuple[str, str], dict] = {}
-_ROWS_MEMO: dict[tuple[str, str], list[dict]] = {}   # 티커가 덜 풀린 accession 의 파싱 결과(재파싱 방지)
+_HOLDINGS_MEMO: dict[tuple[str, ...], dict] = {}   # 키: (cik, accession, 정정 accession…)
+_ROWS_MEMO: dict[tuple[str, ...], list[dict]] = {}   # 티커가 덜 풀린 분기의 파싱 결과(재파싱 방지)
 _FETCH_LOCK = threading.Lock()
 
 
@@ -318,6 +323,52 @@ def _load_rows(meta: dict) -> list[dict] | None:
     except Exception as e:
         logger.warning("13F 정보테이블 파싱 실패 (%s): %s", meta.get("accession"), e)
         return None
+
+
+def _amendment_type(meta: dict) -> str:
+    """13F-HR/A 표지(primary_doc.xml)의 amendmentType — 'RESTATEMENT'·'NEW HOLDINGS', 못 읽으면 ''."""
+    acc_nodash = meta["accession"].replace("-", "")
+    cache_path = _CACHE_DIR / f"primary_{meta['cik']}_{acc_nodash}.xml"
+    url = (f"https://www.sec.gov/Archives/edgar/data/{int(meta['cik'])}/{acc_nodash}/"
+           f"{os.path.basename(meta['primary_doc'])}")
+    from lib.file_cache import is_fresh
+    try:
+        _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        if not is_fresh(cache_path, _IMMUTABLE_TTL_H):
+            cache_path.write_bytes(_get(url))
+        m = re.search(rb"<(?:\w+:)?amendmentType>\s*([^<]+?)\s*<", cache_path.read_bytes())
+    except Exception as e:
+        logger.warning("13F 정정 표지 조회 실패 (%s): %s", meta.get("accession"), e)
+        return ""
+    return m.group(1).decode().upper() if m else ""
+
+
+def _quarter_rows(meta: dict) -> list[dict] | None:
+    """원 13F-HR 정보테이블에 같은 분기 정정을 반영한 행.
+
+    'NEW HOLDINGS' 정정은 원본에 빠진 행을 더하고(퍼싱스퀘어 2026-06-30: 자사주 PS 1행 추가),
+    'RESTATEMENT' 는 그 분기 보유 전체를 대체한다. 정정 순서는 제출 순."""
+    rows = _load_rows(meta)
+    if rows is None:
+        return None
+    for amd in meta.get("amendments") or []:
+        am = {**meta, **amd}
+        kind = _amendment_type(am)
+        if kind not in ("RESTATEMENT", "NEW HOLDINGS"):
+            continue
+        extra = _load_rows(am)
+        if extra is None:
+            continue
+        if kind == "RESTATEMENT":
+            rows = extra
+            continue
+        agg = {(r["cusip"], r["put_call"]): dict(r) for r in rows}
+        for r in extra:
+            a = agg.setdefault((r["cusip"], r["put_call"]), {**r, "value_usd": 0.0, "shares": 0.0})
+            a["value_usd"] += r["value_usd"]
+            a["shares"] += r["shares"]
+        rows = sorted(agg.values(), key=lambda x: -x["value_usd"])
+    return rows
 
 
 def _build_snapshot(filer_key: str, meta: dict, rows: list[dict], tickers: dict) -> dict:
@@ -355,7 +406,7 @@ def latest_holdings(filer_key: str, *, skip: int = 0) -> dict | None:
     meta = latest_filing_meta(filer_key, skip=skip)
     if not meta:
         return None
-    memo_key = (meta["cik"], meta["accession"])
+    memo_key = (meta["cik"], meta["accession"], *(a["accession"] for a in meta.get("amendments") or []))
     if memo_key in _HOLDINGS_MEMO:
         return _HOLDINGS_MEMO[memo_key]
     with _FETCH_LOCK:
@@ -363,7 +414,7 @@ def latest_holdings(filer_key: str, *, skip: int = 0) -> dict | None:
             return _HOLDINGS_MEMO[memo_key]
         rows = _ROWS_MEMO.get(memo_key)
         if rows is None:
-            rows = _load_rows(meta)
+            rows = _quarter_rows(meta)
             if rows is None:
                 return None
             _ROWS_MEMO[memo_key] = rows
@@ -387,7 +438,7 @@ def warm_ticker_map(filer_keys=None, *, skips=(0, 1)) -> int:
     for key in filer_keys or list(FILERS):
         for skip in skips:
             meta = latest_filing_meta(key, skip=skip)
-            rows = _load_rows(meta) if meta else None
+            rows = _quarter_rows(meta) if meta else None
             cusips.extend(r["cusip"] for r in rows or [])
     pending = _resolve(cusips, None)[1]
     _HOLDINGS_MEMO.clear()

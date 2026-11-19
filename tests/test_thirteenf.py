@@ -296,3 +296,46 @@ def test_norm_ticker_maps_openfigi_symbols_to_yfinance_form():
     assert thirteenf._norm_ticker("WBD*") == "WBD"          # when-issued 표기 — 종목 링크가 깨짐
     assert thirteenf._norm_ticker("ALNY 0 09/15/28") is None  # 전환사채
     assert thirteenf._norm_ticker("") is None
+
+
+def test_latest_holdings_applies_same_quarter_amendments(monkeypatch, tmp_path):
+    """실측(퍼싱스퀘어 2026-06-30): 원 13F-HR 에 없던 PS 를 'NEW HOLDINGS' 정정이 더했다 —
+    정정을 빼면 다음 분기 PS 가 '신규 편입 33.5%' 로 잘못 잡힌다. 'RESTATEMENT' 는 전체 대체."""
+    monkeypatch.setattr(thirteenf, "_CACHE_DIR", tmp_path)
+    monkeypatch.setattr(thirteenf, "_HOLDINGS_MEMO", {})
+    monkeypatch.setattr(thirteenf, "_ROWS_MEMO", {})
+    monkeypatch.setattr(thirteenf, "_resolve", lambda cusips, budget: ({}, 0, 0))
+    submissions = {"filings": {"recent": {
+        "form": ["13F-HR", "13F-HR/A", "13F-HR/A", "13F-HR", "13F-HR"],
+        "accessionNumber": ["q3", "q2-new", "q1-re", "q2", "q1"],
+        "filingDate": ["2026-11-16", "2026-11-16", "2026-06-01", "2026-08-14", "2026-05-15"],
+        "reportDate": ["2026-09-30", "2026-06-30", "2026-03-31", "2026-06-30", "2026-03-31"],
+        "primaryDocument": ["primary_doc.xml"] * 5,
+    }}}
+    tables = {
+        "q3": [{"issuer": "UBER", "cusip": "U1", "value": 100, "shares": 1}],
+        "q2": [{"issuer": "UBER", "cusip": "U1", "value": 300, "shares": 3}],
+        "q2-new": [{"issuer": "PERSHING SQUARE INC", "cusip": "P1", "value": 100, "shares": 1}],
+        "q1": [{"issuer": "HHH", "cusip": "H1", "value": 50, "shares": 1}],
+        "q1-re": [{"issuer": "HHH", "cusip": "H1", "value": 80, "shares": 2}],
+    }
+    kinds = {"q2-new": "NEW HOLDINGS", "q1-re": "RESTATEMENT"}
+
+    def _get(url):
+        if "submissions" in url:
+            return json.dumps(submissions).encode()
+        acc = {k.replace("-", ""): k for k in tables}[url.split("/")[-2]]   # URL 은 대시 없는 accession
+        if url.endswith("index.json"):
+            return json.dumps({"directory": {"item": [{"name": "primary_doc.xml"}, {"name": "info.xml"}]}}).encode()
+        if url.endswith("primary_doc.xml"):
+            return f"<edgarSubmission><amendmentType>{kinds.get(acc, '')}</amendmentType></edgarSubmission>".encode()
+        return _info_table_xml(tables[acc])
+
+    monkeypatch.setattr(thirteenf, "_get", _get)
+
+    q2 = thirteenf.latest_holdings("pershing_square", skip=1)
+    assert {h["cusip"]: h["weight_pct"] for h in q2["holdings"]} == {"U1": 75.0, "P1": 25.0}
+    q1 = thirteenf.latest_holdings("pershing_square", skip=2)
+    assert [(h["cusip"], h["shares"]) for h in q1["holdings"]] == [("H1", 2.0)]
+    q3 = thirteenf.latest_holdings("pershing_square")
+    assert [h["cusip"] for h in q3["holdings"]] == ["U1"]
