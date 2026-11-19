@@ -13,6 +13,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import kis_mock
 
 
+@pytest.fixture(autouse=True)
+def _no_pacing(monkeypatch):
+    """호출 간격(파일 락·sleep) 끄기 — 단위테스트는 실제 게이트웨이를 치지 않는다."""
+    monkeypatch.setattr(kis_mock, "_MIN_INTERVAL_S", 0)
+
+
 # ── 도메인 하드락 (안전 #1) ───────────────────────────────────────────
 def test_assert_mock_url_blocks_real_domain():
     with pytest.raises(RuntimeError):
@@ -175,6 +181,26 @@ def test_place_order_no_retry_when_fill_status_unknown(monkeypatch):
     r = kis_mock.place_order("MSFT", 1, "buy", 100.0)
     assert r["ok"] is False and "확인불가" in r["msg"]
     assert fake.calls == 2                                   # hashkey + 주문 1회뿐 — 재시도 안 함
+
+
+class _RateLimited(_FakeResponse):
+    status_code = 500
+
+    def __init__(self):
+        super().__init__({"rt_cd": "1", "msg1": "초당 거래건수를 초과하였습니다.", "msg_cd": "EGW00201"})
+
+
+def test_place_order_resends_after_gateway_rate_limit(monkeypatch):
+    """2026-11-19 QQQ·SGOV: 500 EGW00201(게이트웨이 거절·미처리)은 잔고 확인 없이 다시 보내 체결시킨다."""
+    fake = _FakePostSeq([_RateLimited(), _RateLimited(),
+                         _FakeResponse({"rt_cd": "0", "msg1": "완료", "output": {"ODNO": "77"}})])
+    _prep_order_env(monkeypatch, fake)
+    monkeypatch.setattr(kis_mock.time, "sleep", lambda s: None)
+    monkeypatch.setattr(kis_mock, "get_balance",
+                        lambda: {"ok": True, "positions": {"MSFT": {"shares": 0}}})
+    r = kis_mock.place_order("MSFT", 1, "buy", 100.0)
+    assert r["ok"] is True and r["ord_no"] == "77"
+    assert fake.calls == 4                                   # hashkey + 주문 3회(EGW00201 2회 재전송)
 
 
 def test_is_enabled(monkeypatch):

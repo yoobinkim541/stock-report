@@ -22,6 +22,7 @@ env:
 """
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
 import os
@@ -48,6 +49,14 @@ _TR_PRICE = "HHDFS00000300"  # 해외 현재가(모의/실전 공용) — ✅ �
 
 _TOKEN_FILE = os.path.expanduser("~/.cache/kis_mock_token.json")
 _token_cache: dict = {"token": None, "exp": 0.0}
+
+# 모의 게이트웨이는 초당 호출 한도를 넘기면 HTTP 500 + msg_cd EGW00201("초당 거래건수를 초과하였습니다")을
+# 준다(2026-11-19 연속 GET 8회 실측: 200 은 2회). 주문마다 hashkey·잔고 GET·주문 POST 가 1초 안에 몰려
+# QQQ·SGOV 주문이 거부됐다. 모든 모의 호출은 _send 한 통로로 프로세스 간 간격을 둔다.
+_RATE_LIMIT_CODE = "EGW00201"
+_RATE_LIMIT_RETRIES = 3
+_MIN_INTERVAL_S = float(os.getenv("KIS_MOCK_MIN_INTERVAL_S", "0.55"))
+_PACE_FILE = os.path.expanduser("~/.cache/kis_mock_pace")
 
 # 종목 → 해외거래소코드(주문 OVRS_EXCG_CD). 미상은 NASD 기본 — get_price 가 다른 거래소에서 찾으면
 # _EXCH_FOUND 에 기억해 덮는다. 2026-11-19 KIS 모의 현재가로 전수 확인(US 유니버스·레버리지 ETF).
@@ -108,6 +117,60 @@ def _assert_mock_url(url: str) -> None:
         raise RuntimeError(f"[안전차단] 모의 도메인 외 호출 시도: {url}")
 
 
+# ── HTTP 단일 통로 (간격·초당 한도) ──────────────────────────────────────────
+
+def _pace() -> None:
+    """직전 모의 호출과 _MIN_INTERVAL_S 간격 — us_mock_track·intraday·report 가 같은 앱키를 공유하므로 파일 락."""
+    if _MIN_INTERVAL_S <= 0:
+        return
+    os.makedirs(os.path.dirname(_PACE_FILE), exist_ok=True)
+    with open(_PACE_FILE, "a+", encoding="utf-8") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        f.seek(0)
+        try:
+            last = float(f.read().strip() or 0)
+        except ValueError:
+            last = 0.0
+        wait = last + _MIN_INTERVAL_S - time.time()
+        if wait > 0:
+            time.sleep(min(wait, _MIN_INTERVAL_S))
+        f.seek(0)
+        f.truncate()
+        f.write(repr(time.time()))
+
+
+def _rate_limited(resp) -> bool:
+    if getattr(resp, "status_code", None) != 500:
+        return False
+    try:
+        return (resp.json() or {}).get("msg_cd") == _RATE_LIMIT_CODE
+    except ValueError:
+        return False
+
+
+def _send(method: str, url: str, **kwargs):
+    """모의 HTTP 단일 통로 — 도메인 하드락 + 호출 간격 + EGW00201 재전송.
+
+    EGW00201 은 게이트웨이가 처리 전에 거절한 응답이라 주문 POST 를 다시 보내도 중복체결이 없다.
+    그 밖의 HTTP 오류는 응답 본문(msg_cd·msg1)을 붙여 예외로 올린다.
+    """
+    _assert_mock_url(url)
+    call = requests.post if method == "POST" else requests.get
+    for attempt in range(_RATE_LIMIT_RETRIES + 1):
+        _pace()
+        r = call(url, timeout=15, allow_redirects=False, **kwargs)
+        if not _rate_limited(r) or attempt == _RATE_LIMIT_RETRIES:
+            break
+        logger.warning("KIS 모의 초당 한도(EGW00201) [%s] — 재전송 %d/%d",
+                       url.rsplit("/", 1)[-1], attempt + 1, _RATE_LIMIT_RETRIES)
+        time.sleep(1.0)
+    try:
+        r.raise_for_status()
+    except requests.HTTPError as e:
+        raise requests.HTTPError(f"{e} · body={r.text[:200]}", response=r) from None
+    return r
+
+
 # ── 순수 빌더 (테스트 폐형해) ─────────────────────────────────────────────────
 
 def _order_tr_id(side: str) -> str:
@@ -158,12 +221,9 @@ def _get_token() -> str | None:
         logger.error("KIS 모의 앱키 없음 (KOREA_MOCK_API_KEY/KOREA_API_KEY)")
         return None
     url = _MOCK_BASE + _TOKEN_URL
-    _assert_mock_url(url)
     try:
-        r = requests.post(url, json={"grant_type": "client_credentials",
-                                     "appkey": _key(), "appsecret": _secret()},
-                          timeout=15, allow_redirects=False)
-        r.raise_for_status()
+        r = _send("POST", url, json={"grant_type": "client_credentials",
+                                     "appkey": _key(), "appsecret": _secret()})
         j = r.json()
         tok = j.get("access_token")
         if not tok:
@@ -180,12 +240,9 @@ def _get_token() -> str | None:
 
 def _hashkey(body: dict) -> str | None:
     url = _MOCK_BASE + _HASHKEY_URL
-    _assert_mock_url(url)
     try:
-        r = requests.post(url, headers={"appkey": _key(), "appsecret": _secret(),
-                                        "content-type": "application/json"},
-                          json=body, timeout=10, allow_redirects=False)
-        r.raise_for_status()
+        r = _send("POST", url, headers={"appkey": _key(), "appsecret": _secret(),
+                                        "content-type": "application/json"}, json=body)
         return r.json().get("HASH")
     except Exception as e:
         logger.debug("hashkey 실패(무시): %s", e)
@@ -205,18 +262,15 @@ def _headers(tr_id: str, extra: dict | None = None) -> dict | None:
 
 
 def _http_get(url: str, headers: dict, params: dict, *, retries: int = 2) -> dict | None:
-    """모의 GET 단일 통로 — 도메인 하드락 + 간헐 500(레이트리밋) 0.5s 간격 재시도. 실패 시 None.
+    """모의 GET — _send(간격·EGW00201 재전송) 위에 그 밖의 간헐 오류 0.5s 간격 재시도. 실패 시 None.
 
     ★S6 확정: openapivts(모의) 서버는 price·balance·present-balance 전반에 간헐 500 → 재시도 필수.
-    (주문 POST 는 재시도 금지 — 중복체결 위험. GET 조회만.)
+    (주문 POST 는 EGW00201 외 재시도 금지 — 중복체결 위험. GET 조회만.)
     """
-    _assert_mock_url(url)
     last_err = None
     for attempt in range(retries + 1):
         try:
-            r = requests.get(url, headers=headers, params=params, timeout=15, allow_redirects=False)
-            r.raise_for_status()
-            return r.json()
+            return _send("GET", url, headers=headers, params=params).json()
         except Exception as e:
             last_err = e
             if attempt < retries:
@@ -370,9 +424,7 @@ def _held_shares(symbol: str) -> float | None:
 
 def _post_order_once(url: str, headers: dict, body: dict) -> dict | None:
     try:
-        r = requests.post(url, headers=headers, json=body, timeout=15, allow_redirects=False)
-        r.raise_for_status()
-        return r.json()
+        return _send("POST", url, headers=headers, json=body).json()
     except Exception as e:
         logger.error("KIS 모의 주문 실패: %s", e)
         return None
