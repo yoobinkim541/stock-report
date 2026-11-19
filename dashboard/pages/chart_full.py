@@ -40,9 +40,16 @@ def _fmt_header_price(ticker: str, price: float | None) -> str:
     return f"${price:,.2f}"
 
 
+def _is_flat(delta: float | None, prev: float | None) -> bool:
+    """반올림해 0.00% 인 등락 — '-$0.00 (-0.00%)' 처럼 방향을 지어내지 않는다."""
+    return delta is not None and bool(prev) and round(delta / prev * 100, 2) == 0 and round(delta, 2) == 0
+
+
 def _fmt_header_delta(ticker: str, delta: float | None, prev: float | None) -> str:
     if delta is None or not prev:
         return "—"
+    if _is_flat(delta, prev):
+        return "보합 0.00%"
     pct = f"{delta / prev * 100:+.2f}%"
     sign = "+" if delta >= 0 else "-"
     mag = abs(delta)
@@ -92,7 +99,7 @@ def render():
     rq = cached.realtime_quote(t)
     price = (rq.get("price") if rq else None) or yf_price
     chg = (price - prev) if (price is not None and prev) else None
-    col = theme.GREEN if (chg or 0) >= 0 else theme.RED
+    col = theme.MUTED if _is_flat(chg, prev) else (theme.UP if (chg or 0) >= 0 else theme.DOWN)
     ctitle.markdown(
         f'<div style="display:flex;gap:12px;align-items:baseline;flex-wrap:wrap">'
         f'<b style="font-size:1.15rem">{ticker_names.label(t)}</b>'

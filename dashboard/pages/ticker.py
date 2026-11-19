@@ -800,7 +800,7 @@ def _macro_sections(ticker, hist):
             # 값 없음(None)은 중립색 — `(None or 0) >= 0` 이 초록을 칠하던 것 방지
             if not isinstance(v, (int, float)):
                 return None
-            return theme.GREEN if v >= 0 else theme.RED
+            return theme.UP if v >= 0 else theme.DOWN
 
         theme.render(theme.position_band_html([
             ("1주", data.f_pct_s(prof["r1w"]), _c(prof["r1w"])),
@@ -2146,7 +2146,7 @@ def _valuation(ticker, price=None):
         cc = st.columns(3)
         if rim:
             cc[0].metric("RIM 적정가", _fmt_px(rim["mid"]) if fv else (_f_krw(rim["mid"]) if is_kr else data.f_usd(rim["mid"], 0)),
-                         help=f"범위 {_f_krw(rim['low']) if is_kr else data.f_usd(rim['low'], 0)}~{_f_krw(rim['high']) if is_kr else data.f_usd(rim['high'], 0)}")
+                         help=f"범위 {_f_krw(rim['low']) if is_kr else data.f_usd(rim['low'], 0)}~{_f_krw(rim['high']) if is_kr else data.f_usd(rim['high'], 0)}".replace("$", r"\$"))
         if ddm_ok:
             cc[1].metric("DDM 적정가" + ("" if iv.get("ddm_reliable") else " ⚠️"),
                          _f_krw(ddm["mid"]) if is_kr else data.f_usd(ddm["mid"], 0),
@@ -2774,8 +2774,9 @@ def _entry_levels_section(ticker, hist, price):
         if i < len(zones):
             z = zones[i]
             strong = f" ×{z['n']}" if z.get("n", 1) > 1 else ""
+            # metric 값은 마크다운 — `$a~$b` 의 두 `$` 사이가 LaTeX 수식으로 렌더된다
             val_txt = (f"{zone_money(z['lo'])}~{zone_money(z['hi'])}" if z["hi"] > z["lo"] * 1.0005
-                       else zone_money(z["mid"]))
+                       else zone_money(z["mid"])).replace("$", r"\$")
             mm[i].metric(f"{i + 1}차 지지 존{strong}", val_txt,
                          delta=f"{z['pct']:+.1f}%", delta_color="off",
                          help=f"재료: {' + '.join(z['labels'])} — 스윙·매물대·반복 반응이 "

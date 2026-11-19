@@ -526,7 +526,7 @@ def market_treemap(rows: list[dict], height: int | None = None):
                     colorscale=[[0.0, _RED], [0.5, mid], [1.0, _GREEN]],
                     cmid=0, cmin=-3, cmax=3, showscale=False,
                     line=dict(width=1, color=edge)),
-        tiling=dict(pad=1),
+        tiling=dict(pad=1), root=dict(color="rgba(0,0,0,0)"),
         hovertemplate="%{customdata} (%{label}) %{hovertext}<br>시총 %{value:,.0f}<extra></extra>"))
     # uniformtext 를 두지 않는다 — 글자는 타일마다 맞춰 줄고, 숨는 타일이 없다.
     # (mode="hide" 였을 때 러셀 2000 은 2,000개 중 77개만 글자가 보였다.)
