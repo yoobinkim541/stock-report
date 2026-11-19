@@ -69,6 +69,16 @@ def active_snapshots(collection: str, *, store_module=None) -> list[dict]:
     return list((segments[-1] or {}).get("snapshots") or [])
 
 
+def active_rows(rows: list[dict], kind: str | None = None) -> list[dict]:
+    """원장 행 중 현재 세대(마지막 경계 마커 뒤 — generation_segments 와 같은 원장 순서 기준)의 것.
+    kind 를 주면 그 종류만. 비용·주문 집계가 마감된 세대 행을 현재 세대 NAV 로 나누지 않게 한다."""
+    start = 0
+    for i, row in enumerate(rows):
+        if row.get("kind") == BOUNDARY_KIND:
+            start = i + 1
+    return [r for r in rows[start:] if kind is None or r.get("kind") == kind]
+
+
 def generation_count(collection: str, *, store_module=None) -> int:
     """지금까지 마감된 세대 수 + 1 (현재 진행 중인 세대 포함)."""
     store_module = store_module or _store()

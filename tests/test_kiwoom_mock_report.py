@@ -30,7 +30,7 @@ def patched(monkeypatch):
         {"date": "2026-06-01 09:30", "kind": "snapshot", "nav": 10_000_000},
         {"date": "2026-06-25 09:30", "kind": "snapshot", "nav": 10_800_000},
     ])
-    monkeypatch.setattr(rpt, "_recent_decisions", lambda: (
+    monkeypatch.setattr(rpt, "_recent_decisions", lambda since: (
         [{"date": "2026-06-26", "side": "편입", "code": "005930", "action": "강한 매수후보",
           "qty": 3, "name": "삼성전자",
           "rationale": {"one_line_reason": "기관 매집 + 일일신호 긍정"}}], "2026-06-26"))

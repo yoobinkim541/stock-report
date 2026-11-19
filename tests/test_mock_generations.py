@@ -482,3 +482,18 @@ def test_a_exec_fix2_close_generation_refuses_rejected_balance_without_writes():
         assert "broker_rejected" in str(e)
     assert [r["kind"] for r in store.all("us_mock_history")] == ["snapshot"]
     assert store.all("us_mock_history_generations") == []
+
+
+def test_active_rows_excludes_closed_generation_costs():
+    """마감 세대의 비용 행이 새 세대 회전율·드래그에 섞이면 안 된다(2026-11-19 US: 1세대 $2,898 이
+    2세대 NAV 로 나뉘어 회전율 1932% 로 보고됨). 경계는 날짜가 아니라 원장 순서 기준."""
+    rows = [
+        {"kind": "cost", "date": "2026-09-23 00:06", "cost": 2898.0},
+        {"kind": "snapshot_failed", "date": "2026-11-18 06:30"},
+        {"kind": "generation_boundary", "date": "2026-10-13 00:03", "generation": 1},
+        {"kind": "snapshot", "date": "2026-11-19 06:30", "nav": 99_993.71},
+        {"kind": "cost", "date": "2026-11-20 00:01", "cost": 3.0},
+    ]
+    assert mock_generations.active_rows(rows, "cost") == [rows[4]]
+    assert [r["kind"] for r in mock_generations.active_rows(rows)] == ["snapshot", "cost"]
+    assert mock_generations.active_rows(rows[:2], "cost") == [rows[0]]      # 경계 없음 → 전체

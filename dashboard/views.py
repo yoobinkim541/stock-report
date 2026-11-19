@@ -641,7 +641,8 @@ def paper_summary(surface: str = "kr_mock") -> dict:
 
     # 5) 거래비용 계기 (누적 수수료·세금 → 회전율·드래그)
     try:
-        crows = [r for r in hist if r.get("kind") == "cost"]
+        from lib import mock_generations
+        crows = mock_generations.active_rows(hist, "cost")   # 마감 세대 비용을 현재 세대 NAV 로 나누지 않음
         tot_cost = sum(float(r.get("cost", 0) or 0) for r in crows)
         tot_notional = sum(float(r.get("notional", 0) or 0) for r in crows)
         if tot_cost > 0:

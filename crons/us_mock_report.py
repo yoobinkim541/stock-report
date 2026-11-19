@@ -310,10 +310,13 @@ def _snapshots() -> list[dict]:
         return []
 
 
-def _recent_decisions():
+def _recent_decisions(since: str | None):
+    """현재 세대(첫 유효 snapshot 날짜 since 이후)의 가장 최근 집행일 편입/퇴출. since 없으면 없음."""
+    if not since:
+        return [], None
     try:
         from ml.adaptive import Ledger
-        decs = Ledger("us_mock").read_decisions()
+        decs = [d for d in Ledger("us_mock").read_decisions() if str(d.get("date", ""))[:10] >= since]
     except Exception as e:
         logger.warning("결정 원장 조회 실패: %s", e)
         return [], None
@@ -413,7 +416,7 @@ def build_report(html: bool = False, detail: bool | None = None) -> str:
 
     try:
         import store
-        crows = [r for r in store.all("us_mock_history") if r.get("kind") == "cost"]
+        crows = mock_generations.active_rows(store.all("us_mock_history"), "cost")
     except Exception:
         crows = []
     tot_cost = sum(float(r.get("cost", 0) or 0) for r in crows)
@@ -427,7 +430,7 @@ def build_report(html: bool = False, detail: bool | None = None) -> str:
 
     sc = compute_scorecard(_scorecard_rows())
     shadow, pending_shadow = _llm_shadow_summary()
-    recent, last = _recent_decisions()
+    recent, last = _recent_decisions(str(snaps[0]["date"])[:10] if snaps else None)
     excess = (cum_ret - q_ret) if q_ret is not None else None
     life_excess = (life_cum_ret - q_life_ret) if (life_cum_ret is not None and q_life_ret is not None) else None
 

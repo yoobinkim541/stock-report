@@ -58,7 +58,7 @@ def test_build_report_includes_llm_rationale_when_available(monkeypatch):
         {"side": "편입", "correct": True, "policy_score": 0.7, "fwd_excess": 0.03},
         {"side": "편입", "correct": False, "policy_score": 0.3, "fwd_excess": -0.02},
     ])
-    monkeypatch.setattr(R, "_recent_decisions", lambda: (
+    monkeypatch.setattr(R, "_recent_decisions", lambda since: (
         [{"date": "2026-06-26", "side": "편입", "ticker": "MSFT", "policy_score": 0.82,
           "rationale": {"one_line_reason": "품질 점수와 추세 신호 우위"}}], "2026-06-26"))
     monkeypatch.setattr(R, "_llm_shadow_summary", lambda: (
@@ -108,7 +108,7 @@ def test_build_report_interprets_recent_factor_decisions(monkeypatch):
     })
     monkeypatch.setattr(R, "_snapshots", lambda: [])
     monkeypatch.setattr(R, "_scorecard_rows", lambda: [])
-    monkeypatch.setattr(R, "_recent_decisions", lambda: (
+    monkeypatch.setattr(R, "_recent_decisions", lambda since: (
         [{"date": "2026-07-08", "side": "편입", "ticker": "ADBE", "policy_score": 0.62,
           "rationale": {"one_line_reason": "value 0.45·quality 0.02·mom 0.50"}}],
         "2026-07-08",
@@ -139,7 +139,7 @@ def test_a_fix_exec_report_marks_quantitative_fallback_when_llm_rationale_reject
     })
     monkeypatch.setattr(R, "_snapshots", lambda: [])
     monkeypatch.setattr(R, "_scorecard_rows", lambda: [])
-    monkeypatch.setattr(R, "_recent_decisions", lambda: ([], None))
+    monkeypatch.setattr(R, "_recent_decisions", lambda since: ([], None))
     monkeypatch.setattr(R, "_llm_shadow_summary", lambda: (
         {"n": 0, "hit_rate": None, "avg_delta": None, "by_action": {}}, 0))
     from providers import market_data
@@ -179,7 +179,7 @@ def test_build_report_shows_sleeve_state(monkeypatch):
                               "value": 30_000.0}}})
     monkeypatch.setattr(R, "_snapshots", lambda: [])
     monkeypatch.setattr(R, "_scorecard_rows", lambda: [])
-    monkeypatch.setattr(R, "_recent_decisions", lambda: ([], None))
+    monkeypatch.setattr(R, "_recent_decisions", lambda since: ([], None))
     monkeypatch.setattr(T, "LEV_SLEEVE_ENABLED", True)
     monkeypatch.setattr(T, "load_lev_shadow", lambda path=None: 1.3)
     try:
@@ -205,7 +205,7 @@ def test_build_report_sleeve_hidden_when_off_and_flat(monkeypatch):
         "ok": True, "cash_usd": 100_000.0, "pos_value": 0.0, "nav": 100_000.0, "positions": {}})
     monkeypatch.setattr(R, "_snapshots", lambda: [])
     monkeypatch.setattr(R, "_scorecard_rows", lambda: [])
-    monkeypatch.setattr(R, "_recent_decisions", lambda: ([], None))
+    monkeypatch.setattr(R, "_recent_decisions", lambda since: ([], None))
     monkeypatch.setattr(T, "LEV_SLEEVE_ENABLED", False)
     try:
         from providers import market_data
@@ -232,7 +232,7 @@ def test_build_report_defaults_to_compact(monkeypatch):
         {"date": "2026-07-01 21:30", "kind": "snapshot", "nav": 158_000.0},
     ])
     monkeypatch.setattr(R, "_scorecard_rows", lambda: [])
-    monkeypatch.setattr(R, "_recent_decisions", lambda: (
+    monkeypatch.setattr(R, "_recent_decisions", lambda since: (
         [{"date": "2026-07-09", "side": "편입", "ticker": "AMZN",
           "rationale": {"one_line_reason": "value 0.32·quality 0.01·mom 0.46"}}],
         "2026-07-09",
@@ -268,7 +268,7 @@ def test_a_exec_fix2_report_does_not_fill_seed_nav_when_broker_rejects(monkeypat
     monkeypatch.setattr(R, "_snapshots", lambda: [
         {"date": "2026-10-10 06:40", "kind": "snapshot", "nav": 262_224.57}])
     monkeypatch.setattr(R, "_scorecard_rows", lambda: [])
-    monkeypatch.setattr(R, "_recent_decisions", lambda: ([], None))
+    monkeypatch.setattr(R, "_recent_decisions", lambda since: ([], None))
     monkeypatch.setattr(R, "_llm_shadow_summary", lambda: (
         {"n": 0, "hit_rate": None, "avg_delta": None, "by_action": {}}, 0))
     from providers import market_data
@@ -302,3 +302,25 @@ def test_a_exec_fix2_eod_records_failure_event_instead_of_none_snapshot(monkeypa
 
     hist = rows["us_mock_history"]
     assert [(r["kind"], r.get("at")) for r in hist] == [("snapshot_failed", "eod")]
+
+
+def test_recent_decisions_only_from_current_generation(monkeypatch):
+    """새 세대 리포트가 이전 계좌의 마지막 결정(Adobe 편입 등)을 '최근 결정'으로 보이면 안 된다."""
+    import ml.adaptive
+
+    decs = [{"date": "2026-10-24", "side": "편입", "ticker": "ADBE"},
+            {"date": "2026-11-20", "side": "편입", "ticker": "SGOV"},
+            {"date": "2026-11-20", "side": "유지", "ticker": "GLD"}]
+
+    class _Ledger:
+        def __init__(self, surface):
+            pass
+
+        def read_decisions(self):
+            return decs
+
+    monkeypatch.setattr(ml.adaptive, "Ledger", _Ledger)
+
+    assert R._recent_decisions("2026-11-19") == ([decs[1]], "2026-11-20")
+    assert R._recent_decisions("2026-11-21") == ([], None)
+    assert R._recent_decisions(None) == ([], None)                       # 세대 snapshot 아직 없음
