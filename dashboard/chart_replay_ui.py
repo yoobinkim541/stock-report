@@ -220,7 +220,9 @@ def prepare_replay(
     timeframe: str,
     key_prefix: str,
     workspace_id: str = "",
+    toggle_slot: Any = None,
 ) -> dict[str, Any]:
+    """toggle_slot: 리플레이 토글을 둘 컨테이너(풀뷰는 컨트롤 줄 끝 칸 — 세로 공간 절약)."""
     frame = normalize_ohlc_frame(hist)
     inactive = {
         "active": False, "frame": frame, "record": None, "session": None,
@@ -231,7 +233,7 @@ def prepare_replay(
     symbol = str(symbol or "").upper().strip()
     timeframe = str(timeframe or "").lower().strip()
     scope = _scope(symbol, timeframe, workspace_id, key_prefix)
-    active = st.toggle("리플레이", value=False, key=f"{key_prefix}_replay_enabled")
+    active = (toggle_slot or st).toggle("리플레이", value=False, key=f"{key_prefix}_replay_enabled")
     if not active:
         was_playing = bool(st.session_state.get("_chart_replay_playing"))
         st.session_state.pop(f"{key_prefix}_replay_session_id", None)

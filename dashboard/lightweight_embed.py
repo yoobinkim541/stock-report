@@ -10,6 +10,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from dashboard import frame_fit
 from dashboard import theme as _theme
 
 
@@ -293,6 +294,14 @@ button{border:1px solid @@GRID@@;background:@@PANEL@@;color:@@TEXT@@;padding:7px
   const rangeSyncKey = @@RANGE_SYNC_KEY@@;
   const live = @@LIVE@@;
   const compact = @@COMPACT@@;
+  @@FIT_JS@@
+  if (@@FIT@@) {                                 // 풀뷰 — iframe 을 창 남은 높이에 맞춤(차트는 ResizeObserver 로 따라감)
+    tnFitFrame();
+    try {
+      let fitTimer = 0;
+      window.parent.addEventListener("resize", () => { clearTimeout(fitTimer); fitTimer = setTimeout(tnFitFrame, 120); });
+    } catch (e) {}
+  }
   const runtimeStarted = performance.now();
   const telemetryKey = "tn-chart-telemetry-v1";
   const root = document.getElementById("wrap");
@@ -493,8 +502,11 @@ def lightweight_chart_html(
     range_sync_key: str | None = None,
     live: bool = False,
     light: bool = False,
+    fit_viewport: bool = False,
 ) -> str:
-    """Return a self-contained component document for a validated payload."""
+    """Return a self-contained component document for a validated payload.
+
+    fit_viewport=True(차트 풀뷰)면 iframe 을 부모 창의 남은 높이에 맞춘다."""
     if not isinstance(payload, Mapping) or payload.get("version") != PAYLOAD_VERSION:
         raise ValueError("invalid Canvas payload")
     bars = payload.get("bars")
@@ -512,6 +524,8 @@ def lightweight_chart_html(
             .replace("@@RENDERER_KEY@@", json.dumps("tnrenderer:" + str(store_key or payload.get("symbol") or "chart")))
             .replace("@@RANGE_SYNC_KEY@@", json.dumps(range_sync_key))
             .replace("@@LIVE@@", json.dumps(bool(live)))
+            .replace("@@FIT_JS@@", frame_fit.FIT_FRAME_JS)
+            .replace("@@FIT@@", json.dumps(bool(fit_viewport)))
             .replace("@@COMPACT@@", json.dumps(bool(payload.get("compact"))))
             .replace("@@TEXT_JSON@@", json.dumps(text))
             .replace("@@GRID_JSON@@", json.dumps(grid))

@@ -879,16 +879,11 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
     live=True(⚡자동갱신 래퍼) — 실시간가 서버 bake 생략 + 피더 컴포넌트로 클라이언트
     패치 (html 바이트 안정 = 8초 재실행이 iframe 을 재마운트하지 않음).
     """
-    # 컨트롤 한 줄 — 봉 | 라인/캔들 | 지표 | 비교 | 기간 | ⛶ (좁은 화면은 자동 줄바꿈)
+    # 컨트롤 한 줄 — 봉 | 라인/캔들 | 지표 | 비교 | 기간 | ⛶ (풀뷰는 리플레이 토글) (좁은 화면은 자동 줄바꿈)
     ctf, ckind, c3, c4, cper, cfull = st.columns(
-        [1.45, 0.78, 0.34, 0.64, 1.25, 0.35], vertical_alignment="center",
+        [1.45, 0.78, 0.34, 0.64, 1.25, 0.62 if fullscreen else 0.35], vertical_alignment="center",
     )
-    if fullscreen:
-        if cfull.button("↙", key="_chart_back", help="종목 분석으로 복귀"):
-            pg = st.session_state.get("_ticker_page")
-            if pg:
-                st.switch_page(pg)
-    else:
+    if not fullscreen:   # 풀뷰는 상단 '↙ 종목 분석' 이 복귀 — 이 칸은 리플레이 토글 자리
         if cfull.button("⛶", key="_chart_fullbtn", help="전체화면 풀차트 — 모든 컨트롤 그대로"):
             pg = st.session_state.get("_chart_page")
             if pg:
@@ -1111,6 +1106,7 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
         timeframe=render_tf,
         key_prefix=f"ticker_{ticker}_{render_tf}",
         workspace_id=f"ticker:{ticker}:{render_tf}",
+        toggle_slot=cfull if fullscreen else None,
     )
     if replay_context["active"]:
         df = replay_context["frame"]
@@ -1195,8 +1191,8 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
     fig = rendered.figure
     for warning in rendered.warnings:
         st.caption(warning)
-    if fullscreen:                                  # ⛶ 풀뷰 — 뷰포트 거의 채우는 높이
-        fig.update_layout(height=840)
+    if fullscreen:   # 첫 그림용 추정치 — 실제 높이는 임베드가 창 남은 높이에 맞춘다(frame_fit)
+        fig.update_layout(height=620)
     event = None
     sequence_chart = rendered.transform.x_mode == "sequence"
     h = int(fig.layout.height or 420)
@@ -1218,9 +1214,11 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
         live=_client_rt,
         light=theme.is_light(),
         force_plotly=bool(legacy),
+        fit_viewport=fullscreen,
     )
-    with st.expander("차트 상태", expanded=False):
-        st.caption(prepared.status)
+    if not fullscreen:   # 풀뷰는 차트가 화면을 채워야 해 진단 접이식을 뺀다
+        with st.expander("차트 상태", expanded=False):
+            st.caption(prepared.status)
     if prepared.decision.backend == "canvas":
         st.iframe(prepared.html, height=prepared.component_height)
         if _client_rt:
@@ -1249,12 +1247,15 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
                 order_patch_url=replay_context["order_patch_url"],
                 replay_revision=replay_context["revision"],
                 light=theme.is_light()),
-            height=h + 164)
+            height=h + (16 if fullscreen else 164))   # 풀뷰 독 = 도구가 옆이라 위 여백 불필요
         if _client_rt:
             # ⚡ 피더 — <1KB 컴포넌트만 8초 재실행마다 재마운트(가격+신선도 push).
             # 메인 차트 html 은 위에서 바이트 안정 → 드로잉·뷰·플롯 상태 유지.
             _rtp = (cached.realtime_quote(ticker) or {}).get("price")
             st.iframe(plotly_embed.realtime_feed_html(_sk, _rtp), height=1)
+    if fullscreen:   # 풀뷰는 차트만 — 분석·시리즈·알림은 종목 분석 화면에서
+        chart_replay_ui.render_terminal(replay_context)
+        return
     if prepared.decision.backend == "canvas":
         st.caption("드래그 이동 · 휠 확대")
     elif legacy or sequence_chart:

@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import json
 
+from dashboard import frame_fit
+
 
 def _plotlyjs_cdn() -> str:
     try:
@@ -136,11 +138,14 @@ _TEMPLATE = r"""
   /* 좌측 도구 독 (풀뷰 — TradingView 배치) */
   #wrap.dock { display:grid; grid-template-columns:128px minmax(0, 1fr); gap:10px;
                align-items:start; width:100%; max-width:100%; overflow:hidden; }
-  #wrap.dock #tools { grid-column:1; flex-direction:column; flex-wrap:nowrap; align-items:stretch;
-                      width:128px; min-width:0; max-width:128px; max-height:calc(100vh - 112px);
+  /* 도구는 줄어들지 않게(flex:0 0 auto) — 실측: 세로 독 높이가 모자라면 버튼이 납작하게 눌려
+     글자가 안 보였다. 넘치면 독만 얇은 스크롤. 100vh = iframe 높이. */
+  #wrap.dock #tools { grid-column:1; flex-direction:column; flex-wrap:nowrap; align-items:stretch; gap:2px;
+                      width:128px; min-width:0; max-width:128px; max-height:calc(100vh - 16px);
                       overflow-y:auto; overflow-x:hidden; margin:0; align-self:flex-start;
-                      position:sticky; top:0; z-index:3; padding-right:2px; }
-  #wrap.dock .tbtn { width:100%; min-width:0; padding:4px 7px; overflow:hidden; text-overflow:ellipsis; }
+                      position:sticky; top:0; z-index:3; padding-right:2px; scrollbar-width:thin; }
+  #wrap.dock .tbtn { flex:0 0 auto; width:100%; min-width:0; padding:2px 7px; font-size:11.5px; line-height:1.35;
+                     border-radius:8px; overflow:hidden; text-overflow:ellipsis; }
   #wrap.dock .tsep { width:auto; height:1px; margin:2px 0; }
   #wrap.dock #tool-hint { margin:2px 0 0; white-space:normal; overflow-wrap:anywhere; }
   #wrap.dock #ohlcbar { order:-1; margin:0 0 4px; white-space:normal; overflow:hidden; text-overflow:ellipsis; }
@@ -265,14 +270,15 @@ _TEMPLATE = r"""
   }
   if (@@LIGHTMODE@@) document.getElementById("wrap").classList.add("tn-light");  // 부모 라이트 테마 동조
   const live = @@LIVE@@;                         // ⚡ live — 피더 localStorage 실시간 패치
-  function vhFit() {                             // same-origin iframe — frameElement 직접 리사이즈
-    try {
-      const fe = window.frameElement;
-      const top = fe.getBoundingClientRect().top;
-      const h = Math.max(480, window.parent.innerHeight - top - 64);
-      fe.style.height = (h + 48) + "px";
-      return h;
-    } catch (e) { return @@HEIGHT@@; }
+  @@FIT_JS@@
+  function vhFit() {                             // 풀뷰 — iframe 을 창 남은 높이에 맞추고 차트는 그 안을 채움
+    const frameH = tnFitFrame();
+    if (!frameH) return @@HEIGHT@@;
+    document.documentElement.style.overflow = "hidden";   // 안쪽 스크롤바 금지(독은 자체 스크롤)
+    const top = gd.getBoundingClientRect().top + window.scrollY;
+    const h = Math.max(240, Math.floor(frameH - top - 8));
+    gd.style.minHeight = h + "px";
+    return h;
   }
   fig.layout.height = fitVH ? vhFit() : @@HEIGHT@@;
   if (fitVH) {
@@ -2207,6 +2213,7 @@ def pannable_chart_html(fig, hist, *, height: int = 460, view_days=None,
             .replace("@@VIEW_MS@@", str(int(view_days) * 86400000 if view_days else 0))
             .replace("@@VOL_AXIS@@", json.dumps(vol_axis))
             .replace("@@FIT_VH@@", json.dumps(bool(fit_viewport)))
+            .replace("@@FIT_JS@@", frame_fit.FIT_FRAME_JS)
             .replace("@@PCT_MODE@@", json.dumps(bool(pct_mode)))
             .replace("@@Y_LOG@@", json.dumps(bool(y_log)))
             .replace("@@CATEGORY_X@@", json.dumps(bool(category_x)))

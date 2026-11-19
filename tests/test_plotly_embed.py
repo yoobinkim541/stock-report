@@ -339,12 +339,12 @@ def test_embed_drag_ux_contract():
 
 
 def test_embed_fit_viewport_contract():
-    """풀뷰 — 부모 창 높이 실측 리사이즈(frameElement)·리사이즈 추종 계약."""
+    """풀뷰 — 부모 창 남은 높이 맞춤(frame_fit.tnFitFrame)·리사이즈 추종 계약."""
     hist = _hist(40)
     fig = charts.price_chart(hist, "T")
     full = plotly_embed.pannable_chart_html(fig, hist, fit_viewport=True)
-    for token in ("const fitVH = true", "window.frameElement",
-                  "parent.innerHeight", 'addEventListener("resize"'):
+    for token in ("const fitVH = true", "function tnFitFrame", "tnFitFrame()",
+                  'addEventListener("resize"'):
         assert token in full, f"누락: {token}"
     norm = plotly_embed.pannable_chart_html(fig, hist)
     assert "const fitVH = false" in norm

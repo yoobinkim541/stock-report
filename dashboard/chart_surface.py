@@ -33,6 +33,7 @@ def prepare_chart_surface(
     live: bool = False,
     light: bool = False,
     force_plotly: bool = False,
+    fit_viewport: bool = False,
 ) -> PreparedChartSurface:
     """Select a renderer and build Canvas HTML only for compatible decisions."""
     started = time.perf_counter()
@@ -69,6 +70,7 @@ def prepare_chart_surface(
             range_sync_key=range_sync_key,
             live=live,
             light=light,
+            fit_viewport=fit_viewport,
         )
     except Exception as exc:
         prepare_ms = (time.perf_counter() - started) * 1000
