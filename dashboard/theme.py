@@ -747,6 +747,19 @@ _LIGHT_OVERRIDE = """
 [data-testid="stCaptionContainer"], .stApp small { color: #6b7684; }
 .stCode, pre, pre code { background: #f2f4f6 !important; color: #191f28 !important; }
 [data-testid="stButtonGroup"] [data-testid$="Active"] { box-shadow: 0 1px 3px rgba(0,23,51,.08); }
+/* 라디오·토글·체크박스 꺼짐 — 다크 config 회색(#2c2c35)이 라이트 배경에 검은 점·검은 막대로 보였다 */
+[data-testid="stRadio"] label:has(input:not(:checked)) > div:first-child { background: #d1d6db !important; }
+[data-testid="stRadio"] label:has(input:not(:checked)) > div:first-child > div { background: #ffffff !important; }
+[data-testid="stCheckbox"] label:has(input:not(:checked)) > div:first-child { background: #d1d6db !important; }
+[data-testid="stCheckbox"] label > div:first-child > div { background: #ffffff !important; }
+/* 숫자 입력 — 컨테이너 테두리·± 버튼이 다크 회색으로 남던 것 */
+[data-testid="stNumberInputContainer"] { border-color: transparent !important; background: #eceef1 !important; }
+[data-testid="stNumberInputStepDown"], [data-testid="stNumberInputStepUp"] {
+  background: #e5e8eb !important; color: #4e5968 !important; }
+/* 플롯리 모드바 — 다크 템플릿의 검은 반투명 띠 */
+.modebar-group { background: rgba(255,255,255,.9) !important; }
+.modebar-btn path { fill: #8b95a1 !important; }
+.modebar-btn.active path, .modebar-btn:hover path { fill: #3182f6 !important; }
 ::-webkit-scrollbar-thumb { background: #d1d6db; }
 ::-webkit-scrollbar-thumb:hover { background: #b0b8c1; }
 </style>

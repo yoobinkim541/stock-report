@@ -46,7 +46,7 @@ _RENDER_WARNINGS = {
 _FREQ_LABEL = {"once": "한 번", "per_bar": "봉마다"}
 
 
-def _user_warning(text: str) -> str | None:
+def user_warning(text: str) -> str | None:
     raw = str(text or "").strip()
     if not raw:
         return None
@@ -328,7 +328,7 @@ def _render_panel_chart(
     )
     fig = rendered.figure
     for warning in rendered.warnings:
-        shown = _user_warning(warning)
+        shown = user_warning(warning)
         if shown:
             st.caption(shown)
     fig.update_layout(

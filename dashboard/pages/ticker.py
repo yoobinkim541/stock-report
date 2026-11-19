@@ -1189,8 +1189,11 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
         replay_session=replay_context["session"] if replay_context["active"] else None),
     )
     fig = rendered.figure
-    for warning in rendered.warnings:
-        st.caption(warning)
+    from dashboard.chart_workspace_ui import user_warning
+    for warning in rendered.warnings:   # 렌더러 경고는 영어 원문 — 사용자 문구로 바꿔 보여준다
+        shown = user_warning(warning)
+        if shown:
+            st.caption(shown)
     if fullscreen:   # 첫 그림용 추정치 — 실제 높이는 임베드가 창 남은 높이에 맞춘다(frame_fit)
         fig.update_layout(height=620)
     event = None
