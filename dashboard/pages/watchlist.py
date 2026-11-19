@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import re
+import statistics
 import sys
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
@@ -462,11 +463,13 @@ def _my_stocks_section(my_tickers: tuple[str, ...], moves: dict, names: dict) ->
                 delta = f"직전 최대 {max(float(e.get('prior_weight_pct') or 0) for e in hit):.1f}%"
             elif action == "new":
                 delta = f"최대 비중 {max(float(e.get('weight_pct') or 0) for e in hit):.1f}%"
-            else:
+            else:   # 평균은 소량 보유에서 크게 늘린 한 명에 끌려간다(MSFT +2199%) — 중앙값
                 chg = [e["shares_change_pct"] for e in hit if e.get("shares_change_pct") is not None]
-                delta = f"주식 수 평균 {sum(chg) / len(chg) * 100:+.0f}%" if chg else ""
+                delta = f"주식 수 중앙값 {statistics.median(chg) * 100:+.0f}%" if chg else ""
+            title = ", ".join(f"{e.get('short_name')} {e['shares_change_pct'] * 100:+.0f}%"
+                              for e in hit if e.get("shares_change_pct") is not None)
             rows.append({"ticker": t, "name": name, "tags": _who(hit), "value": f"{len(hit)}명",
-                         "delta": delta, "direction": _ACTION_DIR[action]})
+                         "delta": delta, "direction": _ACTION_DIR[action], **({"title": title} if title else {})})
     holders.sort(key=lambda r: -r["n"])
     theme.render(theme.stock_list_html(holders, title="보유 중인 유명 투자자", meta=f"{len(holders)}종목",
                                        empty="내 종목을 보유한 추적 투자자가 없습니다."))
