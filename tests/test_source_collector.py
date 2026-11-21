@@ -1433,3 +1433,89 @@ def test_telegram_card_keeps_post_time_report_links_and_attachment_names():
     assert message["published_at"] == "2026-11-13T07:01:22+00:00"
     assert message["links"] == ["https://bbn.kiwoom.com/rfSD1.pdf"]      # 채널 안쪽 링크는 뺀다
     assert message["attachments"] == {"documents": ["CRWV_3Q.pdf"], "photos": 1}
+
+
+def _gzip_in_place(path):
+    """What ~/bin/source-cache-retention.sh does to a finished day."""
+    import gzip
+
+    archived = path.with_name(path.name + ".gz")
+    with gzip.open(archived, "wb", compresslevel=6) as stream:
+        stream.write(path.read_bytes())
+    path.unlink()
+    return archived
+
+
+def _seed_two_days(cache_dir, report_day):
+    """Rows across a report day and the next, with a re-delivered id and a broken line."""
+    for hour in range(0, 48, 3):
+        at = report_day + timedelta(hours=hour)
+        sc.append_events([{"source": "arca", "title": f"t{hour}", "url": f"https://e/{hour}"},
+                          {"source": "arca", "title": "repeat", "url": "https://e/repeat", "n": hour}],
+                         cache_dir=cache_dir, now=at)
+    with (cache_dir / f"events-{report_day:%Y-%m-%d}.jsonl").open("a", encoding="utf-8") as stream:
+        stream.write("{not json\n")
+
+
+def test_load_recent_events_reads_gzip_days_like_plaintext(tmp_path):
+    """A compressed day must yield exactly what the .jsonl did (report_pdf regeneration args)."""
+    cache_dir = tmp_path / "cache"
+    report_day = datetime(2026, 10, 1, tzinfo=KST)
+    _seed_two_days(cache_dir, report_day)
+    now = report_day + timedelta(hours=36)    # report_pdf._source_events for an old date
+    plain = sc.load_recent_events(cache_dir=cache_dir, now=now, hours=24)
+    plain_limited = sc.load_recent_events(cache_dir=cache_dir, now=now, hours=24, limit=5)
+    assert len(plain) > 5
+
+    for day in ("2026-10-01", "2026-10-02"):
+        _gzip_in_place(cache_dir / f"events-{day}.jsonl")
+
+    assert sc.load_recent_events(cache_dir=cache_dir, now=now, hours=24) == plain
+    assert sc.load_recent_events(cache_dir=cache_dir, now=now, hours=24, limit=5) == plain_limited
+
+
+def test_load_recent_events_prefers_jsonl_while_both_exist(tmp_path):
+    """Mid-compression the archive and the original coexist; the .jsonl is the complete copy."""
+    cache_dir = tmp_path / "cache"
+    now = datetime(2026, 10, 1, 12, 0, tzinfo=KST)
+    sc.append_events([{"source": "arca", "title": "kept", "url": "https://e/kept"}], cache_dir=cache_dir, now=now)
+    original = cache_dir / "events-2026-10-01.jsonl"
+    data = original.read_bytes()
+    _gzip_in_place(original)
+    original.write_bytes(data)
+    sc.append_events([{"source": "arca", "title": "late", "url": "https://e/late"}], cache_dir=cache_dir, now=now)
+
+    assert sorted(e["title"] for e in sc.load_recent_events(cache_dir=cache_dir, now=now, hours=1)) == ["kept", "late"]
+
+
+def test_gzip_day_before_the_window_is_not_decompressed(tmp_path, monkeypatch):
+    """agent_console asks 336h, which reaches compressed days with nothing in range."""
+    import gzip
+
+    cache_dir = tmp_path / "cache"
+    now = datetime(2026, 10, 20, 12, 0, tzinfo=KST)
+    sc.append_events([{"source": "arca", "title": "old", "url": "https://e/old"}],
+                     cache_dir=cache_dir, now=now - timedelta(days=15))
+    _gzip_in_place(cache_dir / "events-2026-10-05.jsonl")
+    sc.append_events([{"source": "arca", "title": "new", "url": "https://e/new"}], cache_dir=cache_dir, now=now)
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("a day older than the cutoff must be skipped by its file name")
+
+    monkeypatch.setattr(gzip, "open", refuse)
+    assert [e["title"] for e in sc.load_recent_events(cache_dir=cache_dir, now=now, hours=336)] == ["new"]
+
+
+def test_prune_old_keeps_compressed_days_until_90_days(tmp_path):
+    """The default must never delete a 15-day original; past 90 days both forms (and the lock) go."""
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    now = datetime(2026, 10, 20, 12, 0, tzinfo=KST)
+    names = ["events-2026-10-05.jsonl", "events-2026-10-04.jsonl.gz", "events-2026-07-22.jsonl",
+             "events-2026-07-21.jsonl.gz", "events-2026-07-21.jsonl.lock", "events-2026-07-20.jsonl"]
+    for name in names:
+        (cache_dir / name).write_bytes(b"")
+
+    assert sc.prune_old(cache_dir, now=now) == 2
+    assert sorted(p.name for p in cache_dir.iterdir()) == [
+        "events-2026-07-22.jsonl", "events-2026-10-04.jsonl.gz", "events-2026-10-05.jsonl"]

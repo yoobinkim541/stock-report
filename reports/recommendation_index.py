@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 import json
 import hashlib
 import sqlite3
@@ -164,7 +165,7 @@ class RecommendationIndex:
             cursor_row = connection.execute("SELECT value FROM index_runtime WHERE key='next_file'").fetchone()
             cursor = json.loads(cursor_row[0]) if cursor_row else None
             if cursor:
-                start_at = next((i for i, path in enumerate(files) if str(path.resolve()) == cursor), 0)
+                start_at = next((i for i, path in enumerate(files) if str(_source_path(path.resolve())) == cursor), 0)
                 files = files[start_at:] + files[:start_at]
             last_path = None
             for path in files:
@@ -186,27 +187,40 @@ class RecommendationIndex:
             self._refresh_features(connection, dirty)
             if files and last_path is not None:
                 next_path = files[(files.index(last_path) + 1) % len(files)]
-                self._set_runtime(connection, 'next_file', str(next_path.resolve()))
+                self._set_runtime(connection, 'next_file', str(_source_path(next_path.resolve())))
             totals['elapsed_seconds'] = time.perf_counter() - started
             self._set_runtime(connection, 'last_ingest', totals)
         return totals
 
     def _event_files(self, paths: Iterable[Path] | None) -> list[Path]:
-        candidates = paths if paths is not None else self.cache_dir.glob("events-*.jsonl")
-        return sorted(
-            (Path(path) for path in candidates if Path(path).name.startswith("events-") and Path(path).suffix == ".jsonl" and not Path(path).name.endswith(".lock")),
-            key=lambda path: str(path),
-        )
+        """One file per event day: the live .jsonl, else its .jsonl.gz archive."""
+        candidates = paths if paths is not None else [*self.cache_dir.glob("events-*.jsonl"),
+                                                      *self.cache_dir.glob("events-*.jsonl.gz")]
+        days: dict[str, Path] = {}
+        for path in map(Path, candidates):
+            if not path.name.startswith("events-") or not path.name.endswith((".jsonl", ".jsonl.gz")):
+                continue
+            day = str(_source_path(path))
+            if day not in days or path.suffix == ".jsonl":
+                days[day] = path
+        return [days[day] for day in sorted(days)]
 
     def _ingest_file(self, connection: sqlite3.Connection, path: Path, dirty: set,
                      max_rows: int, max_bytes: int) -> dict:
+        archived = path.suffix == ".gz"
         path = path.resolve()
         stat = path.stat()
-        raw_path = str(path)
+        # A .gz archive is a finished day indexed under its original .jsonl name, with
+        # the same (decompressed) offsets, so the existing checkpoint covers or resumes
+        # it and its rows keep their raw_path. The archive's own inode and size say
+        # nothing about the plaintext, so they never reset the day.
+        raw_path = str(_source_path(path))
+        size = _source_size(path) if archived else stat.st_size
         checkpoint = connection.execute(
             "SELECT inode, size, offset, line_number, errors FROM ingest_checkpoint WHERE raw_path = ?", (raw_path,)
         ).fetchone()
-        reset = checkpoint is not None and (checkpoint["inode"] != stat.st_ino or stat.st_size < checkpoint["size"])
+        reset = not archived and checkpoint is not None and (
+            checkpoint["inode"] != stat.st_ino or stat.st_size < checkpoint["size"])
         if reset:
             dirty.update(tuple(row) for row in connection.execute(
                 "SELECT DISTINCT ticker, substr(event_at, 1, 10) FROM event_index WHERE raw_path = ?", (raw_path,)))
@@ -215,11 +229,12 @@ class RecommendationIndex:
         offset = int(checkpoint["offset"]) if checkpoint else 0
         line_number = int(checkpoint["line_number"]) if checkpoint else 0
         total_errors = int(checkpoint["errors"]) if checkpoint else 0
+        inode = int(checkpoint["inode"]) if archived and checkpoint else stat.st_ino
         result = dict(indexed=0, errors=0, unknown_source_count=0, fetched=0,
                       bytes_read=0, budget_blocked=False)
-        if offset == stat.st_size and not reset:
+        if offset == size and not reset:
             return result
-        with path.open("rb") as handle:
+        with (gzip.open(path, "rb") if archived else path.open("rb")) as handle:
             handle.seek(offset)
             while result['fetched'] < max_rows and result['bytes_read'] < max_bytes:
                 raw_offset = handle.tell()
@@ -266,7 +281,8 @@ class RecommendationIndex:
                         offset=excluded.offset, line_number=excluded.line_number, errors=excluded.errors,
                         updated_at=excluded.updated_at
                     """,
-                    (raw_path, stat.st_ino, stat.st_size, offset, line_number, total_errors, _utc_now()),
+                    (raw_path, inode, offset if archived else stat.st_size, offset, line_number, total_errors,
+                     _utc_now()),
                 )
         return result
 
@@ -484,3 +500,22 @@ def _bounded_limit(limit: int | None) -> int:
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _source_path(path: Path) -> Path:
+    """The .jsonl a day was written as; checkpoints and raw_path keep this name after gzip."""
+    return path.with_name(path.name[:-3]) if path.suffix == ".gz" else path
+
+
+def _source_size(path: Path) -> int:
+    """Plaintext length of an event file: the gzip ISIZE trailer for an archive.
+
+    ISIZE is the length mod 2**32 of the last gzip member. A day is ~670 MB and the
+    retention script writes one member, so it is exact; were it ever wrong, the
+    archive would only be re-read from its checkpoint offset (nothing re-inserted).
+    """
+    if path.suffix != ".gz":
+        return path.stat().st_size
+    with path.open("rb") as stream:
+        stream.seek(-4, 2)
+        return int.from_bytes(stream.read(4), "little")

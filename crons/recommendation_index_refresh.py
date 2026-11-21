@@ -9,7 +9,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from reports.recommendation_index import RecommendationIndex
+from reports.recommendation_index import RecommendationIndex, _source_path, _source_size
 
 
 def _pending_bytes(index: RecommendationIndex) -> int:
@@ -22,7 +22,7 @@ def _pending_bytes(index: RecommendationIndex) -> int:
     total = 0
     for path in index._event_files(None):
         try:
-            total += max(0, path.stat().st_size - offsets.get(str(path.resolve()), 0))
+            total += max(0, _source_size(path) - offsets.get(str(_source_path(path.resolve())), 0))
         except OSError:
             continue
     return total

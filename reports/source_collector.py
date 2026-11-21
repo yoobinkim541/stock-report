@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import gzip
 import hashlib
 import html as html_mod
 import json
@@ -419,6 +420,19 @@ def _event_file(cache_dir: Path, dt: datetime) -> Path:
     return cache_dir / f"events-{dt.astimezone(KST).strftime('%Y-%m-%d')}.jsonl"
 
 
+def _readable_event_file(cache_dir: Path, dt: datetime) -> Path | None:
+    """That day's event file for reading: the live .jsonl, else its .jsonl.gz archive.
+
+    ~/bin/source-cache-retention.sh gzips finished days in place, so a day has one or
+    the other; the .jsonl wins if both exist (e.g. mid-compression).
+    """
+    path = _event_file(cache_dir, dt)
+    if path.exists():
+        return path
+    archived = path.with_name(path.name + ".gz")
+    return archived if archived.exists() else None
+
+
 def append_events(events: Iterable[dict], cache_dir: Path | str = DEFAULT_CACHE_DIR, now: datetime | None = None) -> int:
     now = now or datetime.now(KST)
     cache_dir = Path(cache_dir)
@@ -521,13 +535,58 @@ def append_events(events: Iterable[dict], cache_dir: Path | str = DEFAULT_CACHE_
         return len(rows)
 
 
+def _parse_event_line(raw: bytes) -> tuple[dict, datetime] | None:
+    """(row, collected_at) for one JSONL line, or None when the line is unusable."""
+    if not raw.strip():
+        return None
+    try:
+        row = json.loads(raw.decode("utf-8"))
+        return row, datetime.fromisoformat(row.get("collected_at", ""))
+    except (AttributeError, UnicodeDecodeError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def _iter_recent_gzip_rows(path: Path, cutoff: datetime):
+    """The tail walker's rows, in its newest-first order, from a .jsonl.gz archive.
+
+    gzip cannot seek backwards cheaply, so stream forward and keep the raw lines
+    after the last row older than ``cutoff`` (the tail walker stops at that row).
+    Lines are kept as bytes and parsed again on yield so a bounded caller does not
+    hold a decoded day. A day that ended by the cutoff is skipped without
+    decompressing: append_events names the file from the same clock it stamps into
+    ``collected_at``, so all its rows are older.
+    """
+    try:
+        day = datetime.strptime(path.name[len("events-"):len("events-YYYY-MM-DD")], "%Y-%m-%d")
+    except ValueError:
+        day = None
+    if day is not None and day.replace(tzinfo=KST) + timedelta(days=1) <= cutoff:
+        return
+    recent: list[bytes] = []
+    with gzip.open(path, "rb") as stream:
+        for raw in stream:
+            parsed = _parse_event_line(raw)
+            if parsed is None:
+                continue
+            if parsed[1] < cutoff:
+                recent.clear()
+            else:
+                recent.append(raw)
+    while recent:
+        yield _parse_event_line(recent.pop())[0]
+
+
 def _iter_recent_jsonl_rows(path: Path, cutoff: datetime, *, chunk_size: int = 1024 * 1024):
     """Yield recent JSONL rows from the file tail without loading the whole file.
 
     Event files are append-only and ``collected_at`` is assigned immediately before
     append. Walking backwards therefore lets recent, bounded callers stop after the
     requested number of rows instead of reading hundreds of megabytes of history.
+    A compressed day (.jsonl.gz) yields the same rows via _iter_recent_gzip_rows.
     """
+    if path.name.endswith(".gz"):
+        yield from _iter_recent_gzip_rows(path, cutoff)
+        return
     with path.open("rb") as stream:
         position = stream.seek(0, 2)
         pending = b""
@@ -544,13 +603,10 @@ def _iter_recent_jsonl_rows(path: Path, cutoff: datetime, *, chunk_size: int = 1
                 complete = parts
 
             for raw in reversed(complete):
-                if not raw.strip():
+                parsed = _parse_event_line(raw)
+                if parsed is None:
                     continue
-                try:
-                    row = json.loads(raw.decode("utf-8"))
-                    ts = datetime.fromisoformat(row.get("collected_at", ""))
-                except (AttributeError, UnicodeDecodeError, TypeError, ValueError, json.JSONDecodeError):
-                    continue
+                row, ts = parsed
                 if ts < cutoff:
                     return
                 yield row
@@ -584,8 +640,8 @@ def load_recent_events(cache_dir: Path | str = DEFAULT_CACHE_DIR, now: datetime 
     keep = None if fields is None else set(fields) | {"id", "collected_at"}
 
     for days_back in range((hours // 24) + 3):
-        path = _event_file(cache_dir, now - timedelta(days=days_back))
-        if not path.exists():
+        path = _readable_event_file(cache_dir, now - timedelta(days=days_back))
+        if path is None:
             continue
         rows = _iter_recent_jsonl_rows(path, cutoff)
         try:
@@ -2023,21 +2079,29 @@ def collect_once(cache_dir: Path | str = DEFAULT_CACHE_DIR, now: datetime | None
     return int(result["fetched"]), int(result["persisted"])
 
 
-def prune_old(cache_dir: Path | str = DEFAULT_CACHE_DIR, days: int = 14, now: datetime | None = None) -> int:
+def prune_old(cache_dir: Path | str = DEFAULT_CACHE_DIR, days: int = 90, now: datetime | None = None) -> int:
+    """Delete event days older than ``days`` (by file-name date, KST), .jsonl and .jsonl.gz.
+
+    Mirrors the delete step of ~/bin/source-cache-retention.sh (DELETE_DAYS=90): days
+    past the 14-day compression age are gzipped, not deleted, and stay readable.
+    """
     now = now or datetime.now(KST)
     cache_dir = Path(cache_dir)
     if not cache_dir.exists():
         return 0
     cutoff = now.astimezone(KST).date() - timedelta(days=days)
     removed = 0
-    for path in cache_dir.glob("events-*.jsonl"):
-        try:
-            day = datetime.strptime(path.stem.replace("events-", ""), "%Y-%m-%d").date()
-        except ValueError:
-            continue
-        if day < cutoff:
-            path.unlink()
-            removed += 1
+    for pattern in ("events-????-??-??.jsonl", "events-????-??-??.jsonl.gz"):
+        for path in cache_dir.glob(pattern):
+            stamp = path.name[len("events-"):len("events-YYYY-MM-DD")]
+            try:
+                day = datetime.strptime(stamp, "%Y-%m-%d").date()
+            except ValueError:
+                continue
+            if day < cutoff:
+                path.unlink(missing_ok=True)
+                (cache_dir / f"events-{stamp}.jsonl.lock").unlink(missing_ok=True)
+                removed += 1
     return removed
 
 

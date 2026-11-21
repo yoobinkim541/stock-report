@@ -69,8 +69,8 @@ def load_source_events(*, now=None, stats=None):
             database.execute('CREATE TABLE seen (cache INTEGER, id TEXT, PRIMARY KEY(cache, id))')
             for cache_number, cache in enumerate(caches):
                 for days_back in range(63):
-                    path = source_collector._event_file(Path(cache), now - timedelta(days=days_back))
-                    if not path.exists():
+                    path = source_collector._readable_event_file(Path(cache), now - timedelta(days=days_back))
+                    if path is None:
                         continue
                     rows = source_collector._iter_recent_jsonl_rows(path, cutoff)
                     try:

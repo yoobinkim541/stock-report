@@ -344,8 +344,8 @@ def _attach_article_context(candidates: list[dict], *, cache_dir=None, now=None)
     found = set()
     excluded_text_refs = set()
     for day in range(4):
-        path = collector._event_file(directory, now - timedelta(days=day))
-        if not path.exists():
+        path = collector._readable_event_file(directory, now - timedelta(days=day))
+        if path is None:
             continue
         rows = collector._iter_recent_jsonl_rows(path, cutoff)
         try:

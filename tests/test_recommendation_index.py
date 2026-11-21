@@ -251,3 +251,92 @@ def test_ingest_recovers_after_rotation_and_reports_invalid_json_health(tmp_path
     assert status["errors"] == 1
     assert status["fallback_count"] == 0
     assert status["lag_seconds"] >= 0
+
+
+def _gzip_in_place(path):
+    """What ~/bin/source-cache-retention.sh does to a finished day."""
+    import gzip
+
+    archived = path.with_name(path.name + ".gz")
+    with gzip.open(archived, "wb", compresslevel=6) as stream:
+        stream.write(path.read_bytes())
+    path.unlink()
+    return archived
+
+
+def _index_rows(database):
+    with sqlite3.connect(database) as connection:
+        return sorted(connection.execute("SELECT event_id, ticker, raw_path, raw_line FROM event_index"))
+
+
+def test_gzip_of_an_indexed_day_is_covered_by_its_jsonl_checkpoint(tmp_path):
+    """Compressing a loaded day must not re-read it, re-insert it, or show it as pending."""
+    from crons.recommendation_index_refresh import _pending_bytes
+
+    cache = tmp_path / "cache"
+    event_file = cache / "events-2026-09-23.jsonl"
+    at = datetime(2026, 9, 23, 8, 0, tzinfo=UTC)
+    _write_rows(event_file, [_event("saveticker", "NVDA", at), _event("arca", "AMD", at + timedelta(minutes=1))])
+    database = tmp_path / "index.sqlite"
+    index = RecommendationIndex(db_path=database, cache_dir=cache)
+    assert index.ingest()["indexed"] == 2
+    before = _index_rows(database)
+
+    _gzip_in_place(event_file)
+    result = index.ingest()
+
+    assert (result["fetched"], result["indexed"], result["bytes_read"], result["file_errors"]) == (0, 0, 0, 0)
+    assert _index_rows(database) == before
+    assert index.status()["checkpoint_count"] == 1
+    assert _pending_bytes(index) == 0
+
+
+def test_gzip_of_a_partly_indexed_day_resumes_at_the_checkpoint(tmp_path):
+    """Rows indexed before compression stay once; the rest come from the archive at the same offsets."""
+    cache = tmp_path / "cache"
+    event_file = cache / "events-2026-09-24.jsonl"
+    at = datetime(2026, 9, 24, 8, 0, tzinfo=UTC)
+    _write_rows(event_file, [_event(src, "MSFT", at + timedelta(minutes=i))
+                             for i, src in enumerate(["saveticker", "arca", "kalshi"])])
+    database = tmp_path / "index.sqlite"
+    plain = RecommendationIndex(db_path=tmp_path / "plain.sqlite", cache_dir=cache)
+    plain.ingest()
+    expected = _index_rows(tmp_path / "plain.sqlite")
+    index = RecommendationIndex(db_path=database, cache_dir=cache)
+    assert index.ingest(max_rows=1)["indexed"] == 1
+
+    _gzip_in_place(event_file)
+    resumed = index.ingest()
+
+    assert (resumed["fetched"], resumed["indexed"]) == (2, 2)
+    assert _index_rows(database) == expected
+    assert index.ingest()["fetched"] == 0
+
+
+def test_unindexed_gzip_day_is_loaded_once_under_its_jsonl_name(tmp_path):
+    cache = tmp_path / "cache"
+    event_file = cache / "events-2026-09-25.jsonl"
+    at = datetime(2026, 9, 25, 8, 0, tzinfo=UTC)
+    _write_rows(event_file, [_event("saveticker", "AAPL", at)])
+    _write_rows(cache / "events-2026-09-26.jsonl", [_event("arca", "AAPL", at + timedelta(days=1))])
+    _gzip_in_place(event_file)
+    database = tmp_path / "index.sqlite"
+    index = RecommendationIndex(db_path=database, cache_dir=cache)
+
+    assert index.ingest()["indexed"] == 2
+    assert index.ingest()["fetched"] == 0
+    assert {row[2] for row in _index_rows(database)} == {
+        str(event_file.resolve()), str((cache / "events-2026-09-26.jsonl").resolve())}
+
+
+def test_day_with_both_jsonl_and_gzip_is_read_from_jsonl_only(tmp_path):
+    cache = tmp_path / "cache"
+    event_file = cache / "events-2026-09-27.jsonl"
+    _write_rows(event_file, [_event("saveticker", "AAPL", datetime(2026, 9, 27, 8, 0, tzinfo=UTC))])
+    data = event_file.read_bytes()
+    _gzip_in_place(event_file)
+    event_file.write_bytes(data)
+    index = RecommendationIndex(db_path=tmp_path / "index.sqlite", cache_dir=cache)
+
+    assert index._event_files(None) == [event_file]
+    assert index.ingest()["fetched"] == 1
